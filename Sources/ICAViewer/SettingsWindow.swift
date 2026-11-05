@@ -6,7 +6,8 @@ import ICAKit
 /// Keychain only; the fields never show stored values. Scaling applies at connect; saving a change
 /// while sessions run offers to reconnect them. The shared folder (client drive M, docs/95 §A, D32)
 /// applies at the next connect, as does printing (docs/97 §6, PDF mode: receive jobs from the host's Citrix PDF
-/// Printer; which action the job window offers first).
+/// Printer; which action the job window offers first) and session audio (docs/98 §10.4: play session sounds,
+/// default on; the volume follows macOS).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -51,6 +52,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                                            "Druckaufträge empfangen (Citrix PDF Printer in der Sitzung)"),
                                     target: nil, action: nil)
     private let printActionPopup = NSPopUpButton()
+    private let audioBox = NSButton(checkboxWithTitle: loc("Play session sounds (volume follows the Mac)",
+                                                           "Sitzungstöne abspielen (Lautstärke wie am Mac)"),
+                                    target: nil, action: nil)
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -185,6 +189,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, readOnlyBox],
             [label(loc("Printing:", "Drucken:")), printBox],
             [NSGridCell.emptyContentView, printActionPopup],
+            [label(loc("Audio:", "Audio:")), audioBox],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -198,6 +203,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 9).topPadding = 12
         grid.row(at: 12).topPadding = 12
         grid.row(at: 15).topPadding = 12
+        grid.row(at: 17).topPadding = 12
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
                               target: self, action: #selector(forgetAll))
@@ -240,6 +246,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         selectScaling(ScalingSettings())
         selectDriveMapping(CDMSettings())
         selectPrinting(PrintSettings())
+        audioBox.state = AudioSettings.defaultEnabled ? .on : .off
         modeChanged()
     }
 
@@ -316,6 +323,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         vlog("printing: saved (\(settings.enabled ? "on" : "off"), \(settings.action.rawValue) first); on/off applies at the next connect")
     }
 
+    // MARK: Audio
+
+    private func saveAudio() {
+        var settings = AudioSettings.load(env: [:])
+        settings.enabled = audioBox.state == .on
+        guard settings != AudioSettings.load(env: [:]) else { return }
+        settings.save()
+        vlog("audio: saved (\(settings.enabled ? "on" : "off")); applies at the next connect")
+    }
+
     // MARK: Scaling
 
     private func selectScaling(_ settings: ScalingSettings) {
@@ -389,6 +406,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         selectScaling(ScalingSettings.load(env: [:]))
         selectDriveMapping(CDMSettings.load(env: [:]))
         selectPrinting(PrintSettings.load(env: [:]))
+        audioBox.state = AudioSettings.load(env: [:]).enabled ? .on : .off
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",
@@ -517,6 +535,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                 close()
                 saveDriveMapping()
                 savePrinting()
+                saveAudio()
                 saveScaling()
             } catch CredentialError.invalidTOTPSecret {
                 status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",

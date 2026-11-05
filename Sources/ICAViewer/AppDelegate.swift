@@ -147,6 +147,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Relaunch counters per resource for sessions that ended before they were established.
     private var retries: [String: LaunchRetry] = [:]
+    /// A relaunch after a session with CTXCAM dropped before it was established omits CTXCAM once (docs/98 §13 D1).
+    private var audioFallback = AudioFallback()
 
     /// `interactive`: the user chose the resource in the launcher. Automated launches (see `LaunchPolicy`)
     /// are limited to the test resources.
@@ -177,7 +179,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await store.logon()
                     ica = try await store.launch(resource)
                 }
-                let controller = try SessionController(name: resource.name, ica: ica)
+                let omitAudio = audioFallback.takeOmission(resource.name)
+                if omitAudio { vlog("audio: CTXCAM omitted for this relaunch of \(resource.name) (the previous session with it dropped before it was established)") }
+                let controller = try SessionController(name: resource.name, ica: ica, omitAudio: omitAudio)
                 clientNames[ObjectIdentifier(controller)] = WDLogon(ica: ica).clientName
                 controller.onEnded = { [weak self] c in
                     guard let self else { return }
@@ -191,6 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Counters restart once a session was established (next() resets) or retries are exhausted.
                     self.retries[resource.name] = decision == .giveUp ? nil : retry
                     if case let .relaunch(attempt, total, delay) = decision {
+                        if self.audioFallback.relaunching(resource.name, announcedAudio: c.announcedAudio, established: c.wasEstablished) {
+                            vlog("audio: the session announced CTXCAM and dropped before it was established; the relaunch omits CTXCAM once")
+                        }
                         self.sessions.removeAll { $0 === c }
                         vlog("session dropped before the seamless channel came up (\(c.endReason)); relaunching "
                              + "(attempt \(attempt)/\(total), in \(Int(delay)) s)")
@@ -201,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                         return
                     }
+                    self.audioFallback.clear(resource.name)
                     self.sessionEnded(c)
                 }
                 controller.onRelaunch = { [weak self] c in
