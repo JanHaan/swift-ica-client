@@ -229,6 +229,26 @@ case "cdmtest":
         fail("\(error)")
     }
 
+case "printtest":
+    // icactl printtest [resource] — client printing test, Notepad only (docs/97 §10 L1–L5): announces the PDF-mode
+    // CTXCPM module and logs every host command. In a session this run logged on itself: types a test line in
+    // Notepad, Ctrl+P, saves a framebuffer screenshot of the print dialog to .session/printtest-dialog.png; only
+    // with ICA_PRINTTEST_CONFIRM=1 and .session/printtest-confirm-<runid> created after that screenshot (the run id is
+    // logged) presses Enter and saves the job to .session/printtest.pdf, otherwise Esc. No Ctrl+P at all unless the
+    // host sent an ENUM and a *PDF* printer/driver name over CTXCPM (PrintTestGate). Never saves the document.
+    let name = args.first ?? "Notepad"
+    guard name == "Notepad" else { fail("printtest is limited to \"Notepad\"") }
+    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
+        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runPrintTest(ica: ica, confirm: ProcessInfo.processInfo.environment["ICA_PRINTTEST_CONFIRM"] == "1")
+    } catch {
+        fail("\(error)")
+    }
+
 case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)
@@ -247,6 +267,9 @@ default:
       icactl cliptest                    clipboard test in "Notepad" (Notepad): paste in, copy out, never saves
       icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
+      icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
+                                         .session/printtest-dialog.png, then Esc; ICA_PRINTTEST_CONFIRM=1: Enter only once
+                                         .session/printtest-confirm-<runid> appears (120 s), job to .session/printtest.pdf
       icactl sessions list [--names]     store sessions (Sessions/List + ListAvailable), read-only; ids as fingerprints
       icactl sessions probe              read-only live checks of docs/90 §11 items 1, 2, 4–7 (keys, counts, states)
       icactl sessions disconnect <id>    Sessions/DisconnectSessions; only sessions whose apps are all test resources
@@ -1136,4 +1159,255 @@ func runCDMTest(ica: ICAFile, save: Bool) async throws {
     for step in steps { say("  " + step) }
     say("end: \(ending)")
     try? FileManager.default.removeItem(at: root)
+}
+
+// MARK: - Printing test (docs/97 §10)
+
+func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let dialogPNG = sessionDir.appendingPathComponent("printtest-dialog.png")
+    let jobPDF = sessionDir.appendingPathComponent("printtest.pdf")
+    for url in [dialogPNG, jobPDF] { try? FileManager.default.removeItem(at: url) }
+    let runID = PrintTestGate.newRunID()
+    say("run \(runID); confirm: \(confirm ? "possible (Enter only with \(PrintTestGate.confirmFileName(runID: runID)) created after the screenshot)" : "no (screenshot, then Esc)")")
+    var config = WinstationDriver.Configuration()
+    config.logon = WDLogon(ica: ica)
+    config.display = WDDisplay(width: 1920, height: 1080)
+    let session = try ICASession(ica: ica, configuration: config, clipboard: nil, cdm: nil, printing: PrinterEngine.Config())
+    guard let printer = session.printer else { fail("no printing engine") }
+    let seamless = session.seamless
+
+    // Session-queue state.
+    var logon = FreshLogonDetector()
+    var windowsSeen = SeenWindows()
+    var appWindows: [UInt32] = []
+    var windowsAdded: [(id: UInt32, kind: TWIWindowKind, title: String)] = []
+    var commandLines: [String] = []
+    var jobs: [PrintJob] = []
+    var refused: [String] = []
+    var terminateReason: UInt8?
+    var channelBytes = 0
+    var channelWrites = 0
+    var firstHostCommand: Date?
+
+    printer.onEvent = { event in
+        say("cpm: \(event)")
+        switch event {
+        case .command(let line):
+            if firstHostCommand == nil { firstHostCommand = Date() }
+            commandLines.append(line)
+        case .job(let job): jobs.append(job)
+        case .jobRefused(let id, let reason): refused.append("job \(id): \(reason)")
+        case .stopped: break
+        }
+    }
+    seamless.onEvent = { event in
+        switch event {
+        case .channelReady:
+            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+        case .windowAdded(let w):
+            logon.windowAdded(appKey: w.appKey)
+            windowsSeen.note(w)
+            windowsAdded.append((w.id, w.kind, w.title))
+            if w.kind == .appWindow { appWindows.append(w.id) }
+            say("TWI window \(w.id) \(w.kind) \"\(w.title)\" app \(w.appKey)")
+        case .windowChanged(let w, _):
+            windowsSeen.note(w)
+        case .windowRemoved(let w):
+            appWindows.removeAll { $0 == w.id }
+        default: break
+        }
+    }
+    session.onThinwireInit = { info in
+        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+    }
+    let started = Date()
+    session.onEvent = { event in
+        switch event {
+        case .log(let text): say(text)
+        case .closed(let reason): say("session closed: \(reason)")
+        case .wd(let e):
+            switch e {
+            case .initResponseSent(let modules, _): say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+            case .initConnect(let remaining, let moduleClass, let payload):
+                say("← INIT_CONNECT remaining \(remaining) class \(moduleClass) (\(payload.count) B)")
+            case .connected: say("WD connected")
+            case .packet(let p) where p.channel == PrinterWire.channelNumber:
+                if channelWrites == 0 { say(String(format: "first host write on ch 4 after %.1f s: %@", Date().timeIntervalSince(started), hexLine(p.payload, limit: 32))) }
+                channelWrites += 1
+                channelBytes += p.payload.count
+            case .droppedChannelData(let channel, let bytes): say("dropped \(bytes) B on unregistered ch \(channel)")
+            case .terminate(let reason):
+                terminateReason = reason
+                say("← TERMINATE reason \(reason)")
+            case .failure(let text): say("WD failure: \(text)")
+            default: break
+            }
+        default: break
+        }
+    }
+
+    func key(_ code: UInt8, ctrl: Bool = false) {
+        session.sendInput { wd in
+            if ctrl { wd.keyScancode(0x1D, up: false) }
+            wd.keyScancode(code, up: false)
+            wd.keyScancode(code, up: true)
+            if ctrl { wd.keyScancode(0x1D, up: true) }
+        }
+    }
+    func type(_ text: String) {
+        session.sendInput { wd in
+            for unit in text.utf16 {
+                wd.keyUnicode(unit, flags: [])
+                wd.keyUnicode(unit, flags: .up)
+            }
+        }
+    }
+    /// Framebuffer PNG (0600) after a full redraw request.
+    func screenshot(_ url: URL) async -> Bool {
+        session.send { wd, _ in wd.redraw() }
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        return await onSession(session) {
+            guard let fb = session.thinwire.framebuffer, fb.writePNG(to: url) else { return false }
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        }
+    }
+
+    try await session.start()
+    let notepad: () -> UInt32? = {
+        appWindows.first { id in
+            if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == "notepad.exe" }
+            let key = windowsSeen.appKey(id)?.lowercased() ?? ""
+            return key.contains("notepad") || key == "app:editor ekm"
+        }
+    }
+    // L1/L2: what the host sends on ch 4 without any print (it should speak first, at session start).
+    let found = await waitFor(session, 150) { logon.isFresh && notepad() != nil }
+    try await Task.sleep(nanoseconds: 5_000_000_000)
+    let fresh = await onSession(session) { logon.isFresh }
+    let target = await onSession(session) { notepad() }
+    let atStart = await onSession(session) { commandLines }
+    say("host commands before any print: \(atStart.count)")
+    var steps: [String] = []
+    if !fresh {
+        say("not a fresh logon by this run: no input is sent (this may be an existing session)")
+    } else if !found || target == nil {
+        say("no Notepad window: no input is sent")
+    } else if let target, case .refuse(let why) = await onSession(session, {
+        PrintTestGate.mayOpenDialog(enumCount: printer.commandCounts["ENUM"] ?? 0, hostNames: printer.hostNames)
+    }) {
+        // Gate 1: without the host's PDF printer on CTXCPM, Enter in a dialog could print on paper: no Ctrl+P at all.
+        steps.append("gate: \(why); no Ctrl+P, Esc only")
+        say(steps.last!)
+        session.send { _, twi in twi.activate(windowId: target) }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        key(0x01)
+    } else if let target {
+        session.send { _, twi in twi.activate(windowId: target) }
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        let line = "CTXCPM printtest " + ISO8601DateFormatter().string(from: Date())
+        say("(a) type a test line (\(line.count) chars), Ctrl+P")
+        type(line)
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let before = await onSession(session) { Set(windowsAdded.map(\.id)) }
+        key(0x19, ctrl: true)
+        let dialog = await waitFor(session, 20) { windowsAdded.contains { !before.contains($0.id) && $0.kind == .appWindow } }
+        let added = await onSession(session) { windowsAdded.filter { !before.contains($0.id) } }
+        say("windows after Ctrl+P: " + added.map { "\($0.id) \($0.kind) \"\($0.title)\"" }.joined(separator: ", "))
+        if !dialog {
+            steps.append("dialog: no new window within 20 s after Ctrl+P; nothing pressed")
+            say(steps.last!)
+        } else {
+            try await Task.sleep(nanoseconds: 4_000_000_000)   // let the dialog load its printer list and paint
+            let shot = await screenshot(dialogPNG) ? Date() : nil
+            steps.append(shot != nil ? "dialog: screenshot saved to \(dialogPNG.path)" : "dialog: screenshot FAILED (no framebuffer)")
+            say(steps.last!)
+            // Gate 2: a confirmation file for THIS run, created after the orchestrator viewed THIS screenshot.
+            let confirmFile = sessionDir.appendingPathComponent(PrintTestGate.confirmFileName(runID: runID))
+            var created: Date?
+            if confirm, shot != nil {
+                say("waiting up to \(Int(PrintTestGate.confirmTimeout)) s for \(confirmFile.path) (run \(runID)); create it only after checking "
+                    + "that \(dialogPNG.lastPathComponent) shows the client PDF printer selected")
+                let deadline = Date().addingTimeInterval(PrintTestGate.confirmTimeout)
+                while Date() < deadline, !session.isClosed {
+                    if let date = PrintTestGate.confirmationDate(at: confirmFile) { created = date; break }
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+            let dialogGate = await onSession(session) {
+                PrintTestGate.mayOpenDialog(enumCount: printer.commandCounts["ENUM"] ?? 0, hostNames: printer.hostNames)
+            }
+            let decision = PrintTestGate.mayConfirm(confirmEnv: confirm, dialogGate: dialogGate, screenshotSaved: shot, confirmCreated: created)
+            if decision == .proceed {
+                say("(b) Enter in the print dialog (confirmed for run \(runID))")
+                key(0x1C)
+                let got = await waitFor(session, 90) { !jobs.isEmpty || !refused.isEmpty }
+                if let job = await onSession(session, { jobs.first }) {
+                    FileManager.default.createFile(atPath: jobPDF.path, contents: job.data, attributes: [.posixPermissions: 0o600])
+                    switch PrintDocument.inspect(job.data) {
+                    case .success(let info):
+                        steps.append("job \(job.id): \(job.data.count) B in \(job.writes) writes, printer \"\(job.printerName)\"; PDF \(info.pageCount) page(s), "
+                                     + "%%EOF \(info.hasEOF ? "yes" : "no"), title \(info.title?.count ?? 0) chars, producer \(info.producerLength) chars; saved to \(jobPDF.path)")
+                    case .failure(let why):
+                        steps.append("job \(job.id): \(job.data.count) B, NOT a usable PDF (\(why)); head \(hexLine([UInt8](job.data.prefix(16)), limit: 16)); saved to \(jobPDF.path)")
+                    }
+                } else {
+                    steps.append(got ? "job: refused (\(await onSession(session) { refused }.joined(separator: "; ")))" : "job: none within 90 s")
+                    key(0x01)   // close a dialog that may still be open
+                }
+                say(steps.last!)
+            } else {
+                if case .refuse(let why) = decision { say("not confirmed: \(why)") }
+                say("(b) Esc (no print)")
+                key(0x01)
+            }
+            try? FileManager.default.removeItem(at: confirmFile)
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        // Remove the test line again (Ctrl+A, Delete); nothing is ever saved.
+        session.send { _, twi in twi.activate(windowId: target) }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        key(0x1E, ctrl: true)
+        session.sendInput { wd in
+            wd.keyScancodes([0xE0, 0x53], up: false)
+            wd.keyScancodes([0xE0, 0x53], up: true)
+        }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+    }
+
+    // End: log off only a fresh session (the unsaved Notepad text is discarded by the logoff); otherwise
+    // disconnect with CGP FINISH.
+    var ending: String
+    if session.isClosed {
+        ending = "session ended by the server" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+    } else if !fresh {
+        await session.close()
+        ending = "disconnected (CGP FINISH), not logged off"
+    } else {
+        let sent: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        if sent {
+            say("→ TWI LOGOFF")
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+        }
+        if session.isClosed {
+            ending = "logged off" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+        } else {
+            await session.close()
+            ending = sent ? "logoff sent but the session did not end in 25 s (maybe a save prompt); disconnected" : "TWI not ready; disconnected"
+        }
+    }
+    let summary = await onSession(session) {
+        (commandLines, printer.commandCounts, printer.bytesAcknowledged, channelBytes, channelWrites, refused, firstHostCommand)
+    }
+    say("\n=== printtest summary ===")
+    say("CTXCPM: host writes \(summary.4), \(summary.3) B; acknowledged \(summary.2) B; first command "
+        + (summary.6.map { String(format: "after %.1f s", $0.timeIntervalSince(started)) } ?? "never"))
+    say("by command: " + summary.1.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    for line in summary.0.prefix(60) { say("  " + line) }
+    for line in summary.5 { say("  dropped " + line) }
+    say("fresh logon: \(fresh)")
+    for step in steps { say("  " + step) }
+    say("end: \(ending)")
 }

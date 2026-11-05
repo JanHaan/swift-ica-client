@@ -92,11 +92,13 @@ final class SessionController: NSObject {
         // ICA_TW_H264=0: advertise only the compatible-mode Thinwire caps (idle-repaint experiment).
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
-        session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig())
+        session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
+                                 printing: Self.printingConfig())
         super.init()
         keyboard.controller = self
         setUpClipboard()
         setUpDriveMapping()
+        setUpPrinting()
         session.seamless.setMonitors(layout.twiMonitors)
         session.pauseResumeOnThinwireInit = ProcessInfo.processInfo.environment["ICA_TWI_PAUSE_RESUME"] != "0"
         wireCallbacks()
@@ -857,6 +859,33 @@ final class SessionController: NSObject {
     private func setUpDriveMapping() {
         // Session queue. Names, sizes, statuses and paths relative to the shared folder only.
         session.cdm?.onEvent = { event in vlog("cdm: \(event)") }
+    }
+
+    // MARK: Printing (docs/97, PDF mode)
+
+    /// Printing on (Settings; ICA_PRINTING overrides): announce CTXCPM so the host can create its Citrix PDF
+    /// Printer for this client; nil: no module.
+    static func printingConfig() -> PrinterEngine.Config? {
+        let settings = PrintSettings.load()
+        guard settings.enabled else {
+            vlog("printing: off")
+            return nil
+        }
+        vlog("printing: on (PDF mode; \(settings.action == .preview ? "Open in Preview" : "Print…") first)")
+        return PrinterEngine.Config()
+    }
+
+    private func setUpPrinting() {
+        guard let engine = session.printer else { return }
+        PrintJobsController.shared.prepare()
+        let source = displayName(name)
+        // Session queue. Commands, tags and sizes only; the job's data goes to the main thread untouched.
+        engine.onEvent = { event in
+            vlog("print: \(event)")
+            if case .job(let job) = event {
+                DispatchQueue.main.async { PrintJobsController.shared.add(job, source: source) }
+            }
+        }
     }
 
     // MARK: Clipboard (docs/70 §5.4, §5.6)
