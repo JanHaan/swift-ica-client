@@ -5,22 +5,24 @@ import Testing
 import UniformTypeIdentifiers
 @testable import ICAKit
 
-/// Replays real channel-9 payloads captured by `icactl session` into `.session/ch9-<seq>.bin`.
+/// Replays real channel-9 payloads captured with `ICA_CAPTURE_REPLAY=1 icactl session` into
+/// `.session/replay/ch9-<seq>.bin` (plain runs write to `.session/last/`, so they never replace this set).
 /// Skipped when no capture exists. Captures stay in `.session/` and are never copied into the repo.
-/// Writes the final framebuffer to `.session/replay-ch9.png`; THINWIRE_REPLAY_PNG=<path> writes a second copy,
+/// Writes the final framebuffer to `.session/replay/replay-ch9.png`; THINWIRE_REPLAY_PNG=<path> writes a second copy,
 /// THINWIRE_REPLAY_POINTERS=<prefix> writes every pointer shape.
 @Test func thinwireReplayCapturedPayloads() throws {
     let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent(".session")
+        .appendingPathComponent(".session/replay")
     let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
         .filter { $0.hasPrefix("ch9-") && $0.hasSuffix(".bin") }
         .sorted { (Int($0.dropFirst(4).dropLast(4)) ?? 0) < (Int($1.dropFirst(4).dropLast(4)) ?? 0) }
     guard !names.isEmpty else { return }   // no capture: nothing to replay
 
+    let payloads = try names.map { try Data(contentsOf: dir.appendingPathComponent($0)) }
     let sink = ThinwireTestSink()
     let e = ThinwireEngine()
     sink.attach(e)
-    for n in names { e.receive(try Data(contentsOf: dir.appendingPathComponent(n))) }
+    for p in payloads { e.receive(p) }
 
     let s = e.stats
     let ops = s.opcodes.sorted { $0.key < $1.key }.map { String(format: "%02X:%d", $0.key, $0.value) }.joined(separator: " ")
@@ -36,13 +38,30 @@ import UniformTypeIdentifiers
     print(report)
 
     // Final framebuffer for inspection (stays in .session/, never in the repo).
-    if let fb = e.framebuffer {
-        // The capture ends with END_OF_FRAME, so the front surface must equal the back buffer.
-        var mismatches = 0
-        for y in stride(from: 0, to: fb.height, by: 3) {
-            for x in stride(from: 0, to: fb.width, by: 3) where fb.pixel(x: x, y: y) != fb.backPixel(x: x, y: y) { mismatches += 1 }
+    // Right after a present the front surface must equal the back buffer. A capture may end
+    // mid-frame (live captures stop at 300 payloads), so replay once more and check at the last
+    // completed END_OF_FRAME rather than after the trailing partial frame.
+    let presents = sink.updates.count
+    if presents > 0 {
+        let check = ThinwireEngine()
+        let checkSink = ThinwireTestSink()
+        checkSink.attach(check)
+        var seen = 0
+        var mismatches: Int?
+        check.onUpdate = { [unowned check] _ in
+            seen += 1
+            guard seen == presents, let fb = check.framebuffer else { return }
+            var n = 0
+            for y in stride(from: 0, to: fb.height, by: 3) {
+                for x in stride(from: 0, to: fb.width, by: 3) where fb.pixel(x: x, y: y) != fb.backPixel(x: x, y: y) { n += 1 }
+            }
+            mismatches = n
         }
-        #expect(mismatches == 0, "front differs from back after the last present")
+        for p in payloads { check.receive(p) }
+        withExtendedLifetime(checkSink) {}
+        #expect(mismatches == 0, "front differs from back at the last present (\(String(describing: mismatches)))")
+    }
+    if let fb = e.framebuffer {
         let out = dir.appendingPathComponent("replay-ch9.png")
         #expect(fb.writePNG(to: out))
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: out.path)
@@ -66,7 +85,7 @@ import UniformTypeIdentifiers
 /// Meaningful in release: `swift test -c release --filter Thinwire`. Skipped without captures.
 @Test func thinwireReplayBenchmark() throws {
     let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent(".session")
+        .appendingPathComponent(".session/replay")
     let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
         .filter { $0.hasPrefix("ch9-") && $0.hasSuffix(".bin") }
         .sorted { (Int($0.dropFirst(4).dropLast(4)) ?? 0) < (Int($1.dropFirst(4).dropLast(4)) ?? 0) }

@@ -20,14 +20,24 @@ final class SessionController: NSObject {
     /// The app delegate shows it in the launcher with Show / Log off.
     var onParkedChanged: ((SessionController) -> Void)?
     private(set) var isParked = false
+    /// The user chose "Reconnect" after session reliability gave up: relaunch the same resource through
+    /// the store, which reconnects to the now-disconnected session (docs/20 §3.12.11, D18). Without
+    /// it a give-up ends the session like any other close.
+    var onRelaunch: ((SessionController) -> Void)?
+    /// The CGP link is down and a resume is pending (docs/20 §3.12.3): user input is dropped, windows
+    /// stay as they are under a dark overlay.
+    private(set) var inputBlocked = false
+    /// Overlay alpha while suspended (nil = none), from the server's cap 9 dimming (§3.12.9).
+    private(set) var dimAlpha: CGFloat?
+    private var gaveUp: CGPTransport.GiveUp?
+    private lazy var hud = ReconnectHUD()
     /// Evidence that this run logged the session on itself: the logon UI (logonui.exe) appeared and the
     /// post-logon TWI host init came ≥ 5 s later (live fresh logons: 10–16 s; a reconnect after the
     /// logon UI: 1.7 s; a plain reconnect shows no logon UI at all). Anything else counts as a
     /// reconnect to an existing, possibly the user's own, session.
-    private(set) var sawLogonUI = false
-    private var logonUIAt: Date?
-    private var hostInits = 0
-    private(set) var freshLogon = false
+    private var logon = FreshLogonDetector()
+    var sawLogonUI: Bool { logon.sawLogonUI }
+    var freshLogon: Bool { logon.isFresh }
 
     private(set) var surface: IOSurfaceRef?
     private(set) var surfaceSize = CGSize.zero
@@ -81,9 +91,10 @@ final class SessionController: NSObject {
         // ICA_TW_H264=0: advertise only the compatible-mode Thinwire caps (idle-repaint experiment).
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
-        session = try ICASession(ica: ica, configuration: config)
+        session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig())
         super.init()
         keyboard.controller = self
+        setUpClipboard()
         session.seamless.setMonitors(monitors.map(\.twi))
         session.pauseResumeOnThinwireInit = ProcessInfo.processInfo.environment["ICA_TWI_PAUSE_RESUME"] != "0"
         wireCallbacks()
@@ -143,6 +154,9 @@ final class SessionController: NSObject {
             switch event {
             case .closed(let reason): DispatchQueue.main.async { self?.sessionClosed(reason) }
             case .log(let text): vlog(text)
+            case .suspended(let info): DispatchQueue.main.async { self?.linkSuspended(info) }
+            case .resumed: DispatchQueue.main.async { self?.linkResumed() }
+            case .gaveUp(let info): DispatchQueue.main.async { self?.gaveUp = info }
             case .wd(let e):
                 switch e {
                 case .connected:
@@ -293,15 +307,10 @@ final class SessionController: NSObject {
         fpsTimer = timer
     }
 
-    private var thinwireInits = 0
-
     private func surfaceChanged(_ surface: IOSurfaceRef?, info: ThinwireSessionInfo) {
         // The post-logon Thinwire INIT is the most reliable logon marker: our PAUSE/RESUME after it
         // makes the host answer with CLOSE/OPEN instead of a second TWI host init.
-        thinwireInits += 1
-        if thinwireInits >= 2, !freshLogon, let t = logonUIAt {
-            let gap = Date().timeIntervalSince(t)
-            freshLogon = gap >= 5
+        if let gap = logon.thinwireInit() {
             vlog(freshLogon ? "fresh logon (logon UI, then Thinwire INIT after \(Int(gap)) s)"
                             : String(format: "reconnect pattern (Thinwire INIT %.1f s after the logon UI)", gap))
         }
@@ -387,11 +396,9 @@ final class SessionController: NSObject {
         switch event {
         case .channelReady(let host):
             reachedSeamless = true
-            hostInits += 1
-            if hostInits >= 2, !freshLogon, let t = logonUIAt {
-                freshLogon = Date().timeIntervalSince(t) >= 5
-                vlog(freshLogon ? "fresh logon (logon UI, then host init after \(Int(Date().timeIntervalSince(t))) s)"
-                                : "reconnect pattern (host init \(String(format: "%.1f", Date().timeIntervalSince(t))) s after the logon UI)")
+            if let gap = logon.hostInit() {
+                vlog(freshLogon ? "fresh logon (logon UI, then host init after \(Int(gap)) s)"
+                                : "reconnect pattern (host init \(String(format: "%.1f", gap)) s after the logon UI)")
             }
             vlog(String(format: "TWI host init: flags 0x%08x, version %d, desktop %dx%d", host.flags.rawValue, host.hostVersion,
                         host.desktopWidth, host.desktopHeight))
@@ -404,7 +411,7 @@ final class SessionController: NSObject {
         case .windowAdded(let w):
             infos[w.id] = w
             noteActivity()
-            if w.appKey.lowercased().hasSuffix("\\logonui.exe"), logonUIAt == nil { sawLogonUI = true; logonUIAt = Date() }
+            logon.windowAdded(appKey: w.appKey)
             vlog("TWI window \(String(w.id, radix: 16)) added: \(w.kind) \(safeTitle(w)) rect \(w.windowRect.left),\(w.windowRect.top) \(w.windowRect.width)x\(w.windowRect.height) app \(w.appKey)")
             materialise(w)
         case .windowChanged(let w, let changes):
@@ -483,6 +490,7 @@ final class SessionController: NSObject {
         guard w.kind != .hidden, windows[w.id] == nil else { return }
         let remote = RemoteWindow(info: w, controller: self)
         windows[w.id] = remote
+        if let dimAlpha { remote.setDimmed(dimAlpha) }
         remote.show(activate: w.kind == .appWindow && (foreground == w.id || appWindowCount == 1))
         if w.kind == .appWindow {
             sawAppWindow = true
@@ -588,19 +596,33 @@ final class SessionController: NSObject {
 
     // MARK: Requests (main → session queue)
 
+    /// Mouse buttons down on the host (button-down state → its up state) and the last position, so a
+    /// suspend can release them like `keyboard.releaseAll()`.
+    private var buttonsDown: [UInt8: WDBuild.MouseState] = [:]
+    private var lastMouse = (x: 0, y: 0)
+    private static let buttonUps: [(down: WDBuild.MouseState, up: WDBuild.MouseState)] =
+        [(.leftDown, .leftUp), (.rightDown, .rightUp), (.middleDown, .middleUp)]
+
     func mouse(x: Int, y: Int, state: WDBuild.MouseState) {
+        guard !inputBlocked else { return }
         noteActivity()
         let display = session.wd.configuration.display
         let x = min(max(x, 0), display.width - 1), y = min(max(y, 0), display.height - 1)
-        session.send { wd, _ in
+        lastMouse = (x, y)
+        for pair in Self.buttonUps {
+            if state.contains(pair.down) { buttonsDown[pair.down.rawValue] = pair.up }
+            if state.contains(pair.up) { buttonsDown[pair.down.rawValue] = nil }
+        }
+        sendInput(dropWhileSuspended: true) { wd in
             if state == .moved { wd.mouse(x: x, y: y, state: .moved) }
             else { wd.mouse([(x, y, .moved), (x, y, state)]) }
         }
     }
 
     func wheel(x: Int, y: Int, delta: Int16) {
+        guard !inputBlocked else { return }
         noteActivity()
-        session.send { wd, _ in wd.wheel(x: x, y: y, delta: delta) }
+        sendInput(dropWhileSuspended: true) { wd in wd.wheel(x: x, y: y, delta: delta) }
     }
 
     func moveResize(id: UInt32, rect: TWIRect) {
@@ -612,6 +634,7 @@ final class SessionController: NSObject {
     }
 
     func windowBecameKey(_ w: RemoteWindow) {
+        clipboardCheck("window key")
         guard w.isApp, foreground != w.info.id else { return }
         let id = w.info.id
         vlog("→ ACTIVATE \(String(id, radix: 16)) (window became key)")
@@ -693,10 +716,313 @@ final class SessionController: NSObject {
         pendingLogoff?.cancel()
         statsTimer?.cancel()
         fpsTimer?.invalidate()
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+        clipboardSync?.channelClosed()
         setParked(false)
         vlog("session \(name) closed: \(reason)")
-        for id in Array(windows.keys) { remove(id) }
+        if let gaveUp, gaveUp.offerRelaunch, onRelaunch != nil {
+            // Keep the dimmed windows until the user picks Reconnect or Close; never relaunch silently.
+            inputBlocked = true
+            setDim(dimAlpha ?? Self.dimAlpha(nil))
+            hud.onReconnect = { [weak self] in
+                guard let self else { return }
+                vlog("reconnect chosen after give-up: relaunching \(self.name)")
+                self.tearDown()
+                self.onRelaunch?(self)
+            }
+            hud.onClose = { [weak self] in
+                guard let self else { return }
+                vlog("close chosen after give-up")
+                self.tearDown()
+                self.onEnded?(self)
+            }
+            hud.showGaveUp(name: name, message: gaveUp.message, notBefore: gaveUp.relaunchNotBefore)
+            return
+        }
+        tearDown()
         onEnded?(self)
+    }
+
+    private func tearDown() {
+        hud.hide()
+        for id in Array(windows.keys) { remove(id) }
+    }
+
+    // MARK: Clipboard (docs/70 §5.4, §5.6)
+
+    private var clipboardSync: ClipboardSync?
+    private var clipboardTimer: Timer?
+
+    /// ICA_CLIPBOARD: unset/on = both ways; 0/off = no CTXCLIP module at all; to-mac / to-host = one
+    /// direction only (§5.7). ICA_CLIP_IMAGES=0: text and HTML/RTF only.
+    static func clipboardConfig(_ env: [String: String] = ProcessInfo.processInfo.environment) -> ClipboardEngine.Config? {
+        var config = ClipboardEngine.Config()
+        switch env["ICA_CLIPBOARD"]?.lowercased() {
+        case "0", "off", "no": return nil
+        case "to-mac": config.macToHost = false
+        case "to-host": config.hostToMac = false
+        default: break
+        }
+        if env["ICA_CLIP_IMAGES"] == "0" { config.images = false }
+        return config
+    }
+
+    private func setUpClipboard() {
+        guard let engine = session.clipboard else { return vlog("clipboard: off (ICA_CLIPBOARD)") }
+        // Read no image (main thread work) unless it can go to the host; read nothing if Mac → host is off.
+        let sync = ClipboardSync(pasteboard: SystemPasteboard(readImages: engine.config.images && engine.config.macToHost))
+        sync.readsContent = engine.config.macToHost
+        let session = self.session
+        sync.announce = { session.clipboardAnnounce($0) }
+        sync.log = { vlog("clipboard: " + $0) }
+        clipboardSync = sync
+        // Session queue. Descriptions carry ids and sizes only, never contents.
+        engine.onEvent = { [weak self] event in
+            vlog("clipboard: \(event)")
+            switch event {
+            case .ready:
+                DispatchQueue.main.async { self?.clipboardReady() }
+            case .hostClipboard(let content, _, let echo):
+                DispatchQueue.main.async { self?.clipboardSync?.hostContent(content, echo: echo) }
+            default:
+                break
+            }
+        }
+    }
+
+    /// READY: announce what the Mac holds, then poll every 500 ms while the app is active.
+    private func clipboardReady() {
+        guard !ended, let sync = clipboardSync else { return }
+        sync.channelReady()
+        guard clipboardTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard NSApp.isActive else { return }
+            self?.clipboardCheck("poll")
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        clipboardTimer = timer
+    }
+
+    /// A trigger point (app active, window key, poll). Reads only `changeCount` unless it changed.
+    func clipboardCheck(_ reason: String) {
+        guard !ended else { return }
+        clipboardSync?.check(reason)
+    }
+
+    /// Right before Cmd-V/Ctrl-V goes to the host. If a new announce was just queued, all input (keys,
+    /// mouse, wheel) is held briefly so the host has the list before the paste (§5.4).
+    func clipboardBeforePaste() {
+        guard !ended, let sync = clipboardSync, sync.check("paste key") else { return }
+        holdInput(for: pasteDelay)
+    }
+
+    // MARK: Input path
+
+    /// ICA_CLIP_PASTE_DELAY_MS (default 50; the reference waits 5 ms, 400 ms in one Mac mode).
+    private let pasteDelay = (Double(ProcessInfo.processInfo.environment["ICA_CLIP_PASTE_DELAY_MS"] ?? "") ?? 50) / 1000
+    /// Input held back while a clipboard announce gets ahead of a paste; nil when nothing is held. Order
+    /// is kept: everything queues behind the held input. `dropWhileSuspended`: mouse and wheel (dropped
+    /// while suspended, §3.12.3) versus keys (queued, so key-ups are not lost).
+    private var heldInput: [(dropWhileSuspended: Bool, body: (WinstationDriver) -> Void)]?
+
+    /// The one way user input goes to the session.
+    func sendInput(dropWhileSuspended: Bool, _ body: @escaping (WinstationDriver) -> Void) {
+        if heldInput != nil { heldInput!.append((dropWhileSuspended, body)); return }
+        if dropWhileSuspended { session.sendInput(body) } else { session.send { wd, _ in body(wd) } }
+    }
+
+    private func holdInput(for delay: TimeInterval) {
+        guard heldInput == nil, delay > 0 else { return }
+        heldInput = []
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, let held = self.heldInput else { return }
+            self.heldInput = nil
+            // Both paths run on the session queue in call order.
+            for item in held {
+                if item.dropWhileSuspended { self.session.sendInput(item.body) } else { self.session.send { wd, _ in item.body(wd) } }
+            }
+        }
+    }
+
+    // MARK: Session reliability (docs/20 §3.12.9)
+
+    /// Overlay alpha = (100 − dimming %) / 100; without a server cap 9 the Citrix default 80 %.
+    static func dimAlpha(_ dimming: Int?) -> CGFloat { CGFloat(100 - min(100, max(0, dimming ?? 80))) / 100 }
+
+    private func setDim(_ alpha: CGFloat?) {
+        dimAlpha = alpha
+        for w in windows.values { w.setDimmed(alpha) }
+        for w in limbo.values { w.setDimmed(alpha) }
+    }
+
+    private func linkSuspended(_ info: CGPTransport.Suspension) {
+        guard !ended else { return }
+        vlog("session \(name) suspended (\(info.reason)): input off, windows kept")
+        // Keys and mouse buttons held right now: their ups are queued by CGP and reach the host after
+        // the resume (input that follows is dropped).
+        keyboard.releaseAll()
+        let ups = Array(buttonsDown.values)
+        buttonsDown.removeAll()
+        let (x, y) = lastMouse
+        if !ups.isEmpty { session.send { wd, _ in ups.forEach { wd.mouse(x: x, y: y, state: $0) } } }
+        inputBlocked = true
+        setDim(Self.dimAlpha(info.dimming))
+        hud.showSuspended(name: name, deadline: info.deadline)
+    }
+
+    private func linkResumed() {
+        guard !ended else { return }
+        vlog("session \(name) resumed: input on")
+        inputBlocked = false
+        setDim(nil)
+        hud.hide()
+        noteActivity()
+    }
+}
+
+/// Small status panel for a suspended session ("Connection interrupted — reconnecting… (2:45)") and,
+/// after a give-up, the message with Reconnect / Close. Borderless, non-activating and outside the
+/// window cycle, so switchers keep seeing only the remote windows.
+final class ReconnectHUD: NSObject {
+    var onReconnect: (() -> Void)?
+    var onClose: (() -> Void)?
+
+    private let panel: NSPanel
+    private let label = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let buttons = NSStackView()
+    private let reconnectButton = NSButton(title: loc("Reconnect", "Neu verbinden"), target: nil, action: nil)
+    private let closeButton = NSButton(title: loc("Close", "Schließen"), target: nil, action: nil)
+    private var timer: Timer?
+    private var update: (() -> Void)?
+    /// Demo mode: show this many seconds instead of counting down.
+    var fixedClock: TimeInterval?
+    var windowNumber: Int { panel.windowNumber }
+    var frame: NSRect { panel.frame }
+    func setOrigin(_ origin: NSPoint) { panel.setFrameOrigin(origin) }
+
+    override init() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 60),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        super.init()
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isReleasedWhenClosed = false
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.state = .active
+        effect.blendingMode = .behindWindow
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = 10
+        effect.layer?.masksToBounds = true
+        label.font = .boldSystemFont(ofSize: 13)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        reconnectButton.target = self
+        reconnectButton.action = #selector(reconnectPressed)
+        reconnectButton.keyEquivalent = "\r"
+        closeButton.target = self
+        closeButton.action = #selector(closePressed)
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.addArrangedSubview(closeButton)
+        buttons.addArrangedSubview(reconnectButton)
+        let stack = NSStackView(views: [label, detail, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor), stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: effect.topAnchor), stack.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
+        ])
+        panel.contentView = effect
+    }
+
+    private func clock(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int((fixedClock ?? seconds).rounded(.up)))
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    func showSuspended(name: String, deadline: Date) {
+        buttons.isHidden = true
+        label.stringValue = displayName(name)
+        run { [weak self] in
+            guard let self else { return }
+            let left = clock(deadline.timeIntervalSinceNow)
+            self.detail.stringValue = loc("Connection interrupted — reconnecting… (\(left))",
+                                          "Verbindung unterbrochen – neuer Verbindungsversuch… (\(left))")
+        }
+    }
+
+    func showGaveUp(name: String, message: String, notBefore: Date?) {
+        buttons.isHidden = false
+        closeButton.isHidden = false
+        reconnectButton.isHidden = false
+        label.stringValue = displayName(name)
+        detail.stringValue = message
+        run { [weak self] in
+            guard let self else { return }
+            // Until the server's SR hold ends, a relaunch would not reconnect yet (docs/20 §3.12.11).
+            if let notBefore, notBefore.timeIntervalSinceNow > 0 {
+                self.reconnectButton.isEnabled = false
+                self.reconnectButton.title = loc("Reconnect", "Neu verbinden") + " (\(clock(notBefore.timeIntervalSinceNow)))"
+            } else {
+                self.reconnectButton.isEnabled = true
+                self.reconnectButton.title = loc("Reconnect", "Neu verbinden")
+            }
+        }
+    }
+
+    func hide() {
+        timer?.invalidate()
+        timer = nil
+        update = nil
+        panel.orderOut(nil)
+    }
+
+    /// Applies `refresh` now and once a second, then sizes and places the panel (top centre of the
+    /// main screen).
+    private func run(_ refresh: @escaping () -> Void) {
+        update = refresh
+        refresh()
+        layoutPanel()
+        timer?.invalidate()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.update?() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        panel.orderFrontRegardless()
+    }
+
+    private func layoutPanel() {
+        guard let content = panel.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        var size = content.fittingSize
+        size.width = max(size.width, 360)
+        panel.setContentSize(size)
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let area = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.maxY - size.height - 12))
+    }
+
+    @objc private func reconnectPressed() {
+        let action = onReconnect
+        hide()
+        action?()
+    }
+
+    @objc private func closePressed() {
+        let action = onClose
+        hide()
+        action?()
     }
 }
 
@@ -753,5 +1079,77 @@ final class TWICapture: @unchecked Sendable {
         n += 1
         let url = Paths.sessionDir.appendingPathComponent(String(format: "viewer-ch12-%04d.bin", n))
         FileManager.default.createFile(atPath: url.path, contents: Data(payload), attributes: [.posixPermissions: 0o600])
+    }
+}
+
+/// NSPasteboard for the clipboard sync (main thread). Reads text, HTML, RTF and PNG/TIFF images;
+/// items marked concealed or transient (password managers) read as nothing (docs/70 §5.4 [P]).
+final class SystemPasteboard: ClipboardPasteboard {
+    private let board = NSPasteboard.general
+    private let readImages: Bool
+
+    init(readImages: Bool) { self.readImages = readImages }
+    private static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    private static let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+
+    var changeCount: Int { board.changeCount }
+
+    func readContent() -> ClipboardContent? {
+        let types = board.types ?? []
+        if types.contains(Self.concealed) || types.contains(Self.transient) { return nil }
+        var content = ClipboardContent()
+        content.text = board.string(forType: .string)
+        content.html = board.string(forType: .html)
+        content.rtf = board.data(forType: .rtf)
+        if readImages, let data = board.data(forType: .png) ?? board.data(forType: .tiff),
+           let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            // Pixels are rendered only if the host asks (on the session queue); CGImage is immutable.
+            content.image = ClipboardImage(width: image.width, height: image.height) { Self.rgba(image) }
+        }
+        return content.isEmpty ? nil : content
+    }
+
+    func writeContent(_ content: ClipboardContent) -> Int {
+        board.clearContents()
+        let item = NSPasteboardItem()
+        if let text = content.text { item.setString(text, forType: .string) }
+        if let html = content.html { item.setString(html, forType: .html) }
+        if let rtf = content.rtf { item.setData(rtf, forType: .rtf) }
+        if let image = content.image, let cg = Self.cgImage(image) {
+            let rep = NSBitmapImageRep(cgImage: cg)
+            if let png = rep.representation(using: .png, properties: [:]) { item.setData(png, forType: .png) }
+            if let tiff = rep.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+        }
+        board.writeObjects([item])
+        return board.changeCount
+    }
+
+    /// RGBA8, not premultiplied, top-down (what ClipboardDIB expects).
+    static func rgba(_ image: CGImage) -> Data? {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let ctx = CGContext(data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return nil }
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let a = Int(pixels[i + 3])
+            guard a > 0, a < 255 else { continue }
+            for c in 0..<3 { pixels[i + c] = UInt8(min(255, (Int(pixels[i + c]) * 255 + a / 2) / a)) }
+        }
+        return Data(pixels)
+    }
+
+    static func cgImage(_ image: ClipboardImage) -> CGImage? {
+        guard let rgba = image.rgba(), let provider = CGDataProvider(data: rgba as CFData),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        return CGImage(width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: image.width * 4,
+                       space: space, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider,
+                       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 }

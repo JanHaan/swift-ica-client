@@ -2,13 +2,38 @@ import AppKit
 import Foundation
 import ICAKit
 
-/// Project paths. The viewer is a personal tool built from this checkout, so the source location
-/// finds `.env` and `.session/` (override with ICA_ROOT / ICA_ENV).
+/// Project paths. The viewer is a personal tool built from this checkout: `.env` and `.session/` live
+/// in the checkout (override with ICA_ROOT / ICA_ENV). Without ICA_ROOT the checkout is the nearest
+/// directory above the executable, else above the current directory, that holds `Package.swift`;
+/// failing that (an installed app) `~/Library/Application Support/ICAViewer`.
 enum Paths {
     static let root: URL = {
         if let r = ProcessInfo.processInfo.environment["ICA_ROOT"] { return URL(fileURLWithPath: r) }
-        return URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        var starts: [URL] = []
+        if let exe = Bundle.main.executableURL { starts.append(exe.resolvingSymlinksInPath().deletingLastPathComponent()) }
+        starts.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        #if DEBUG
+        starts.append(URL(fileURLWithPath: #filePath).deletingLastPathComponent())   // debug builds only: embeds the build path
+        #endif
+        for start in starts {
+            if let found = packageRoot(above: start) { return found }
+        }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return support.appendingPathComponent("ICAViewer")
     }()
+
+    /// The nearest directory at or above `start` with a `Package.swift`.
+    static func packageRoot(above start: URL) -> URL? {
+        var dir = start.standardizedFileURL
+        while true {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("Package.swift").path) { return dir }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { return nil }
+            dir = parent
+        }
+    }
+
     static var envFile: String { ProcessInfo.processInfo.environment["ICA_ENV"] ?? root.appendingPathComponent(".env").path }
     static var sessionDir: URL { root.appendingPathComponent(".session") }
     static var cookieFile: String { sessionDir.appendingPathComponent("cookies.plist").path }
@@ -22,6 +47,32 @@ private let logStart = Date()
 func vlog(_ text: String) {
     let line = String(format: "%7.2f ", Date().timeIntervalSince(logStart)) + text + "\n"
     FileHandle.standardError.write(Data(line.utf8))
+}
+
+/// Which resources this process may launch. Launches the user starts in the launcher are not
+/// restricted. Automated ones (ICAVIEWER_LAUNCH, self-test, hold and probe runs) only start the test
+/// resources: the names in ICA_TEST_RESOURCES (comma separated), unless ICA_ALLOW_ANY_RESOURCE=1.
+enum LaunchPolicy {
+    static let defaultTestResource = "Calculator"
+
+    static func allows(_ name: String, automated: Bool, env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        if !automated || env["ICA_ALLOW_ANY_RESOURCE"] == "1" { return true }
+        let allowed = env["ICA_TEST_RESOURCES"].map { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+            ?? [defaultTestResource]
+        return allowed.contains(name)
+    }
+
+    /// True if the environment asks for an unattended run.
+    static func envAutomated(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        env["ICAVIEWER_LAUNCH"] != nil || env["ICAVIEWER_SELFTEST"] == "1" || env["ICAVIEWER_HOLD_SECONDS"] != nil
+            || env["ICAVIEWER_PROBE_CLICK"] == "1"
+    }
+}
+
+/// Resource and app names as shown in the UI. With ICAVIEWER_SCREENSHOT=1 they are censored for
+/// screenshots (`DisplayName.censored`); never used for matching or for the protocol.
+func displayName(_ name: String) -> String {
+    Demo.screenshotMode ? DisplayName.censored(name) : name
 }
 
 /// Login, resource list and launch through the gateway.
@@ -51,21 +102,22 @@ final class StoreService: @unchecked Sendable {
     }
 
     init() {
-        env = try? Env(path: Paths.envFile)
+        env = Demo.enabled ? nil : try? Env(path: Paths.envFile)
         let keychain = KeychainSecretStore()
         keychain.log = { vlog($0) }
         credentials = LoginCredentials(settings: UserDefaultsSettingsStore(), secrets: keychain)
         credentials.log = { vlog($0) }
-        let settings = credentials.settings.load()
+        let settings = Demo.enabled ? LoginSettings() : credentials.settings.load()
         let envGateway = env?["CITRIX_GATEWAY_URL"].flatMap(LoginSettings.gatewayURL(from:))
         if env?["CITRIX_USERNAME"] != nil && env?["CITRIX_PASSWORD"] != nil && !Self.autofill {
-            gateway = envGateway ?? settings.gateway ?? URL(string: "https://gateway.example.com/")
+            gateway = envGateway ?? settings.gateway
         } else {
             gateway = settings.gateway ?? envGateway
         }
         vlog("gateway: \(gateway?.host ?? "none"); logon: \(usesEnvCredentials ? ".env" : "login window")")
-        try? FileManager.default.createDirectory(at: Paths.sessionDir, withIntermediateDirectories: true)
         http.trace = { vlog("http " + $0) }   // paths and cookie names only (HTTPClient redacts query values)
+        if Demo.enabled { return }   // demo mode touches neither the disk nor the network
+        try? FileManager.default.createDirectory(at: Paths.sessionDir, withIntermediateDirectories: true)
         try? http.loadCookies(from: Paths.cookieFile)
     }
 
