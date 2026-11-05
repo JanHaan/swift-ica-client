@@ -67,6 +67,9 @@ public struct WDModuleIdentity: Sendable {
     /// CTXCPM: versions 4…7 (docs/97 §1.1).
     public static let printer = WDModuleIdentity(moduleClass: .vd, versionLow: PrinterWire.versionLow,
                                                  versionHigh: PrinterWire.versionHigh, name: "", hostName: "ICA")
+    /// CTXCAM: versions 1…2 (docs/98 §1.3; 4 would enable device enumeration).
+    public static let audio = WDModuleIdentity(moduleClass: .vd, versionLow: AudioWire.versionLow, versionHigh: AudioWire.versionHigh,
+                                               name: "", hostName: "ICA")
     public static let ui = WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "UIModule.class", hostName: "")
 }
 
@@ -305,6 +308,19 @@ public enum WDModules {
         w.u16(0)                  // string encoding: ASCII
         w.u16(0)
         w.u16(PrinterWire.pdfModeFlags)
+        return w.bytes()
+    }
+
+    /// CTXCAM module, 55 bytes (docs/98 §1.4): the common VD header (no quota, flow type 0), then the VD data
+    /// u16 0xFFD8 (0x13FFD8 truncated to 16 bits), u8 1 and the u32 capability bits at the **odd** offset 51
+    /// (0x10 playback with RW V2, 0x11 adds the microphone). The bind entry `CTXCAM \0 13 00` comes from the WD
+    /// module's table.
+    public static func audio(capabilities: UInt32 = AudioWire.Caps.playback, channel: UInt8 = AudioWire.channelNumber,
+                             date: Date = Date()) -> [UInt8] {
+        var w = vdHeader(.audio, channel: channel, date: date)
+        w.u16(AudioWire.bufferBudget)
+        w.u8(AudioWire.vdFlag)
+        w.u32(capabilities)
         return w.bytes()
     }
 

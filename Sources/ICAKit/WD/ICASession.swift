@@ -46,6 +46,9 @@ public final class ICASession: @unchecked Sendable {
     /// Client printing engine (`CTXCPM `, ch 4, PDF mode), when the session was created with a printing
     /// config. Set `printer.onEvent` before `start`; it is called on the session queue.
     public let printer: PrinterEngine?
+    /// Client audio engine (`CTXCAM `, ch 19, playback), when the session was created with an audio config.
+    /// Set `audio.sink` and `audio.onEvent` before `start`; both are called on the session queue.
+    public let audio: AudioEngine?
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -66,9 +69,10 @@ public final class ICASession: @unchecked Sendable {
 
     /// `clipboard` nil: no CTXCLIP module and no bind entry, so the host has no clipboard channel
     /// (docs/70 §5.7). `cdm` nil: no CTXCDM module, so no client drive (docs/95 §A). `printing` nil: no
-    /// CTXCPM module, so the host creates no PDF printer for this client (docs/97 §6.2).
+    /// CTXCPM module, so the host creates no PDF printer for this client (docs/97 §6.2). `audio` nil: no CTXCAM
+    /// module, so the host plays no sound to this client (docs/98 §1).
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
-                cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil) throws {
+                cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -96,6 +100,9 @@ public final class ICASession: @unchecked Sendable {
         // After CTXCLIP (docs/97 §1.2 [P]); the module and its per-command ACKs come from the engine.
         self.printer = printing.map { PrinterEngine(config: $0) }
         if let engine = self.printer { wd.register(engine) }
+        // After CTXCLIP (docs/98 §1.1, §11 step 1); the 55-byte module and the credits come from the engine.
+        self.audio = audio.map { AudioEngine(config: $0) }
+        if let engine = self.audio { wd.register(engine) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
@@ -128,6 +135,11 @@ public final class ICASession: @unchecked Sendable {
             engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
             engine.backlog = { [weak self] in self?.transport.status.queuedBytes ?? 0 }
         }
+        if let engine = self.audio {
+            let queue = self.queue
+            // The idle flush of WRITE credits (docs/98 §6.3).
+            engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
+        }
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
         thinwire.onInit = { [weak self] info in
             guard let self else { return }
@@ -156,10 +168,12 @@ public final class ICASession: @unchecked Sendable {
         case .data(let payload): wd.receive(payload)
         case .suspended(let info):
             setSuspended(true)
+            audio?.suspend()
             onEvent(.suspended(info))
         case .resuming(let attempt): onEvent(.resuming(attempt: attempt))
         case .resumed(let result):
             setSuspended(false)
+            audio?.resume()
             onEvent(.resumed(result))
         case .gaveUp(let info): onEvent(.gaveUp(info))
         case .closed(let reason):
@@ -167,6 +181,7 @@ public final class ICASession: @unchecked Sendable {
             setSuspended(false)
             cdm?.shutdown()
             printer?.shutdown()
+            audio?.shutdown()
             onEvent(.closed(reason))
         }
     }

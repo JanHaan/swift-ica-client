@@ -73,7 +73,13 @@ final class SessionController: NSObject {
 
     var appWindowCount: Int { windows.values.filter(\.isApp).count }
 
-    init(name: String, ica: ICAFile) throws {
+    /// The INIT_RESPONSE carried the CTXCAM module (main thread; for the one-shot fallback, `AudioFallback`).
+    private(set) var announcedAudio = false
+    /// Reached the first Thinwire INIT or the seamless channel. Main thread.
+    var wasEstablished: Bool { reachedSeamless || session.isEstablished }
+
+    /// `omitAudio`: announce no CTXCAM this time (the previous session with it dropped before it was established).
+    init(name: String, ica: ICAFile, omitAudio: Bool = false) throws {
         self.name = name
         scalingSettings = ScalingSettings.load()
         layout = ScalingLayout.resolve(screens: Self.currentScreens(), settings: scalingSettings, limit: ScalingLimits.sessionLimit())
@@ -93,12 +99,13 @@ final class SessionController: NSObject {
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
-                                 printing: Self.printingConfig())
+                                 printing: Self.printingConfig(), audio: omitAudio ? nil : Self.audioConfig())
         super.init()
         keyboard.controller = self
         setUpClipboard()
         setUpDriveMapping()
         setUpPrinting()
+        setUpAudio()
         session.seamless.setMonitors(layout.twiMonitors)
         session.pauseResumeOnThinwireInit = ProcessInfo.processInfo.environment["ICA_TWI_PAUSE_RESUME"] != "0"
         wireCallbacks()
@@ -885,6 +892,34 @@ final class SessionController: NSObject {
             if case .job(let job) = event {
                 DispatchQueue.main.async { PrintJobsController.shared.add(job, source: source) }
             }
+        }
+    }
+
+    // MARK: Audio (docs/98, playback)
+
+    /// Session audio on (Settings; ICA_AUDIO / ICA_AUDIO_CODECS override): announce CTXCAM; nil: no module.
+    static func audioConfig() -> AudioEngine.Config? {
+        let settings = AudioSettings.load()
+        guard let config = settings.engineConfig else {
+            vlog("audio: off")
+            return nil
+        }
+        let opus = config.codecs.contains(.opus) ? "\(config.opusSubformats.count) Opus subformat(s) decodable" : "Opus not offered"
+        vlog("audio: on (\(config.codecs.map(\.rawValue).sorted().joined(separator: ", ")); \(opus))")
+        return config
+    }
+
+    /// The player owns its own queue and starts the output only when the host plays something; the engine
+    /// drops it at the session end (`audioStop`).
+    private func setUpAudio() {
+        guard let engine = session.audio else { return }
+        let player = AudioPlayer()
+        player.log = { vlog("audio out: \($0)") }
+        engine.sink = player
+        // Session queue. Commands, formats, counts and the module bytes (no audio data).
+        engine.onEvent = { [weak self] event in
+            vlog("audio: \(event)")
+            if case .module = event { DispatchQueue.main.async { self?.announcedAudio = true } }
         }
     }
 
