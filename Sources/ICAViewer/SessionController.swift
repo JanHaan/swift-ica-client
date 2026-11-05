@@ -6,8 +6,11 @@ import ICAKit
 final class SessionController: NSObject {
     let name: String
     let session: ICASession
-    /// Session ↔ screen coordinates. Fixed session size; the screen list may change (see `screensChanged`).
-    private(set) var mapping: ScreenMapping
+    /// Session pixels ↔ screen points, per monitor (docs/80 §2). Fixed session size; the screen list may
+    /// change (see `screensChanged`).
+    private(set) var layout: ScalingLayout
+    /// The scaling settings this session connected with (a later change needs a reconnect, docs/80 §3.3).
+    let scalingSettings: ScalingSettings
     let keyboard = KeyboardTranslator()
     var onEnded: ((SessionController) -> Void)?
     /// Called on main whenever the set of app windows changes (count of app windows).
@@ -55,8 +58,6 @@ final class SessionController: NSObject {
     /// Windows the user asked to close (close button / Cmd-W).
     private var userClosed: Set<UInt32> = []
     private var screenObserver: NSObjectProtocol?
-    /// Windows show no macOS title bar any more, so the work area needs no room for one.
-    private let titleBar: CGFloat = 0
     /// Host caption/frame metrics (TWI SYSTEM_METRICS), for local caption drags.
     private(set) var systemMetrics: TWISystemMetrics?
 
@@ -74,7 +75,8 @@ final class SessionController: NSObject {
 
     init(name: String, ica: ICAFile) throws {
         self.name = name
-        mapping = .current
+        scalingSettings = ScalingSettings.load()
+        layout = ScalingLayout.resolve(screens: Self.currentScreens(), settings: scalingSettings, limit: ScalingLimits.sessionLimit())
         var config = WinstationDriver.Configuration()
         config.logon = WDLogon(ica: ica)
         // German client keyboard layout (the user's); scancodes are interpreted with it.
@@ -82,53 +84,106 @@ final class SessionController: NSObject {
         // Match macOS text rendering: greyscale anti-aliasing (1 = standard) instead of ClearType's
         // colour fringes. ICA_FONT_SMOOTHING: 0 none, 1 standard, 2 ClearType.
         config.logon.fontSmoothing = UInt16(ProcessInfo.processInfo.environment["ICA_FONT_SMOOTHING"] ?? "") ?? 1
-        // The server rounds odd sizes down to even (live: 1169 → 1168); ask for the even size so the
-        // mouse normalisation uses the same size as the server.
-        // The session desktop is the union of all screens (docs/40 §2.3 cap 0x11, docs/50 §2.4.2).
-        var display = WDDisplay(width: mapping.sessionWidth, height: mapping.sessionHeight)
-        let monitors = mapping.monitors(titleBar: 0)
-        if monitors.count > 1 { display.monitors = monitors.map(\.wd) }
+        // The session desktop covers all screens, each at its client scale (docs/80 §1.6, §2.3); every
+        // size is even (the server rounds odd sizes down, live: 1169 → 1168), so the mouse normalisation
+        // uses the server's size. Block A size, cap 0x20 and (several monitors) cap 0x11 come from it.
+        var display = WDDisplay()
+        layout.apply(to: &display)
         // ICA_TW_H264=0: advertise only the compatible-mode Thinwire caps (idle-repaint experiment).
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
-        session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig())
+        session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig())
         super.init()
         keyboard.controller = self
         setUpClipboard()
-        session.seamless.setMonitors(monitors.map(\.twi))
+        setUpDriveMapping()
+        session.seamless.setMonitors(layout.twiMonitors)
         session.pauseResumeOnThinwireInit = ProcessInfo.processInfo.environment["ICA_TWI_PAUSE_RESUME"] != "0"
         wireCallbacks()
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             self?.screensChanged()
         }
+        Self.registry.append(Weak(self))
     }
 
     deinit { screenObserver.map(NotificationCenter.default.removeObserver) }
 
-    /// Screen configuration changed. With the same union size, the new layout goes to the host (TWI
-    /// 0x3b, Thinwire 0x1D) and windows are re-placed. A different union size would need a Thinwire
-    /// resize (C2H 0x1E, enhanced mode change; the server echoed cap 0x19) followed by TWI PAUSE/RESUME
-    /// and a window replay; that is not implemented. Instead the session keeps its size and coordinate
-    /// origin, and only the screens that still exist (clipped to it) are reported, so Windows moves
-    /// windows off monitors that are gone.
-    private func screensChanged() {
-        let now = ScreenMapping.current
-        guard now != mapping else { return }
-        let next: ScreenMapping
-        if now.sessionWidth == mapping.sessionWidth, now.sessionHeight == mapping.sessionHeight {
-            next = now
-        } else {
-            vlog("screens changed: union \(now.sessionWidth)x\(now.sessionHeight) differs from the session \(mapping.sessionWidth)x\(mapping.sessionHeight); keeping the session size")
-            next = ScreenMapping(screens: now.screens, union: mapping.union)
+    /// The screens for a session layout, main screen first. ICAVIEWER_SINGLE_SCREEN=1: main screen only
+    /// (test: create a session with another layout).
+    static func currentScreens() -> [ScalingScreen] {
+        let screens = ProcessInfo.processInfo.environment["ICAVIEWER_SINGLE_SCREEN"] == "1" ? Array(NSScreen.screens.prefix(1)) : NSScreen.screens
+        return screens.map { ScalingScreen(frame: $0.frame, visible: $0.visibleFrame, backingScale: $0.backingScaleFactor) }
+    }
+
+    // MARK: Running sessions (Settings offers a reconnect when scaling changed)
+
+    private final class Weak {
+        weak var value: SessionController?
+        init(_ value: SessionController) { self.value = value }
+    }
+    private static var registry: [Weak] = []
+
+    /// Sessions that have not ended (main thread).
+    static var running: [SessionController] {
+        registry.removeAll { $0.value == nil || $0.value!.ended }
+        return registry.compactMap(\.value)
+    }
+
+    /// Whether a reconnect with `settings` would give a different session (size, per-monitor scale or
+    /// Windows scaling); other settings that resolve to the same layout (e.g. a fallback) need none.
+    func differs(from settings: ScalingSettings) -> Bool {
+        guard settings != scalingSettings else { return false }
+        let next = ScalingLayout.resolve(screens: Self.currentScreens(), settings: settings, limit: ScalingLimits.sessionLimit())
+        return !next.sameSession(as: layout)
+    }
+
+    /// Monitor whose map places a remote window: the one holding most of it; for a popup that overlaps
+    /// an app window (its owner first), that window's monitor, so menus of a window straddling two
+    /// screens line up with it.
+    func placementMonitor(for info: TWIWindow) -> Int {
+        if info.kind != .appWindow,
+           let m = ScalingLayout.popupMonitor(info.windowRect, ownerId: info.ownerId,
+                                              windows: windows.values.filter { $0.isApp && $0.info.id != info.id }
+                                                  .map { ($0.info.id, $0.info.windowRect, $0.monitorIndex) }),
+           m < layout.monitors.count {
+            return m
         }
-        mapping = next
-        let monitors = next.monitors(titleBar: titleBar)
-        vlog("screens changed: \(monitors.count) monitor(s) \(monitors.map { "\($0.twi.bounds.left),\($0.twi.bounds.top) \($0.twi.bounds.width)x\($0.twi.bounds.height)" })")
-        let wd = monitors.map(\.wd)
+        return layout.monitorIndex(forSession: info.windowRect)
+    }
+
+    private var relaunchAfterClose = false
+
+    /// Settings changed mid-session (docs/80 §3.3): disconnect cleanly (CGP FINISH, never a logoff) and
+    /// relaunch the resource, which reconnects to the session with the new values (D18 path).
+    func reconnectToApplySettings() {
+        guard !ended, !relaunchAfterClose, onRelaunch != nil else { return }
+        vlog("scaling: reconnecting \(name) to apply \(ScalingSettings.load()) (disconnect, no logoff)")
+        relaunchAfterClose = true
+        keyboard.releaseAll()
+        let session = self.session
+        Task { await session.close() }
+    }
+
+    /// Screen configuration changed. With the same session size, the new layout goes to the host (TWI
+    /// 0x3b, Thinwire 0x1D) and windows are re-placed. A different size would need a Thinwire resize
+    /// (C2H 0x1E, enhanced mode change; the server echoed cap 0x19) followed by TWI PAUSE/RESUME and a
+    /// window replay; that is not implemented. Instead the session keeps its size: screens still in
+    /// place keep their monitor, others map through the primary's scale, clipped to the session, so
+    /// Windows moves windows off monitors that are gone (`ScalingLayout.keepingSession`).
+    private func screensChanged() {
+        let next = layout.keepingSession(screens: Self.currentScreens())
+        guard next != layout else { return }
+        let previous = layout
+        layout = next
+        vlog("screens changed: \(next.monitors.count) monitor(s) \(next.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height) @\($0.scale)x" })")
+        let wd = next.wdMonitors, twiMonitors = next.twiMonitors
         session.send { driver, twi in
-            twi.setMonitors(monitors.map(\.twi))
+            twi.setMonitors(twiMonitors)
             if wd.count > 1 || driver.configuration.display.monitors.count > 1 { driver.send(WDModules.thinwireMonitorUpdate(wd)) }
+        }
+        if previous.monitors.map(\.scale) != next.monitors.map(\.scale) || previous.monitors.map(\.frame) != next.monitors.map(\.frame) {
+            lastCursorScale = nil
         }
         windows.values.forEach { $0.mappingChanged() }
     }
@@ -253,7 +308,9 @@ final class SessionController: NSObject {
             }
         }
         let display = session.wd.configuration.display
-        vlog("session \(name): \(mapping.screens.count) screen(s), union \(Int(mapping.union.width))x\(Int(mapping.union.height)), display \(display.width)x\(display.height), monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264)")
+        layout.logLines.forEach(vlog)
+        if let note = layout.note { vlog("scaling: \(scalingNoteText(note, layout: layout))") }
+        vlog("session \(name): \(layout.monitors.count) screen(s), display \(display.width)x\(display.height), cap 0x20 \(display.monitors.isEmpty ? [display.scalePercent] : display.monitors.map(\.scalePercent)) %, monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264)")
         try await session.start()
     }
 
@@ -352,8 +409,7 @@ final class SessionController: NSObject {
             lastSeed = seed
         }
         for w in windows.values {
-            let r = w.contentOrigin
-            let wr = CGRect(x: CGFloat(r.left), y: CGFloat(r.top), width: w.view.bounds.width, height: w.view.bounds.height)
+            let wr = w.contentPixelRect
             if rects.contains(where: { $0.intersects(wr) }) {
                 w.view.refresh()
                 counters.add("refresh")
@@ -373,9 +429,21 @@ final class SessionController: NSObject {
         lastPointer = image.map { ($0, hotspot) }
         pointerCount += 1
         if pointerCount <= 3 { vlog("pointer shape \(pointerCount): \(image.map { "\($0.width)x\($0.height)" } ?? "hidden") hotspot \(hotspot)") }
-        if let image {
-            let size = NSSize(width: image.width, height: image.height)   // 1 session pixel = 1 point
-            cursor = NSCursor(image: NSImage(cgImage: image, size: size), hotSpot: hotspot)
+        // The screen of the last position sent to the host (as in `mouse`), so a cursor over a window
+        // that straddles two screens does not flip between the two scales.
+        buildCursor(scale: layout.monitors[layout.monitorIndex(forSessionX: lastMouse.x, y: lastMouse.y)].scale)
+    }
+
+    /// k the cursor was built for; the host sends pointer bitmaps in session pixels.
+    private var lastCursorScale: Int?
+
+    /// The pointer image is session pixels: on a screen with k px per point it is px / k points
+    /// (half size at 2x, so a 64 px host cursor at 200 % is a 32 pt Retina-sharp cursor).
+    private func buildCursor(scale: Int) {
+        lastCursorScale = scale
+        if let p = lastPointer {
+            let g = ScalingLayout.cursor(pixelWidth: p.image.width, pixelHeight: p.image.height, hotspot: p.hotspot, scale: scale)
+            cursor = NSCursor(image: NSImage(cgImage: p.image, size: g.size), hotSpot: g.hotspot)
         } else {
             cursor = Self.hiddenCursor
         }
@@ -552,7 +620,7 @@ final class SessionController: NSObject {
     /// Launcher "Show": ask the host to bring the last app windows back onto the main screen.
     func showParkedWindows() {
         for (id, info) in lastAppWindows {
-            let rect = mapping.onMainScreen(info.windowRect)
+            let rect = layout.onMainScreen(info.windowRect)
             vlog("show: moving \(String(id, radix: 16)) to \(rect.left),\(rect.top)")
             session.send { _, twi in
                 twi.moveResize(windowId: id, rect: rect)
@@ -609,6 +677,12 @@ final class SessionController: NSObject {
         let display = session.wd.configuration.display
         let x = min(max(x, 0), display.width - 1), y = min(max(y, 0), display.height - 1)
         lastMouse = (x, y)
+        // Moved onto a screen with another client scale: the same pointer bitmap at that screen's size.
+        let k = layout.monitors[layout.monitorIndex(forSessionX: x, y: y)].scale
+        if lastPointer != nil, k != lastCursorScale {
+            buildCursor(scale: k)
+            cursor.set()
+        }
         for pair in Self.buttonUps {
             if state.contains(pair.down) { buttonsDown[pair.down.rawValue] = pair.up }
             if state.contains(pair.up) { buttonsDown[pair.down.rawValue] = nil }
@@ -726,6 +800,12 @@ final class SessionController: NSObject {
         clipboardSync?.channelClosed()
         setParked(false)
         vlog("session \(name) closed: \(reason)")
+        if relaunchAfterClose, onRelaunch != nil {
+            vlog("scaling: relaunching \(name) with the new settings")
+            tearDown()
+            onRelaunch?(self)
+            return
+        }
         if let gaveUp, gaveUp.offerRelaunch, onRelaunch != nil {
             // Keep the dimmed windows until the user picks Reconnect or Close; never relaunch silently.
             inputBlocked = true
@@ -752,6 +832,31 @@ final class SessionController: NSObject {
     private func tearDown() {
         hud.hide()
         for id in Array(windows.keys) { remove(id) }
+    }
+
+    // MARK: Client drive mapping (docs/95 §A, D32)
+
+    /// The shared folder (Settings; ICA_CDM=0 turns it off) as client drive M, or nil: no CTXCDM module.
+    /// The default folder ~/Citrix Shared is created on first use.
+    static func driveMappingConfig() -> CDMEngine.Config? {
+        let settings = CDMSettings.load()
+        guard settings.enabled else {
+            vlog("drive mapping: off")
+            return nil
+        }
+        do {
+            let fs = try settings.makeFileSystem()
+            vlog("drive mapping: \(settings.letter): = \(fs.rootPath)\(settings.readOnly ? " (read-only)" : "")")
+            return CDMEngine.Config(fileSystem: fs, letter: settings.letter, label: settings.label)
+        } catch {
+            vlog("drive mapping: off (\(error))")
+            return nil
+        }
+    }
+
+    private func setUpDriveMapping() {
+        // Session queue. Names, sizes, statuses and paths relative to the shared folder only.
+        session.cdm?.onEvent = { event in vlog("cdm: \(event)") }
     }
 
     // MARK: Clipboard (docs/70 §5.4, §5.6)

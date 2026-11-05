@@ -4,6 +4,7 @@ import ICAKit
 /// Launcher: resource list with a search field; double-click launches.
 final class LauncherWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     var onLaunch: ((StoreClient.Resource) -> Void)?
+    var onConnectionCenter: (() -> Void)?
     private var all: [StoreClient.Resource] = []
     private var shown: [StoreClient.Resource] = []
     private let table = NSTableView()
@@ -19,6 +20,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         var detail: String
         var canShow: Bool
         var show: () -> Void
+        var disconnect: () -> Void
         var logoff: () -> Void
     }
     private var rowActions: [Int: () -> Void] = [:]
@@ -55,17 +57,24 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         sessionsStack.orientation = .vertical
         sessionsStack.alignment = .leading
         sessionsStack.spacing = 4
-        let stack = NSStackView(views: [search, scroll, sessionsStack, status])
+        let centerButton = NSButton(title: loc("Connection Center…", "Verbindungscenter…"), target: self, action: #selector(openConnectionCenter))
+        centerButton.bezelStyle = .rounded
+        centerButton.controlSize = .small
+        let footer = NSStackView(views: [status, centerButton])
+        footer.orientation = .horizontal
+        footer.spacing = 8
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [search, scroll, sessionsStack, footer])
         stack.orientation = .vertical
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.spacing = 8
         stack.alignment = .leading
-        for v in [search, scroll, sessionsStack, status] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [search, scroll, sessionsStack, footer] { v.translatesAutoresizingMaskIntoConstraints = false }
         window.contentView = stack
         NSLayoutConstraint.activate([
             search.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
-            status.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
         ])
         window.center()
     }
@@ -93,6 +102,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
             label.lineBreakMode = .byTruncatingTail
             var views: [NSView] = [label]
             if row.canShow { views.append(button("Show", row.show)) }
+            views.append(button("Disconnect", row.disconnect))
             views.append(button("Log off", row.logoff))
             let line = NSStackView(views: views)
             line.orientation = .horizontal
@@ -102,6 +112,8 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     @objc private func rowButton(_ sender: NSButton) { rowActions[sender.tag]?() }
+
+    @objc private func openConnectionCenter() { onConnectionCenter?() }
 
     func setResources(_ list: [StoreClient.Resource]) {
         all = list.filter { $0.disabled != true }

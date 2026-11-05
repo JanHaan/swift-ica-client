@@ -2,14 +2,14 @@ import AppKit
 import ICAKit
 
 /// Demo mode for README screenshots: ICAVIEWER_DEMO=1 shows the app's own windows with example data.
-/// No network, Keychain, settings or session are touched. ICAVIEWER_DEMO_SHOW=login|launcher|settings|hud|gaveup
+/// No network, Keychain, settings or session are touched. ICAVIEWER_DEMO_SHOW=login|launcher|settings|hud|gaveup|connections
 /// shows only that window, centred on the main screen, and logs `demo window <name> id <n>`
 /// (the CGWindowID for `screencapture -l`). Without it all demo windows are shown side by side.
 /// ICAVIEWER_SCREENSHOT=1 (also outside demo mode) censors the resource names the UI shows.
 enum Demo {
     static let enabled = ProcessInfo.processInfo.environment["ICAVIEWER_DEMO"] == "1"
     static let screenshotMode = ProcessInfo.processInfo.environment["ICAVIEWER_SCREENSHOT"] == "1"
-    static let names = ["login", "launcher", "settings", "hud", "gaveup"]
+    static let names = ["login", "launcher", "settings", "hud", "gaveup", "connections"]
 
     static let gateway = "gateway.example.com"
     static let username = "demo"
@@ -43,6 +43,7 @@ final class DemoController {
     private var settings: SettingsWindowController?
     private var hud: ReconnectHUD?
     private var gaveUp: ReconnectHUD?
+    private var connections: ConnectionCenterController?
 
     init(service: StoreService) {
         self.service = service
@@ -92,6 +93,12 @@ final class DemoController {
                          notBefore: nil)
             gaveUp = h
             placed.append(("gaveup", nil))
+        }
+        if wanted("connections") {
+            let c = ConnectionCenterController(service: nil, demo: ConnectionCenterController.demoRows)
+            c.show()
+            connections = c
+            placed.append(("connections", c.window))
         }
         layout(placed)
         NSApp.activate()

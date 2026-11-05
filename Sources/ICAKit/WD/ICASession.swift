@@ -40,6 +40,9 @@ public final class ICASession: @unchecked Sendable {
     /// Clipboard engine (`CTXCLIP`, ch 17), when the session was created with a clipboard config.
     /// Set `clipboard.onEvent` before `start`; it is called on the session queue.
     public let clipboard: ClipboardEngine?
+    /// Client drive mapping engine (`CTXCDM `, ch 10), when the session was created with a CDM config.
+    /// Set `cdm.onEvent` before `start`; it is called on the session queue.
+    public let cdm: CDMEngine?
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -59,8 +62,9 @@ public final class ICASession: @unchecked Sendable {
     private var suspendedFlag = false
 
     /// `clipboard` nil: no CTXCLIP module and no bind entry, so the host has no clipboard channel
-    /// (docs/70 §5.7).
-    public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil) throws {
+    /// (docs/70 §5.7). `cdm` nil: no CTXCDM module, so no client drive (docs/95 §A).
+    public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
+                cdm: CDMEngine.Config? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -83,6 +87,8 @@ public final class ICASession: @unchecked Sendable {
         // Registered after CTXTWI, so the module follows it in the INIT_RESPONSE (docs/70 §1.2).
         self.clipboard = clipboard.map { ClipboardEngine(config: $0) }
         if let engine = self.clipboard { wd.register(engine) }
+        self.cdm = cdm.map { CDMEngine(config: $0) }
+        if let engine = self.cdm { wd.register(engine) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
@@ -105,6 +111,14 @@ public final class ICASession: @unchecked Sendable {
             let queue = self.queue
             engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
             // Big clipboard responses wait while the CGP retransmit queue is long (its cap is 8 MiB).
+            engine.backlog = { [weak self] in self?.transport.status.queuedBytes ?? 0 }
+        }
+        if let engine = self.cdm {
+            let queue = self.queue
+            // File I/O off the session queue; replies come back to it in order.
+            engine.ioQueue = DispatchQueue(label: "ica.cdm")
+            engine.schedule = { [weak self] block in self?.perform(block) }
+            engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
             engine.backlog = { [weak self] in self?.transport.status.queuedBytes ?? 0 }
         }
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
@@ -144,6 +158,7 @@ public final class ICASession: @unchecked Sendable {
         case .closed(let reason):
             closed = true
             setSuspended(false)
+            cdm?.shutdown()
             onEvent(.closed(reason))
         }
     }

@@ -61,7 +61,16 @@ public struct WDModuleIdentity: Sendable {
     public static let twi = WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA")
     /// CTXCLIP: min 1 / max 0, as the reference really sends it (docs/70 §1.1, §1.2).
     public static let clipboard = WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 0, name: "", hostName: "ICA")
+    /// CTXCDM: versions 1…10 (docs/95 §A.1).
+    public static let cdm = WDModuleIdentity(moduleClass: .vd, versionLow: CDMWire.versionLow, versionHigh: CDMWire.versionHigh,
+                                             name: "", hostName: "ICA")
     public static let ui = WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "UIModule.class", hostName: "")
+}
+
+/// A channel engine whose module is more than the common VD part (flow control, VD-specific data,
+/// docs/30 §5.5): the WD asks it for the whole module instead of building a generic one.
+public protocol VirtualChannelModule: AnyObject {
+    func module(channel: UInt8, date: Date) -> [UInt8]
 }
 
 /// Logon and client identity carried by the UI module (docs/30-winstation.md §5.6, docs/10-launch.md A.4).
@@ -250,6 +259,31 @@ public enum WDModules {
     /// `CTXCLIP\0 11 00` comes from the WD module's bind table once the engine is registered.
     public static func clipboard(channel: UInt8 = ClipboardWire.channelNumber, date: Date = Date()) -> [UInt8] {
         vdHeader(.clipboard, channel: channel, date: date).bytes()
+    }
+
+    /// CTXCDM module (docs/95 §A.1, corrected by the LIVE FINDING): VD header with flow type 3
+    /// (MaxWindowSize 62500, MaxByteCount 4116); then `u16 n`, a u16 **offset from the module start** to
+    /// the drive array, `u16 1`, 6 × u16 0; the array (per drive `letter, 0, type, 0`, type 1 removable,
+    /// 2 fixed) follows the fixed part at 66. One drive: 70 bytes. The bind entry `CTXCDM \0 0A 00` comes
+    /// from the WD module's table.
+    public static func cdm(drives: [(letter: Character, removable: Bool)], channel: UInt8 = CDMWire.channelNumber,
+                           date: Date = Date()) -> [UInt8] {
+        var w = header(.cdm, date: date)
+        w.u32(UInt32(channel))
+        w.u8(0)                   // bandwidth quota
+        w.u8(CDMWire.flowType)
+        w.u16(0)
+        w.u16(CDMWire.maxWindowSize)
+        w.u16(CDMWire.maxByteCount)
+        w.u16(UInt16(drives.count))
+        var entries: [UInt8] = []
+        for drive in drives {
+            entries += [drive.letter.uppercased().first?.asciiValue ?? 0x4D, 0, drive.removable ? 1 : 2, 0]
+        }
+        w.reference(entries)      // 0 when there are no drives
+        w.u16(1)
+        w.zeros(12)
+        return w.bytes()
     }
 
     /// Thinwire `LargeCacheSize(w,h)` (docs/40-thinwire.md §2.2).
