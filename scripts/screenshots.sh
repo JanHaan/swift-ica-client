@@ -3,7 +3,8 @@
 #
 #   scripts/screenshots.sh                 capture login, launcher, settings, hud, gaveup into
 #                                          assets/screenshots/<name>.png, then check them
-#   scripts/screenshots.sh check <png>...  OCR + corner checks only (also for live captures)
+#   scripts/screenshots.sh check <png>...  strips metadata chunks (tEXt, iTXt, zTXt, eXIf, tIME), then OCR +
+#                                          corner checks (also for live captures)
 #   scripts/screenshots.sh composite <out.png> <window.png> [<hud.png>...]
 #                                          window on a flat #E5E5EA background with 48 px padding, other
 #                                          images centred over it (live remote window + HUD); then checks it
@@ -26,6 +27,7 @@ fi
 case "${1:-demo}" in
 check)
     shift
+    "$helper" strip "$@"
     exec "$helper" check "$@"
     ;;
 composite)
@@ -33,6 +35,7 @@ composite)
     shift
     target="$1"
     "$helper" composite "$@"
+    "$helper" strip "$target"
     exec "$helper" check "$target"
     ;;
 demo) ;;
@@ -86,4 +89,5 @@ for name in $names; do
     pid=""
 done
 
+"$helper" strip "$out"/login.png "$out"/launcher.png "$out"/settings.png "$out"/hud.png "$out"/gaveup.png
 "$helper" check "$out"/login.png "$out"/launcher.png "$out"/settings.png "$out"/hud.png "$out"/gaveup.png

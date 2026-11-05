@@ -52,6 +52,8 @@ public final class ThinwireEngine: VirtualChannelEngine {
         public var pictures = 0
         public var resyncs = 0
         public var errors = 0
+        /// Redraw requests clipped to the 12-bit WD range.
+        public var redrawsClipped = 0
         public var opcodes: [UInt8: Int] = [:]
     }
 
@@ -154,10 +156,20 @@ public final class ThinwireEngine: VirtualChannelEngine {
     // MARK: Requests
 
     /// Asks the server to repaint `rect` (default: the whole session) via WD packet 0x06.
+    /// The WD request has 12-bit edges, right/bottom exclusive (≤ 4095): pixels at x or y ≥ 4095 cannot
+    /// be asked for, so the rect is clipped (logged once); the host repaints that area on its own
+    /// (docs/80 §5 item 3, §7).
     public func requestRedraw(_ rect: TWRect? = nil) {
         let r = rect ?? TWRect(0, 0, sessionInfo?.width ?? 0, sessionInfo?.height ?? 0)
         guard !r.isEmpty else { return }
-        output?(ThinwireCapabilities.redraw(r))
+        let c = ThinwireCapabilities.redrawable(r)
+        if c != r {
+            stats.redrawsClipped += 1
+            logOnce("redrawClip", "Thinwire: redraw \(r.x),\(r.y) \(r.width)x\(r.height) clipped to \(c.x),\(c.y) \(c.width)x\(c.height)"
+                    + " (WD redraw edges are 12-bit, right/bottom exclusive ≤ \(ScalingLimits.redrawMaxCoordinate)); the host repaints the rest itself")
+        }
+        guard !c.isEmpty else { return }
+        output?(ThinwireCapabilities.redraw(c))
     }
 
     /// Sends C2H 0x1F (client FPS limit).

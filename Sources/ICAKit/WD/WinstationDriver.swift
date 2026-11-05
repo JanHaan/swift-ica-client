@@ -242,6 +242,8 @@ public final class WinstationDriver {
         for vd in vds {
             if vd.name == "CTXTW  " {
                 modules.append(WDModules.thinwire(display: config.display, channel: vd.number))
+            } else if let custom = engines[vd.number] as? VirtualChannelModule {
+                modules.append(custom.module(channel: vd.number, date: Date()))
             } else {
                 modules.append(WDModules.vdHeader(vd.name == "CTXTWI\0" ? .twi : WDModuleIdentity(
                     moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA"), channel: vd.number, date: Date()).bytes())
@@ -417,8 +419,11 @@ public final class WinstationDriver {
         send(WDBuild.wheel(x: nx, y: ny, delta: delta))
     }
 
+    /// Repaint request; clipped to the 12-bit range (larger values would wrap, docs/80 §5 item 3).
     public func redraw(left: Int = 0, top: Int = 0, right: Int? = nil, bottom: Int? = nil) {
-        send(WDBuild.redraw(left: left, top: top, right: right ?? configuration.display.width,
-                            bottom: bottom ?? configuration.display.height))
+        let r = right ?? configuration.display.width, b = bottom ?? configuration.display.height
+        let c = ThinwireCapabilities.redrawable(TWRect(left, top, r - left, b - top))
+        guard !c.isEmpty else { return }
+        send(WDBuild.redraw(left: c.x, top: c.y, right: c.maxX, bottom: c.maxY))
     }
 }

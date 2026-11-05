@@ -87,10 +87,21 @@ public enum ThinwireCapabilities {
         return c2h(0x1E, Array(w.data))
     }
 
-    /// WD REDRAW (type 0x06): `06 00` + four 12-bit values left, top, right, bottom (exclusive).
+    /// The part of `rect` a WD REDRAW can address: 12-bit edges with exclusive right/bottom, so at most
+    /// up to `ScalingLimits.redrawMaxCoordinate` (4095; the last pixel column/row is 4094). 4096 does not
+    /// fit the encoding (docs/40 §4.2, docs/80 §5 item 3).
+    public static func redrawable(_ rect: TWRect) -> TWRect {
+        let m = ScalingLimits.redrawMaxCoordinate
+        let l = max(0, min(rect.x, m)), t = max(0, min(rect.y, m))
+        let r = max(l, min(rect.maxX, m)), b = max(t, min(rect.maxY, m))
+        return TWRect(l, t, r - l, b - t)
+    }
+
+    /// WD REDRAW (type 0x06): `06 00` + four 12-bit values left, top, right, bottom (exclusive), clipped
+    /// to the addressable range (`redrawable`).
     public static func redraw(_ rect: TWRect) -> ChannelOutput {
-        let l = max(0, min(rect.x, 0xfff)), t = max(0, min(rect.y, 0xfff))
-        let r = max(0, min(rect.maxX, 0xfff)), b = max(0, min(rect.maxY, 0xfff))
+        let c = redrawable(rect)
+        let l = c.x, t = c.y, r = c.maxX, b = c.maxY
         let body: [UInt8] = [
             0x06, 0x00,
             UInt8(l & 0xff), UInt8((l >> 8) & 0xf) | UInt8((t & 0xf) << 4), UInt8((t >> 4) & 0xff),

@@ -50,6 +50,11 @@ guard let gateway = URL(string: gatewayText + "/"), gateway.scheme == "https", g
 try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
 let http = HTTPClient()
 try? http.loadCookies(from: cookiePath)
+// The store's device id cookie survives the empty-jar gateway logon (docs/90 §8.6); ICA_NO_DEVICE_ID=1
+// turns that off (§11 item 7: is the id new after an empty-jar logon?).
+if ProcessInfo.processInfo.environment["ICA_NO_DEVICE_ID"] != "1" {
+    StoreClient.deviceIdentity = FileDeviceIdentity(path: sessionDir.appendingPathComponent("device-id.plist").path)
+}
 
 var args = Array(CommandLine.arguments.dropFirst())
 let command = args.isEmpty ? "help" : args.removeFirst()
@@ -206,6 +211,28 @@ case "cliptest":
         fail("\(error)")
     }
 
+case "cdmtest":
+    // icactl cdmtest [resource] — client drive mapping test, Notepad only (docs/95 "To verify live"): maps a
+    // fresh temp folder as drive M and records what the host sends. In a session this run logged on itself:
+    // Notepad opens \\Client\M$\cdmtest-probe.txt via Ctrl+O; with ICA_CDMTEST_SAVE=1 also Save As
+    // \\Client\M$\cdmtest-saved.txt. Only paths on the mapped drive are ever typed.
+    let name = args.first ?? "Notepad"
+    guard name == "Notepad" else { fail("cdmtest is limited to \"Notepad\"") }
+    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
+        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runCDMTest(ica: ica, save: ProcessInfo.processInfo.environment["ICA_CDMTEST_SAVE"] == "1")
+    } catch {
+        fail("\(error)")
+    }
+
+case "sessions":
+    // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
+    await sessionsCommand(args)
+
 case "cookies":
     print(http.cookieNames.joined(separator: "\n"))
 
@@ -218,6 +245,19 @@ default:
       icactl session [resource]          launch, logon, capture to .session/last/ (ICA_CAPTURE_REPLAY=1: .session/replay/), log off
       icactl droptest [resource]         session with one link drop after ICA_TEST_DROP_AFTER s and a CGP resume
       icactl cliptest                    clipboard test in "Notepad" (Notepad): paste in, copy out, never saves
+      icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
+                                         from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
+      icactl sessions list [--names]     store sessions (Sessions/List + ListAvailable), read-only; ids as fingerprints
+      icactl sessions probe              read-only live checks of docs/90 §11 items 1, 2, 4–7 (keys, counts, states)
+      icactl sessions disconnect <id>    Sessions/DisconnectSessions; only sessions whose apps are all test resources
+      icactl sessions logoff <id>        Sessions/LogOffSessions; same gate
+      icactl sessions reconnect <id>     launch the session's ListAvailable entry (excludeActive) and run it like `session`
+      icactl sessions disconnect-device  device-wide Sessions/Disconnect (ICA_ALLOW_DEVICE_WIDE=1, every session of
+      icactl sessions logoff-device        this device must be a test session); …/Logoff likewise
+
+    ICA_TEST_RESOURCES=<name>[,<name>]   apps the sessions commands may act on: "Calculator,Notepad"; another
+                                         list only together with ICA_ALLOW_ANY_RESOURCE=1
+    ICA_SESSION_END=disconnect           session/droptest/reconnect: end with CGP FINISH (disconnect), never log off
 
     ICA_LOGOFF_IF_ONLY=<exe>[,<exe>]     session: also log off a reconnected session, but only if every window
                                          seen belongs to one of these executables (or logonui.exe/cmd.exe)
@@ -284,6 +324,8 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
     let width = Int(ProcessInfo.processInfo.environment["ICA_WIDTH"] ?? "") ?? 1920
     let height = Int(ProcessInfo.processInfo.environment["ICA_HEIGHT"] ?? "") ?? 1080
     config.display = WDDisplay(width: width, height: height)
+    // docs/90 §11 item 3: key only, never the value.
+    say("ICA file: ClientName key \(ica["ClientName"].map { $0.isEmpty ? "empty" : "present" } ?? "absent")")
     let session = try ICASession(ica: ica, configuration: config)
     if let dropAfter { session.transport.testDropAfter = dropAfter }
     let seamless = session.seamless
@@ -435,7 +477,11 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
             say("guarded logoff refused: \(seen.isEmpty ? "no window seen" : seen.joined(separator: ", "))")
         }
     }
-    if !session.isClosed, !session.isEstablished {
+    if !session.isClosed, ProcessInfo.processInfo.environment["ICA_SESSION_END"] == "disconnect" {
+        say("ICA_SESSION_END=disconnect: disconnecting (CGP FINISH), no logoff")
+        await session.close()
+        ending = "disconnected (CGP FINISH, ICA_SESSION_END=disconnect)"
+    } else if !session.isClosed, !session.isEstablished {
         say("session never got past the handshake: disconnecting")
         await session.close()
         ending = "disconnected before the session was established"
@@ -703,4 +749,391 @@ func runClipTest(ica: ICAFile) async throws {
     say("fresh logon: \(fresh)")
     for step in steps { say("  " + step) }
     say("end: \(ending)")
+}
+
+// MARK: - Sessions command (docs/90)
+
+func storeClient() -> StoreClient { StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL) }
+
+/// Client names our sessions report to the VDA: the WD default, and the last saved ICA file's.
+func ourClientNames() -> Set<String> {
+    var names: Set<String> = [SessionDirectory.defaultClientName]
+    let last = sessionDir.appendingPathComponent("last.ica").path
+    if let text = try? String(contentsOfFile: last, encoding: .utf8), let ica = ICAFile(text: text) {
+        names.insert(WDLogon(ica: ica).clientName)
+    }
+    return names
+}
+
+func describe(_ s: StoreSessionInfo, list: StoreSessionList, names: Bool) -> String {
+    let where_: String = switch SessionDirectory.state(of: s, deviceId: list.deviceId, clientNames: ourClientNames()) {
+    case .connectedHere: "this device"
+    case .connectedElsewhere(let client, let type):
+        (names ? (client ?? "?") : "other device") + (type.map { " (\($0))" } ?? "")
+    case .disconnected: names ? "last on \(s.clientName ?? "?")" : "-"
+    case .unknown: "?"
+    }
+    let started = s.sessionStartTime.map { ISO8601DateFormatter().string(from: $0) } ?? "?"
+    return "\(s.shortId)  \(s.connectionState.name.padding(toLength: 12, withPad: " ", startingAt: 0))  \(where_)  "
+        + "apps: \(s.appNames.joined(separator: ", "))  started \(started)  \(s.userSessionType ?? "")"
+}
+
+/// The one session whose id or fingerprint is `key`.
+func findSession(_ key: String, in list: StoreSessionList) -> StoreSessionInfo {
+    let matches = list.sessions.filter { $0.sessionId == key || $0.shortId == key.lowercased() }
+    guard matches.count == 1 else { fail(matches.isEmpty ? "no session \(key) (see icactl sessions list)" : "\(key) is ambiguous") }
+    return matches[0]
+}
+
+func sessionsCommand(_ args: [String]) async {
+    var args = args
+    let sub = args.isEmpty ? "list" : args.removeFirst()
+    let store = storeClient()
+    let api = store.sessions
+    api.log = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+    let allowed = TestSessionGate.allowedNames()
+    do {
+        switch sub {
+        case "list":
+            let names = args.contains("--names")
+            // Resources/List first: it signs in to the store if needed (and learns the session paths).
+            _ = try await store.resources()
+            let list: StoreSessionList?
+            do { list = try await api.list() } catch {
+                print("Sessions/List: \(error)")
+                list = nil
+            }
+            let all = try await api.available(excludeActive: false)
+            let safe = try? await api.available(excludeActive: true)
+            try http.saveCookies(to: cookiePath)
+            if let list {
+                print("Sessions/List: \(list.sessions.count) session(s), device \(list.deviceId.map(StoreSessionInfo.fingerprint) ?? "none")")
+                for s in list.sessions { print("  " + describe(s, list: list, names: names)) }
+            }
+            print("ListAvailable: \(all.count) entr\(all.count == 1 ? "y" : "ies"), \(safe.map { "\($0.count)" } ?? "?") excluding active")
+            for row in SessionDirectory.merge(list: list, available: all, excludingActive: safe, clientNames: ourClientNames())
+            where row.reconnect != nil || row.takeOver != nil || row.joinAmbiguous {
+                let entry = row.reconnect ?? row.takeOver
+                print("  \(entry.map { StoreSessionInfo.fingerprint($0.launchId) } ?? "-")  \(row.initialApp ?? "?")  "
+                      + (row.reconnect != nil ? "reconnect" : row.takeOver != nil ? "take over (open elsewhere)" : "")
+                      + (row.joinAmbiguous ? " (join ambiguous: reconnect all only)" : "")
+                      + "  → session \(row.id.map(StoreSessionInfo.fingerprint) ?? "not in Sessions/List")")
+            }
+
+        case "probe":
+            try await probe(store: store, api: api)
+
+        case "disconnect", "logoff":
+            guard let key = args.first else { fail("usage: icactl sessions \(sub) <id>") }
+            let resources = try await store.resources()
+            let list = try await api.list()
+            let target = findSession(key, in: list)
+            guard TestSessionGate.allows(target, allowed: allowed, resources: resources) else {
+                fail("refused: session \(target.shortId) has apps [\(TestSessionGate.resolvedNames(target, resources: resources).joined(separator: ", "))]; "
+                     + "only sessions whose apps are all in ICA_TEST_RESOURCES (\(allowed.joined(separator: ","))) may be touched")
+            }
+            print("\(sub) \(target.shortId) (\(target.connectionState.name), apps \(target.appNames.joined(separator: ", ")))")
+            let results = sub == "disconnect" ? try await api.disconnect(ids: [target.sessionId]) : try await api.logOff(ids: [target.sessionId])
+            for r in results {
+                print("  result \(StoreSessionInfo.fingerprint(r.sessionId)): isSuccess \(r.isSuccess)\(r.failureReason.map { ", failureReason \($0)" } ?? "")")
+            }
+            if results.isEmpty { print("  result: no entries") }
+            let after = try await api.list()
+            let now = after.sessions.first { $0.sessionId == target.sessionId }
+            print("  now: \(now.map(\.connectionState.name) ?? "gone from Sessions/List")")
+            try http.saveCookies(to: cookiePath)
+
+        case "reconnect":
+            guard let key = args.first else { fail("usage: icactl sessions reconnect <id>") }
+            let resources = try await store.resources()
+            let list = try await api.list()
+            let target = findSession(key, in: list)
+            guard TestSessionGate.allows(target, allowed: allowed, resources: resources) else {
+                fail("refused: session \(target.shortId) is not a test session (apps \(target.appNames.joined(separator: ", ")))")
+            }
+            // excludeActive: never take a session away from another device (docs/90 §4.1).
+            let safe = try await api.available(excludeActive: true)
+            let all = try await api.available(excludeActive: false)
+            let rows = SessionDirectory.merge(list: list, available: all, excludingActive: safe, clientNames: ourClientNames())
+            guard let row = rows.first(where: { $0.id == target.sessionId }) else { fail("session vanished") }
+            if row.joinAmbiguous { fail("refused: several sessions match its ListAvailable entry (docs/90 §7.2)") }
+            guard let entry = row.reconnect else {
+                fail(row.takeOver != nil ? "refused: the session is open on another device; icactl never takes over"
+                                         : "no ListAvailable entry for this session (connected here, or not joinable)")
+            }
+            guard TestSessionGate.allows(entry, allowed: allowed) else { fail("refused: entry's initial app is not a test resource") }
+            print("reconnecting \(target.shortId) via entry \(StoreSessionInfo.fingerprint(entry.launchId)) (\(entry.initialapp ?? "?"))")
+            guard let ica = ICAFile(text: try await store.launchICA(entry.resource)) else { fail("not an ICA file") }
+            try http.saveCookies(to: cookiePath)
+            let seconds = Double(ProcessInfo.processInfo.environment["ICA_DUMP_SECONDS"] ?? "") ?? 20
+            let dir = sessionDir.appendingPathComponent("reconnect")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try await runSession(ica: ica, seconds: seconds, captureDir: dir)
+
+        case "disconnect-device", "logoff-device":
+            guard ProcessInfo.processInfo.environment["ICA_ALLOW_DEVICE_WIDE"] == "1" else {
+                fail("device-wide calls need ICA_ALLOW_DEVICE_WIDE=1 (docs/90 §11 item 14: only after items 7 and 8)")
+            }
+            let resources = try await store.resources()
+            let isOurs: (StoreSessionInfo) -> Bool = { TestSessionGate.allows($0, allowed: allowed, resources: resources) }
+            let status = sub == "disconnect-device"
+                ? try await api.disconnectDevice(clientNames: ourClientNames(), isOurs: isOurs)
+                : try await api.logOffDevice(clientNames: ourClientNames(), isOurs: isOurs)
+            print("\(sub): status \(status)")
+            try http.saveCookies(to: cookiePath)
+
+        default:
+            fail("usage: icactl sessions list|probe|disconnect <id>|logoff <id>|reconnect <id>|disconnect-device|logoff-device")
+        }
+    } catch {
+        fail("\(error)")
+    }
+}
+
+/// docs/90 §11 items 1, 2, 4–7: names, keys, counts, states and status codes only.
+func probe(store: StoreClient, api: StoreSessions) async throws {
+    // 1. Home/Configuration (through the store sign-in, which also records the session paths).
+    try await store.signIn()
+    let config = try await http.send("POST", URL(string: "Home/Configuration", relativeTo: store.base)!,
+                                     headers: ["X-Citrix-IsUsingHTTPS": "Yes", "X-Requested-With": "XMLHttpRequest",
+                                               "Accept": "*/*", "Csrf-Token": http.cookie("CsrfToken") ?? ""], form: nil)
+    print("1. Home/Configuration \(config.status)")
+    for element in ["sessionsProxy", "sessionControlProxy", "workspaceControl", "machinesProxy"] {
+        if let range = config.text.range(of: "<\(element)[\\s/>][^>]*>", options: .regularExpression) {
+            print("   " + redact(String(config.text[range])))
+        } else {
+            print("   <\(element)> absent")
+        }
+    }
+    let endpoints = SessionEndpoints(configuration: config.text)
+    print("   paths: list \(endpoints.list ?? "none"), available \(endpoints.listAvailable), by-id \(endpoints.disconnectSessions ?? "none")/\(endpoints.logOffSessions ?? "none")")
+    // 2. Cookie names.
+    let names = http.cookieNames
+    print("2. cookies: \(names.joined(separator: ", ")); CtxsDeviceId \(names.contains(DeviceIdentity.cookieName) ? "present" : "absent")")
+    print("3. ClientName key: see `ICA file: ClientName key` in the output of `icactl session`")
+    // 4. Sessions/List.
+    func listCheck(_ label: String) async throws -> StoreSessionList? {
+        let (response, method, form) = try await api.probe(.list)
+        print("\(label) Sessions/List \(method) → \(response.status), headers \(form?.rawValue ?? "refused")")
+        guard response.status == 200 else { return nil }
+        print("   keys: \(SessionsJSON.keyPaths(response.body).joined(separator: " "))")
+        let list = try SessionsJSON.sessionList(response.body)
+        let counts = Dictionary(grouping: list.sessions, by: \.connectionState.name).map { "\($0.key) \($0.value.count)" }.sorted()
+        print("   \(list.sessions.count) session(s): \(counts.joined(separator: ", ")); device \(list.deviceId.map(StoreSessionInfo.fingerprint) ?? "none")")
+        return list
+    }
+    let before = try await listCheck("4.")
+    // 5. ListAvailable, both forms; no entry is launched.
+    for exclude in [true, false] {
+        let (response, _, form) = try await api.probe(.available(excludeActive: exclude))
+        let count = (try? SessionsJSON.available(response.body).count).map(String.init) ?? "-"
+        print("5. ListAvailable\(exclude ? " excludeActive=true" : "") → \(response.status) (\(form?.rawValue ?? "refused")), "
+              + "\(response.body.count) B, \(count) entries; keys: \(SessionsJSON.keyPaths(response.body).joined(separator: " "))")
+    }
+    let after = try await listCheck("5. again:")
+    if let before, let after {
+        let changed = before.sessions.filter { b in after.sessions.first { $0.sessionId == b.sessionId }?.connectionState != b.connectionState }
+        print("   state changes after listing: \(changed.count)")
+    }
+    // 6. App ids vs resource ids.
+    let resources = try await store.resources()
+    if let list = after ?? before {
+        let apps = list.sessions.flatMap(\.applications)
+        let joined = apps.filter { a in a.id.map { id in resources.contains { $0.id == id } } ?? false }
+        print("6. applications[].id equal to a Resources/List id: \(joined.count) of \(apps.count)")
+    }
+    // 7. Device id across a second sign-in in the same jar.
+    try await store.signIn()
+    let again = try? await api.list()
+    let first = (after ?? before)?.deviceId
+    print("7. deviceId after a second sign-in: \(first == nil || again?.deviceId == nil ? "not comparable" : first == again?.deviceId ? "same" : "different")"
+          + " (fingerprint \(again?.deviceId.map(StoreSessionInfo.fingerprint) ?? "none"); compare after `icactl login`, with ICA_NO_DEVICE_ID=1 for an empty jar)")
+    try http.saveCookies(to: cookiePath)
+}
+
+// MARK: - Drive mapping test (docs/95 "To verify live")
+
+func runCDMTest(ica: ICAFile, save: Bool) async throws {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let probeText = "CTXCDM-Test äöü \(UUID().uuidString)\r\n"
+    // A fresh, empty folder: the only thing the session can reach.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("ica-cdmtest-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    try Data(probeText.utf8).write(to: root.appendingPathComponent("cdmtest-probe.txt"))
+    say("shared folder: \(root.path) as M:")
+    var config = WinstationDriver.Configuration()
+    config.logon = WDLogon(ica: ica)
+    config.display = WDDisplay(width: 1920, height: 1080)
+    let fs = try CDMPOSIXFileSystem(root: root, readOnly: false)
+    fs.quarantineAgent = "icactl"
+    let session = try ICASession(ica: ica, configuration: config, clipboard: nil,
+                                 cdm: CDMEngine.Config(fileSystem: fs, letter: "M", label: "cdmtest"))
+    guard let cdm = session.cdm else { fail("no CDM engine") }
+    let seamless = session.seamless
+
+    // Session-queue state.
+    var logon = FreshLogonDetector()
+    var windowsSeen = SeenWindows()
+    var appWindows: [UInt32] = []
+    var operations: [String] = []
+    var protocolError: String?
+    var terminateReason: UInt8?
+    var channelBytes = 0
+
+    cdm.onEvent = { event in
+        say("cdm: \(event)")
+        switch event {
+        case .operation(let line): operations.append(line)
+        case .protocolError(let text): protocolError = text
+        case .stopped: break
+        }
+    }
+    seamless.onEvent = { event in
+        switch event {
+        case .channelReady:
+            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+        case .windowAdded(let w):
+            logon.windowAdded(appKey: w.appKey)
+            windowsSeen.note(w)
+            if w.kind == .appWindow { appWindows.append(w.id) }
+            say("TWI window \(w.id) \(w.kind) \"\(w.title)\" app \(w.appKey)")
+        case .windowChanged(let w, _):
+            windowsSeen.note(w)
+        case .windowRemoved(let w):
+            appWindows.removeAll { $0 == w.id }
+        default: break
+        }
+    }
+    session.onThinwireInit = { info in
+        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+    }
+    session.onEvent = { event in
+        switch event {
+        case .log(let text): say(text)
+        case .closed(let reason): say("session closed: \(reason)")
+        case .wd(let e):
+            switch e {
+            case .initResponseSent(let modules, _): say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+            case .connected: say("WD connected")
+            case .packet(let p) where p.channel == CDMWire.channelNumber: channelBytes += p.payload.count
+            case .terminate(let reason):
+                terminateReason = reason
+                say("← TERMINATE reason \(reason)")
+            case .failure(let text): say("WD failure: \(text)")
+            default: break
+            }
+        default: break
+        }
+    }
+
+    func key(_ code: UInt8, ctrl: Bool = false, shift: Bool = false) {
+        session.sendInput { wd in
+            if ctrl { wd.keyScancode(0x1D, up: false) }
+            if shift { wd.keyScancode(0x2A, up: false) }
+            wd.keyScancode(code, up: false)
+            wd.keyScancode(code, up: true)
+            if shift { wd.keyScancode(0x2A, up: true) }
+            if ctrl { wd.keyScancode(0x1D, up: true) }
+        }
+    }
+    func type(_ text: String) {
+        session.sendInput { wd in
+            for unit in text.utf16 {
+                wd.keyUnicode(unit, flags: [])
+                wd.keyUnicode(unit, flags: .up)
+            }
+        }
+    }
+    func sawOperation(_ prefix: String, _ name: String) -> () -> Bool {
+        { operations.contains { $0.hasPrefix(prefix) && $0.contains(name) } }
+    }
+
+    try await session.start()
+    let start = Date()
+    // Items 1–3: CONNECT and what follows without any user action.
+    let connected = await waitFor(session, 90) { operations.contains { $0.hasPrefix("CONNECT") } }
+    say(connected ? "CDM CONNECT received" : "no CDM CONNECT within 90 s (module refused, or drive mapping disabled by policy)")
+    if connected { try await Task.sleep(nanoseconds: 20_000_000_000) }
+    let unprompted = await onSession(session) { operations }
+    let notepad: () -> UInt32? = {
+        appWindows.first { id in
+            if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == "notepad.exe" }
+            let key = windowsSeen.appKey(id)?.lowercased() ?? ""
+            return key.contains("notepad") || key == "app:editor ekm"
+        }
+    }
+    let found = await waitFor(session, max(5, 150 - Date().timeIntervalSince(start))) { logon.isFresh && notepad() != nil }
+    let fresh = await onSession(session) { logon.isFresh }
+    let target = await onSession(session) { notepad() }
+    var steps: [String] = []
+    if !fresh {
+        say("not a fresh logon by this run: no input is sent (this may be an existing session)")
+    } else if !connected || !found || target == nil {
+        say("no Notepad window or no CDM channel: no input is sent")
+    } else if let target {
+        session.send { _, twi in twi.activate(windowId: target) }
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        // (a) Open the probe file from the mapped drive (UNC: the letter is not preserved by default, §A.6).
+        say("(a) Ctrl+O, \\\\Client\\M$\\cdmtest-probe.txt, Enter")
+        key(0x18, ctrl: true)
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        type("\\\\Client\\M$\\cdmtest-probe.txt")
+        key(0x1C)
+        let read = await waitFor(session, 20) { operations.contains { $0.hasPrefix("CLOSE") && $0.contains("cdmtest-probe.txt: read") && !$0.contains("read 0 B") } }
+        steps.append(read ? "open: Notepad read the probe file over CDM" : "open: no read of the probe file within 20 s")
+        say(steps.last!)
+        if !read { key(0x01); key(0x01) }  // Escape any error box and the dialog
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        // (b) Save As into the mapped drive (only with ICA_CDMTEST_SAVE=1).
+        if save && read {
+            say("(b) Ctrl+Shift+S, \\\\Client\\M$\\cdmtest-saved.txt, Enter")
+            key(0x1F, ctrl: true, shift: true)
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            type("\\\\Client\\M$\\cdmtest-saved.txt")
+            key(0x1C)
+            _ = await waitFor(session, 20, sawOperation("CLOSE", "cdmtest-saved.txt"))
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            let saved = root.appendingPathComponent("cdmtest-saved.txt")
+            let text = (try? Data(contentsOf: saved)).map { String(decoding: $0, as: UTF8.self) }
+            let quarantined = getxattr(saved.path, CDMPOSIXFileSystem.quarantineName, nil, 0, 0, XATTR_NOFOLLOW) > 0
+            steps.append(text == nil ? "save: no file arrived" :
+                "save: file arrived, \(text == probeText ? "content EQUALS the probe" : "content differs (\(text!.utf8.count) B)"), quarantine \(quarantined ? "set" : "MISSING")")
+            say(steps.last!)
+            if text == nil { key(0x01); key(0x01) }
+        }
+    }
+
+    // End: log off only a fresh session; otherwise disconnect (CGP FINISH).
+    var ending: String
+    if session.isClosed {
+        ending = "session ended by the server" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+    } else if !fresh {
+        await session.close()
+        ending = "disconnected (CGP FINISH), not logged off"
+    } else {
+        let sent: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        if sent {
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+        }
+        if session.isClosed {
+            ending = "logged off" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+        } else {
+            await session.close()
+            ending = "logoff did not end the session in 25 s; disconnected"
+        }
+    }
+    let summary = await onSession(session) { (operations, protocolError, channelBytes, cdm.requestsServed) }
+    say("\n=== cdmtest summary ===")
+    say("CONNECT: \(connected); requests served: \(summary.3); host bytes on ch 10: \(summary.2)")
+    say("unprompted requests (first 20 s): \(unprompted.count)")
+    for line in unprompted.prefix(40) { say("  " + line) }
+    var counts: [String: Int] = [:]
+    for line in summary.0 { counts[String(line.prefix { $0 != " " }), default: 0] += 1 }
+    say("by command: " + counts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    say("protocol error: \(summary.1 ?? "none")")
+    say("fresh logon: \(fresh)")
+    for step in steps { say("  " + step) }
+    say("end: \(ending)")
+    try? FileManager.default.removeItem(at: root)
 }

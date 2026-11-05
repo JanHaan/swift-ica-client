@@ -36,6 +36,13 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
 
     public var cookieNames: [String] { (jar.cookies ?? []).map(\.name).sorted() }
 
+    /// The first cookie with this name (value, domain, path), e.g. to persist the store's device id.
+    public func cookieRecord(_ name: String) -> HTTPCookie? {
+        jar.cookies?.first { $0.name == name }
+    }
+
+    public func setCookie(_ cookie: HTTPCookie) { jar.setCookie(cookie) }
+
     public func clearCookies() {
         for cookie in jar.cookies ?? [] { jar.deleteCookie(cookie) }
     }
@@ -43,15 +50,22 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     public func send(
         _ method: String, _ url: URL, headers: [String: String] = [:], form: [(String, String)]? = nil
     ) async throws -> Response {
+        if let form {
+            return try await send(method, url, headers: headers, body: Data(Self.formEncode(form).utf8),
+                                  contentType: "application/x-www-form-urlencoded")
+        }
+        return try await send(method, url, headers: headers, body: method == "POST" ? Data() : nil, contentType: nil)
+    }
+
+    /// Request with a raw body (e.g. JSON for the store's session control calls, docs/90 §5.2).
+    public func send(
+        _ method: String, _ url: URL, headers: [String: String] = [:], body: Data?, contentType: String?
+    ) async throws -> Response {
         var request = URLRequest(url: url)
         request.httpMethod = method
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
-        if let form {
-            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-            request.httpBody = Data(Self.formEncode(form).utf8)
-        } else if method == "POST" {
-            request.httpBody = Data()
-        }
+        if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
+        request.httpBody = body
         trace("→ \(method) \(Self.display(url))")
         let (data, response) = try await session.data(for: request)
         let http = response as! HTTPURLResponse

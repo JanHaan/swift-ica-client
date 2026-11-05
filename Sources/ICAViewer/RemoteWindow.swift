@@ -4,6 +4,8 @@ import QuartzCore
 
 /// Shows a crop of the shared session framebuffer: a layer whose `contents` is the framebuffer's
 /// IOSurface and whose `contentsRect` is the remote window rect (docs/50 §3, D8). Forwards input.
+/// The view is in points; the crop and all input are session pixels, k = `RemoteWindow.displayScale`
+/// pixels per point (docs/80 §2.3, §4.2).
 final class SessionView: NSView {
     weak var remote: RemoteWindow?
     private let surfaceLayer = CALayer()
@@ -58,8 +60,25 @@ final class SessionView: NSView {
         surfaceLayer.contents = nil
         if let image = remote.resizeSnapshot { surfaceLayer.contents = image }
         else { surfaceLayer.contents = controller.surface }
+        updateFilters()
         updateContentsRect()
         CATransaction.commit()
+    }
+
+    /// One session pixel per device pixel when k equals the screen's backing scale: nearest filtering,
+    /// pixel-exact. A 2x window on a 1x screen (manual 2x, or a window straddling onto it) shows
+    /// 2 px per device pixel: linear minification keeps thin strokes (docs/80 §4.2).
+    private func updateFilters() {
+        let backing = window?.backingScaleFactor ?? 1
+        let k = remote?.displayScale ?? 1
+        surfaceLayer.contentsScale = backing
+        surfaceLayer.magnificationFilter = .nearest
+        surfaceLayer.minificationFilter = k > backing ? .linear : .nearest
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        refresh()
     }
 
     /// Crop = content origin + the view's current size. With a snapshot: anchored top-left, 1:1; a
@@ -67,16 +86,16 @@ final class SessionView: NSView {
     /// areas with the window's edge colour.
     func updateContentsRect() {
         guard let remote, let controller = remote.controller else { return }
+        let k = remote.displayScale
         if let image = remote.resizeSnapshot {
             surfaceLayer.contentsRect = TWILocalGesture.snapshotContentsRect(
-                viewSize: bounds.size, imageSize: CGSize(width: image.width, height: image.height))
+                viewSize: CGSize(width: bounds.width * k, height: bounds.height * k), imageSize: CGSize(width: image.width, height: image.height))
             return
         }
         let fb = controller.surfaceSize
         guard fb.width > 0, fb.height > 0 else { return }
-        let r = remote.contentOrigin
-        surfaceLayer.contentsRect = CGRect(x: CGFloat(r.left) / fb.width, y: CGFloat(r.top) / fb.height,
-                                           width: bounds.width / fb.width, height: bounds.height / fb.height)
+        let r = remote.contentPixelRect
+        surfaceLayer.contentsRect = CGRect(x: r.minX / fb.width, y: r.minY / fb.height, width: r.width / fb.width, height: r.height / fb.height)
     }
 
     override func layout() {
@@ -109,11 +128,18 @@ final class SessionView: NSView {
 
     // MARK: Mouse
 
-    /// Absolute session position for an event.
+    /// Absolute session position for an event: origin + floor(p · k) on the window and its screen
+    /// (docs/80 §2.3); a drag carried onto another screen maps through that screen.
     private func sessionPoint(_ event: NSEvent) -> (Int, Int) {
         let p = convert(event.locationInWindow, from: nil)
-        let r = remote?.inputOrigin ?? .zero
-        return (Int(r.left) + Int(p.x.rounded(.down)), Int(r.top) + Int(p.y.rounded(.down)))
+        guard let remote, let window, let layout = remote.controller?.layout else {
+            let s = ScalingLayout.sessionPoint(viewPoint: p, origin: remote?.inputOrigin ?? .zero, scale: remote?.displayScale ?? 1)
+            return (s.x, s.y)
+        }
+        let s = layout.eventPoint(viewPoint: p, origin: remote.inputOrigin, scale: remote.displayScale,
+                                  screenPoint: window.convertPoint(toScreen: event.locationInWindow),
+                                  windowFrame: window.frame, windowMonitor: remote.monitorIndex)
+        return (s.x, s.y)
     }
 
     private func mouse(_ event: NSEvent, _ state: WDBuild.MouseState) {
@@ -211,7 +237,7 @@ final class SeamlessWindow: NSWindow {
             }
             return
         }
-        let p = view.convert(event.locationInWindow, from: nil)   // flipped: remote window-relative pixels
+        let p = view.convert(event.locationInWindow, from: nil)   // flipped: remote window-relative points
         switch event.type {
         case .leftMouseDown:
             if remote.isResizeEdge(p), !hitsStandardButton(event) {
@@ -345,13 +371,28 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
 
     /// Remote origin the layer crops from.
     var contentOrigin: TWIRect { gesture.startRect ?? info.windowRect }
+    /// Session pixels per point for this window: the k of the monitor its remote rect was placed by.
+    private(set) var displayScale: CGFloat = 1
+    /// That monitor (index into the controller's layout).
+    private(set) var monitorIndex = 0
+    /// The local content rect we last placed from a remote rect, and that rect: an unchanged local
+    /// frame maps back to exactly this rect (no rounding).
+    private var applied: (content: CGRect, remote: TWIRect)?
+
+    /// Framebuffer pixels the layer shows: the crop origin plus the view size in pixels.
+    var contentPixelRect: CGRect {
+        let r = contentOrigin
+        return CGRect(x: CGFloat(r.left), y: CGFloat(r.top), width: view.bounds.width * displayScale, height: view.bounds.height * displayScale)
+    }
     /// Remote origin for input: the rect we asked for once committed (the host is moving it there).
     var inputOrigin: TWIRect { gesture.inputOverride ?? info.windowRect }
 
     init(info: TWIWindow, controller: SessionController) {
         self.info = info
         self.controller = controller
-        let frame = controller.mapping.screenRect(info.windowRect)
+        monitorIndex = controller.placementMonitor(for: info)
+        displayScale = CGFloat(controller.layout.monitors[monitorIndex].scale)
+        let frame = controller.layout.pointRect(info.windowRect, monitor: monitorIndex)
         view = SessionView(frame: NSRect(origin: .zero, size: frame.size))
         if info.kind == .appWindow {
             var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
@@ -379,6 +420,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         // explicitly so windows on another screen start where the host has them (live: 170,463
         // instead of 2410,… on the second screen).
         window.setFrame(window.frameRect(forContentRect: frame), display: false)
+        applied = (window.contentRect(forFrameRect: window.frame), info.windowRect)
         window.isReleasedWhenClosed = false
         window.acceptsMouseMovedEvents = true
         window.contentView = view
@@ -389,7 +431,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         if info.isTopmost, info.kind == .appWindow { window.level = .floating }
         if info.kind == .appWindow {
             let f = window.frame, c = window.contentRect(forFrameRect: f)
-            vlog("window \(String(info.id, radix: 16)) windowNumber \(window.windowNumber): frame \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)), content \(Int(c.width))x\(Int(c.height)), remote \(info.windowRect.width)x\(info.windowRect.height)")
+            vlog("window \(String(info.id, radix: 16)) windowNumber \(window.windowNumber): frame \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)), content \(Int(c.width))x\(Int(c.height)), remote \(info.windowRect.width)x\(info.windowRect.height) (monitor \(monitorIndex), \(Int(displayScale))x)")
         }
         view.refresh()
     }
@@ -498,9 +540,17 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: verify)
     }
 
+    /// Places the window at the host's rect, through the monitor holding most of it.
     private func applyRemoteFrame() {
         guard let controller else { return }
-        let content = controller.mapping.screenRect(info.windowRect)
+        let layout = controller.layout
+        monitorIndex = controller.placementMonitor(for: info)
+        let k = CGFloat(layout.monitors[monitorIndex].scale)
+        if k != displayScale {
+            vlog("window \(String(info.id, radix: 16)): now on monitor \(monitorIndex) at \(Int(k))x")
+            displayScale = k
+        }
+        let content = layout.pointRect(info.windowRect, monitor: monitorIndex)
         let frame = window.frameRect(forContentRect: content)
         if window.frame != frame {
             let wasApplying = applyingRemote
@@ -508,36 +558,54 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
             window.setFrame(frame, display: true)
             applyingRemote = wasApplying
         }
+        applied = (window.contentRect(forFrameRect: window.frame), info.windowRect)
     }
 
-    // MARK: Caption and border hit areas (docs/50 §3.1), remote window-relative pixels
+    /// Host metrics (SYSTEM_METRICS) are taken to be at the primary monitor's Windows scaling [I], so
+    /// they scale by W(this monitor) / W(primary); our fallback minimums are 100 % values and scale by
+    /// W / 100 (docs/80 §2.3, §4.2).
+    private var metricScale: (host: CGFloat, minimum: CGFloat) {
+        guard let layout = controller?.layout, monitorIndex < layout.monitors.count else { return (1, 1) }
+        let w = CGFloat(layout.monitors[monitorIndex].windowsPercent), primary = CGFloat(layout.monitors[0].windowsPercent)
+        return (w / max(primary, 1), w / 100)
+    }
+
+    // MARK: Caption and border hit areas (docs/50 §3.1), compared in session pixels
+
+    /// View point (points) → window-relative session pixels, and the view size in pixels.
+    private func pixels(_ p: NSPoint) -> (p: NSPoint, size: CGSize) {
+        let k = displayScale
+        return (NSPoint(x: p.x * k, y: p.y * k), CGSize(width: view.bounds.width * k, height: view.bounds.height * k))
+    }
 
     /// Remote resize border: local resize for resizable windows.
-    func isResizeEdge(_ p: NSPoint) -> Bool {
+    func isResizeEdge(_ point: NSPoint) -> Bool {
         guard window.styleMask.contains(.resizable), !info.isMaximized else { return false }
-        let m = controller?.systemMetrics
-        let band = CGFloat(max(4, Int(m?.frameThickness.x ?? 4)))
-        let b = view.bounds
+        let m = controller?.systemMetrics, s = metricScale
+        let band = max(4 * s.minimum, m.map { CGFloat($0.frameThickness.x) * s.host } ?? 0)
+        let (p, b) = pixels(point)
         return p.x < band || p.y < band || p.x > b.width - band || p.y > b.height - band
     }
 
     /// Remote caption without its icon and caption buttons: dragging there moves the window locally.
-    func isCaptionDrag(_ p: NSPoint) -> Bool {
+    func isCaptionDrag(_ point: NSPoint) -> Bool {
         let hasCaption = info.style & TWIStyle.caption == TWIStyle.caption || info.flags & 0x0004 != 0
         guard hasCaption, info.flags & 0x0008 == 0, !info.isMaximized else { return false }
-        let m = controller?.systemMetrics
+        let m = controller?.systemMetrics, s = metricScale
         let thick = info.isResizable
-        let fx = CGFloat(thick ? (m?.frameThickness.x ?? 4) : (m?.dialogFrameThickness.x ?? 3))
-        let fy = CGFloat(thick ? (m?.frameThickness.y ?? 4) : (m?.dialogFrameThickness.y ?? 3))
-        let captionHeight = CGFloat(max(Int(m?.captionHeight ?? 23), 23))
+        func metric(_ v: Int16?, _ fallback: CGFloat) -> CGFloat { v.map { CGFloat($0) * s.host } ?? fallback * s.minimum }
+        let fx = metric(thick ? m?.frameThickness.x : m?.dialogFrameThickness.x, thick ? 4 : 3)
+        let fy = metric(thick ? m?.frameThickness.y : m?.dialogFrameThickness.y, thick ? 4 : 3)
+        let captionHeight = max(metric(m?.captionHeight, 23), 23 * s.minimum)
         // Visible caption buttons are wider than the classic metric on current Windows; be generous:
         // anything excluded here still works, the host then moves the window itself.
-        let buttonWidth = CGFloat(max(Int(m?.captionButtonWidth ?? 46), 46))
+        let buttonWidth = max(metric(m?.captionButtonWidth, 46), 46 * s.minimum)
         let boxes = info.style & (TWIStyle.minimizeBox | TWIStyle.maximizeBox) != 0
         let buttons = (boxes ? 3 : 1) * buttonWidth
         let icon = info.style & TWIStyle.sysMenu != 0 ? captionHeight : 0
-        let top = fy, bottom = fy + captionHeight + 6
-        return p.y >= top && p.y < bottom && p.x >= fx + icon && p.x < view.bounds.width - fx - buttons
+        let top = fy, bottom = fy + captionHeight + 6 * s.minimum
+        let (p, size) = pixels(point)
+        return p.y >= top && p.y < bottom && p.x >= fx + icon && p.x < size.width - fx - buttons
     }
 
     /// The screen layout changed: re-place the window for the new mapping.
@@ -546,9 +614,19 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         view.refresh()
     }
 
-    /// Remote rect of the local content area.
+    /// Remote rect of the local content area, through the screen holding most of it. A move (same size
+    /// in points) keeps the pixel size: a window that changes screens to one with another scale is
+    /// rescaled by Windows itself (DPI change), and we follow the rect the host reports.
     var localRemoteRect: TWIRect {
-        controller?.mapping.remoteRect(window.contentRect(forFrameRect: window.frame)) ?? info.windowRect
+        guard let layout = controller?.layout else { return info.windowRect }
+        let c = window.contentRect(forFrameRect: window.frame)
+        guard let applied else { return layout.sessionRect(c) }
+        if c == applied.content { return applied.remote }
+        let r = layout.sessionRect(c)
+        if abs(c.width - applied.content.width) < 0.25, abs(c.height - applied.content.height) < 0.25 {
+            return TWIRect(x: r.left, y: r.top, width: applied.remote.width, height: applied.remote.height)
+        }
+        return r
     }
 
     /// Dark overlay while the session is suspended (nil = off).
@@ -581,7 +659,8 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
     private func localGeometryChanged() {
         guard !applyingRemote, !closingFromRemote, !window.isMiniaturized else { return }
         if frozenRect == nil { beginLocalGeometry(); gestureActive = false }
-        if gesture.needsSnapshot(viewWidth: Int32(view.bounds.width.rounded()), viewHeight: Int32(view.bounds.height.rounded())) {
+        let local = localRemoteRect
+        if gesture.needsSnapshot(viewWidth: local.width, viewHeight: local.height) {
             requestSnapshot()
         }
         view.refresh()
@@ -600,10 +679,10 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         var rect = localRemoteRect
         // Never send the host a position outside every screen: Windows treats such a window as off the
         // desktop and the host removes it (live, Outlook dragged past the session desktop).
-        if !controller.mapping.isOnScreen(rect) {
-            rect = controller.mapping.onMainScreen(rect)
+        if !controller.layout.isOnScreen(rect) {
+            rect = controller.layout.onMainScreen(rect)
             vlog("local move of \(String(info.id, radix: 16)) left every screen; clamped")
-            let content = controller.mapping.screenRect(rect)
+            let content = controller.layout.pointRect(rect)
             applyingRemote = true
             window.setFrame(window.frameRect(forContentRect: content), display: true)
             applyingRemote = false

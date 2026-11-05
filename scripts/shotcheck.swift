@@ -4,6 +4,8 @@
 //   shotcheck composite <out.png> <in1.png> <in2.png>...
 //                                                 in1 on a flat #E5E5EA background with 48 px padding,
 //                                                 every further image centred over in1 (HUD over a window)
+//   shotcheck strip <png>...                      removes the metadata chunks tEXt, iTXt, zTXt, eXIf, tIME in
+//                                                 place; all other chunks (so the pixel data) stay byte-identical
 //   shotcheck selftest <dir>                      writes synthetic PNGs to <dir> and checks them
 //
 // check (1): Vision OCR (accurate, en + de) must not recognise any forbidden word (case-insensitive regexes
@@ -175,7 +177,73 @@ func composite(out: String, inputs: [String]) {
         ctx.draw(image, in: rect.offsetBy(dx: CGFloat(padding) - bounds.minX, dy: CGFloat(padding) - bounds.minY))
     }
     writePNG(ctx.makeImage()!, to: out)
+    _ = strip(out)
     print("composite \(out): \(width)x\(height) px from \(inputs.count) image(s)")
+}
+
+// MARK: Metadata stripping
+
+let metadataChunks: Set<String> = ["tEXt", "iTXt", "zTXt", "eXIf", "tIME"]
+
+/// Removes the metadata chunks from PNG `data`; every other chunk is copied verbatim. nil if not a valid PNG.
+func strippedPNG(_ data: Data) -> (data: Data, removed: [String])? {
+    let signature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    let b = [UInt8](data)
+    guard b.count >= 8, Array(b[0..<8]) == signature else { return nil }
+    var out = Array(b[0..<8])
+    var removed: [String] = []
+    var i = 8
+    var sawEnd = false
+    while i + 12 <= b.count {
+        let length = Int(b[i]) << 24 | Int(b[i + 1]) << 16 | Int(b[i + 2]) << 8 | Int(b[i + 3])
+        let end = i + 12 + length
+        guard end <= b.count else { return nil }
+        let type = String(decoding: b[(i + 4)..<(i + 8)], as: UTF8.self)
+        if metadataChunks.contains(type) { removed.append(type) } else { out += b[i..<end] }
+        i = end
+        if type == "IEND" { sawEnd = true; break }
+    }
+    guard sawEnd else { return nil }
+    return (Data(out), removed)   // bytes after IEND are dropped
+}
+
+/// Strips the metadata chunks of the PNG at `path` in place; the file is rewritten only if something changed.
+func strip(_ path: String) -> Bool {
+    guard let data = FileManager.default.contents(atPath: path), let result = strippedPNG(data) else {
+        FileHandle.standardError.write(Data("cannot strip \(path): not a valid PNG\n".utf8))
+        return false
+    }
+    if result.data != data {
+        do { try result.data.write(to: URL(fileURLWithPath: path), options: .atomic) } catch {
+            FileHandle.standardError.write(Data("cannot write \(path)\n".utf8))
+            return false
+        }
+    }
+    print("strip \((path as NSString).lastPathComponent): " + (result.removed.isEmpty ? "no metadata" : "removed " + result.removed.joined(separator: ",")))
+    return true
+}
+
+/// Inserts a chunk (with a dummy CRC, which is never verified here) before IDAT/IEND to build test input.
+func pngWithChunks(_ data: Data, _ chunks: [(String, [UInt8])]) -> Data {
+    let b = [UInt8](data)
+    var out = Array(b[0..<8])
+    var i = 8
+    var inserted = false
+    while i + 12 <= b.count {
+        let length = Int(b[i]) << 24 | Int(b[i + 1]) << 16 | Int(b[i + 2]) << 8 | Int(b[i + 3])
+        let type = String(decoding: b[(i + 4)..<(i + 8)], as: UTF8.self)
+        if type == "IDAT" && !inserted {
+            for (t, body) in chunks {
+                let n = body.count
+                out += [UInt8(n >> 24 & 255), UInt8(n >> 16 & 255), UInt8(n >> 8 & 255), UInt8(n & 255)]
+                out += Array(t.utf8) + body + [0, 0, 0, 0]
+            }
+            inserted = true
+        }
+        out += b[i..<(i + 12 + length)]
+        i += 12 + length
+    }
+    return Data(out)
 }
 
 /// Synthetic images: a rounded window with text, a leaky one, and one with square opaque corners.
@@ -211,6 +279,24 @@ func selftest(dir: String) -> Bool {
     composite(out: comp, inputs: [good, hud])
 
     var failures: [String] = []
+    // strip: metadata chunks go, everything else stays byte-identical, and the decoded pixels are unchanged.
+    do {
+        let plain = try! Data(contentsOf: URL(fileURLWithPath: good))
+        let tagged = pngWithChunks(plain, [("tEXt", Array("Software\0secret".utf8)), ("iTXt", [1, 2, 3]), ("zTXt", [4]),
+                                           ("eXIf", [5, 6]), ("tIME", [7, 8, 9, 10, 11, 12, 13])])
+        let taggedPath = dir + "/tagged.png"
+        try! tagged.write(to: URL(fileURLWithPath: taggedPath))
+        let before = Pixels(loadImage(taggedPath)).data
+        let ok1 = strip(taggedPath)
+        let after = try! Data(contentsOf: URL(fileURLWithPath: taggedPath))
+        let again = strippedPNG(after)
+        let strippedOK = ok1 && after == strippedPNG(plain)?.data && again?.removed.isEmpty == true
+            && Pixels(loadImage(taggedPath)).data == before
+        print("--- expecting strip to remove 5 metadata chunks and keep the rest: " + (strippedOK ? "ok" : "FAILED"))
+        if !strippedOK { failures.append("strip") }
+        let compData = try! Data(contentsOf: URL(fileURLWithPath: comp))
+        if strippedPNG(compData)?.removed.isEmpty != true { failures.append("composite not stripped") }
+    }
     func expect(_ name: String, passes: Bool, _ path: String) {
         print("--- expecting \(passes ? "pass" : "FAIL") for \(name)")
         if check([path]) != passes { failures.append(name) }
@@ -235,8 +321,10 @@ case "check" where args.count > 1:
     exit(check(Array(args.dropFirst())) ? 0 : 1)
 case "composite" where args.count >= 3:
     composite(out: args[1], inputs: Array(args.dropFirst(2)))
+case "strip" where args.count > 1:
+    exit(args.dropFirst().map(strip).allSatisfy { $0 } ? 0 : 1)
 case "selftest" where args.count == 2:
     exit(selftest(dir: args[1]) ? 0 : 1)
 default:
-    fail("usage: shotcheck check <png>... | composite <out.png> <in1.png> <in2.png>... | selftest <dir>")
+    fail("usage: shotcheck check <png>... | composite <out.png> <in1.png> <in2.png>... | strip <png>... | selftest <dir>")
 }

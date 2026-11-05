@@ -19,7 +19,7 @@ final class SelfTest {
         try? FileManager.default.removeItem(at: resume)
         controller.onWindowsChanged = { [weak self] c in self?.windowsChanged(c) }
         // Never leave a test session running.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 150) { vlog("selftest: overall timeout"); NSApp.terminate(nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 150) { AppQuit.request("selftest overall timeout") }
     }
 
     private func windowsChanged(_ c: SessionController) {
@@ -93,7 +93,7 @@ final class SelfTest {
         if ProcessInfo.processInfo.environment["ICAVIEWER_SELFTEST_END"] == "quit" {
             // App quit path: applicationShouldTerminate logs the session off first.
             vlog("selftest: quitting the app")
-            NSApp.terminate(nil)
+            AppQuit.request("selftest end")   // not from inside this Task (AppQuit)
             return
         }
         // Close via the close button path: TWI close → host destroys → session ends → app quits.

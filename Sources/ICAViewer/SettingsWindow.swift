@@ -1,8 +1,11 @@
 import AppKit
 import ICAKit
 
-/// Settings (Cmd-,): gateway, username, password, passcode mode with TOTP secret, forget all.
-/// Secrets are written to the Keychain only; the fields never show stored values.
+/// Settings (Cmd-,): gateway, username, password, passcode mode with TOTP secret, forget all, and
+/// display scaling (Windows scaling, client scaling; D29, docs/80 §4). Secrets are written to the
+/// Keychain only; the fields never show stored values. Scaling applies at connect; saving a change
+/// while sessions run offers to reconnect them. The shared folder (client drive M, docs/95 §A, D32)
+/// applies at the next connect.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -29,6 +32,20 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let preview = NSTextField(labelWithString: "")
     private let showCodeButton = NSButton(title: loc("Show Current Code", "Aktuellen Code zeigen"), target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "")
+    private let windowsScalingPopup = NSPopUpButton()
+    private let clientScalingPopup = NSPopUpButton()
+    /// One line: the session this Mac's screens get with the chosen scaling, or why it falls back.
+    private let scalingNote = NSTextField(labelWithString: "")
+    private let shareBox = NSButton(checkboxWithTitle: loc("Share a folder with sessions as drive M",
+                                                           "Einen Ordner als Laufwerk M für Sitzungen freigeben"),
+                                    target: nil, action: nil)
+    private let folderPath = NSTextField(labelWithString: "")
+    private let chooseFolderButton = NSButton(title: loc("Choose…", "Auswählen …"), target: nil, action: nil)
+    private let revealFolderButton = NSButton(title: loc("Show in Finder", "Im Finder zeigen"), target: nil, action: nil)
+    private let readOnlyBox = NSButton(checkboxWithTitle: loc("Read-only (the session cannot change files)",
+                                                              "Nur lesen (die Sitzung kann nichts ändern)"),
+                                       target: nil, action: nil)
+    private var sharedFolder = CDMSettings.defaultFolder
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -102,6 +119,30 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         showCodeButton.controlSize = .small
         showCodeButton.bezelStyle = .inline
         preview.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        windowsScalingPopup.addItem(withTitle: loc("Auto (matches client scaling)", "Automatisch (wie Client-Skalierung)"))
+        for p in ScalingSettings.windowsChoices { windowsScalingPopup.addItem(withTitle: "\(p) %") }
+        clientScalingPopup.addItem(withTitle: loc("Auto (2x on Retina screens)", "Automatisch (2x auf Retina-Bildschirmen)"))
+        for k in ScalingSettings.clientChoices { clientScalingPopup.addItem(withTitle: "\(k)x") }
+        for popup in [windowsScalingPopup, clientScalingPopup] {
+            popup.target = self
+            popup.action = #selector(scalingChanged)
+        }
+        scalingNote.textColor = .secondaryLabelColor
+        scalingNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        scalingNote.lineBreakMode = .byTruncatingTail
+        scalingNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        shareBox.target = self
+        shareBox.action = #selector(shareChanged)
+        chooseFolderButton.target = self
+        chooseFolderButton.action = #selector(chooseFolder)
+        revealFolderButton.target = self
+        revealFolderButton.action = #selector(revealFolder)
+        for b in [chooseFolderButton, revealFolderButton] {
+            b.controlSize = .small
+            b.bezelStyle = .inline
+        }
+        folderPath.lineBreakMode = .byTruncatingMiddle
+        folderPath.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
         status.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
@@ -115,6 +156,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         params.spacing = 6
         let previewRow = NSStackView(views: [preview, showCodeButton])
         previewRow.spacing = 8
+        let folderRow = NSStackView(views: [folderPath, chooseFolderButton, revealFolderButton])
+        folderRow.spacing = 6
         let grid = NSGridView(views: [
             [label("Gateway:"), gatewayField],
             [label(loc("User name:", "Benutzername:")), usernameField],
@@ -125,6 +168,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [label(loc("TOTP secret:", "TOTP-Geheimnis:")), secretField],
             [label(loc("Code:", "Code:")), params],
             [NSGridCell.emptyContentView, previewRow],
+            [label(loc("Windows scaling:", "Windows-Skalierung:")), windowsScalingPopup],
+            [label(loc("Client scaling:", "Client-Skalierung:")), clientScalingPopup],
+            [NSGridCell.emptyContentView, scalingNote],
+            [label(loc("Shared folder:", "Freigabe:")), shareBox],
+            [NSGridCell.emptyContentView, folderRow],
+            [NSGridCell.emptyContentView, readOnlyBox],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -135,6 +184,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.column(at: 0).width = 120
         grid.column(at: 1).width = 360
         grid.row(at: 4).topPadding = 8
+        grid.row(at: 9).topPadding = 12
+        grid.row(at: 12).topPadding = 12
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
                               target: self, action: #selector(forgetAll))
@@ -174,7 +225,114 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         algorithmPopup.selectItem(withTitle: "SHA1")
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
+        selectScaling(ScalingSettings())
+        selectDriveMapping(CDMSettings())
         modeChanged()
+    }
+
+    // MARK: Shared folder (client drive mapping)
+
+    private func selectDriveMapping(_ settings: CDMSettings) {
+        shareBox.state = settings.enabled ? .on : .off
+        readOnlyBox.state = settings.readOnly ? .on : .off
+        sharedFolder = settings.folder
+        shareChanged()
+    }
+
+    @objc private func shareChanged() {
+        let on = shareBox.state == .on
+        for c in [chooseFolderButton, readOnlyBox] as [NSControl] { c.isEnabled = on }
+        revealFolderButton.isEnabled = on && FileManager.default.fileExists(atPath: sharedFolder.path)
+        folderPath.stringValue = (sharedFolder.path as NSString).abbreviatingWithTildeInPath
+        folderPath.toolTip = sharedFolder.path
+        folderPath.textColor = on ? .labelColor : .disabledControlTextColor
+    }
+
+    @objc private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = sharedFolder.deletingLastPathComponent()
+        panel.message = loc("Everything in this folder can be read and changed from the session. Choose a dedicated folder.",
+                            "Alles in diesem Ordner kann in der Sitzung gelesen und geändert werden. Bitte einen eigenen Ordner wählen.")
+        guard let window, demo == false else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            if let why = CDMSettings.refusal(url) {
+                self.status.stringValue = loc("This folder cannot be shared (\(why)). Choose a dedicated folder.",
+                                              "Dieser Ordner kann nicht freigegeben werden (\(why)). Bitte einen eigenen Ordner wählen.")
+                return
+            }
+            self.sharedFolder = url
+            self.shareChanged()
+        }
+    }
+
+    @objc private func revealFolder() {
+        NSWorkspace.shared.activateFileViewerSelecting([sharedFolder])
+    }
+
+    private func saveDriveMapping() {
+        var settings = CDMSettings.load(env: [:])
+        settings.enabled = shareBox.state == .on
+        settings.readOnly = readOnlyBox.state == .on
+        settings.folder = sharedFolder
+        guard settings != CDMSettings.load(env: [:]) else { return }
+        settings.save()
+        vlog("drive mapping: saved (\(settings.enabled ? "on" : "off"), \(settings.readOnly ? "read-only" : "read-write")); applies at the next connect")
+    }
+
+    // MARK: Scaling
+
+    private func selectScaling(_ settings: ScalingSettings) {
+        switch settings.windows {
+        case .auto: windowsScalingPopup.selectItem(at: 0)
+        case .percent(let p): windowsScalingPopup.selectItem(at: 1 + (ScalingSettings.windowsChoices.firstIndex(of: p) ?? -1))
+        }
+        switch settings.client {
+        case .auto: clientScalingPopup.selectItem(at: 0)
+        case .fixed(let k): clientScalingPopup.selectItem(at: 1 + (ScalingSettings.clientChoices.firstIndex(of: k) ?? -1))
+        }
+        updateScalingNote()
+    }
+
+    private var selectedScaling: ScalingSettings {
+        let w = windowsScalingPopup.indexOfSelectedItem, c = clientScalingPopup.indexOfSelectedItem
+        return ScalingSettings(windows: w > 0 ? .percent(ScalingSettings.windowsChoices[w - 1]) : .auto,
+                               client: c > 0 ? .fixed(ScalingSettings.clientChoices[c - 1]) : .auto)
+    }
+
+    @objc private func scalingChanged() { updateScalingNote() }
+
+    /// What the current screens would get; the full text is in the tooltip.
+    private func updateScalingNote() {
+        let layout = ScalingLayout.resolve(screens: SessionController.currentScreens(), settings: selectedScaling,
+                                           limit: ScalingLimits.sessionLimit())
+        let text = layout.note.map { scalingNoteText($0, layout: layout) } ?? scalingSummary(layout)
+        scalingNote.stringValue = text
+        scalingNote.toolTip = text
+    }
+
+    /// Saves the scaling choice; if running sessions connected with other settings, offers to reconnect
+    /// them now (disconnect and relaunch; never a logoff).
+    private func saveScaling() {
+        let settings = selectedScaling
+        settings.save()
+        let stale = SessionController.running.filter { $0.differs(from: settings) }
+        guard !stale.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = loc("Reconnect now to apply?", "Jetzt neu verbinden, um die Änderung anzuwenden?")
+        alert.informativeText = loc("Scaling applies when a session connects. Reconnecting disconnects \(stale.map { displayName($0.name) }.joined(separator: ", ")) and connects again with the new scaling; the session is not logged off and your apps keep running.",
+                                    "Die Skalierung gilt beim Verbinden. Beim Neuverbinden wird \(stale.map { displayName($0.name) }.joined(separator: ", ")) getrennt und mit der neuen Skalierung wieder verbunden; die Sitzung wird nicht abgemeldet, die Apps laufen weiter.")
+        alert.addButton(withTitle: loc("Reconnect Now", "Jetzt neu verbinden"))
+        alert.addButton(withTitle: loc("Later", "Später"))
+        if alert.runModal() == .alertFirstButtonReturn {
+            stale.forEach { $0.reconnectToApplySettings() }
+        } else {
+            vlog("scaling: saved \(settings); applies at the next connect")
+        }
     }
 
     private func load() {
@@ -196,6 +354,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         digitsPopup.selectItem(withTitle: String(s.totpDigits))
         periodField.stringValue = String(s.totpPeriod)
         algorithmPopup.selectItem(withTitle: s.totpAlgorithm.rawValue)
+        selectScaling(ScalingSettings.load(env: [:]))
+        selectDriveMapping(CDMSettings.load(env: [:]))
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",
@@ -322,6 +482,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                     service.setGateway(url)
                 }
                 close()
+                saveDriveMapping()
+                saveScaling()
             } catch CredentialError.invalidTOTPSecret {
                 status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",
                                          "Bitte ein gültiges TOTP-Geheimnis (Base32) eingeben oder „Passcode bei jeder Anmeldung eingeben“ wählen.")
@@ -332,4 +494,33 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             }
         }
     }
+}
+
+/// The one-line explanation when a session does not get the scaling asked for (Settings and the log).
+func scalingNoteText(_ note: ScalingLayout.Note, layout: ScalingLayout) -> String {
+    switch note {
+    case let .tooLarge(w, h, lw, lh, manual):
+        return manual
+            ? loc("2x refused: the session would be \(w)×\(h) px, above the \(lw)×\(lh) limit; using 1x.",
+                  "2x abgelehnt: Die Sitzung wäre \(w)×\(h) px, über der Grenze \(lw)×\(lh); es gilt 1x.")
+            : loc("Auto uses 1x: 2x would need \(w)×\(h) px, above the \(lw)×\(lh) limit.",
+                  "Automatisch nutzt 1x: 2x bräuchte \(w)×\(h) px, über der Grenze \(lw)×\(lh).")
+    case let .overlapping(manual):
+        return manual
+            ? loc("Per-screen scaling does not fit this screen arrangement; using 1x.",
+                  "Skalierung pro Bildschirm passt nicht zu dieser Anordnung; es gilt 1x.")
+            : loc("Auto uses 1x: per-screen scaling does not fit this screen arrangement.",
+                  "Automatisch nutzt 1x: Skalierung pro Bildschirm passt nicht zu dieser Anordnung.")
+    case let .exceedsAtOneX(w, h, lw, lh):
+        return loc("The session (\(w)×\(h) px) is above the \(lw)×\(lh) limit even at 1x.",
+                   "Die Sitzung (\(w)×\(h) px) liegt selbst bei 1x über der Grenze \(lw)×\(lh).")
+    }
+}
+
+/// One line describing a layout that got what was asked: session size, scale and Windows scaling.
+func scalingSummary(_ layout: ScalingLayout) -> String {
+    let scales = layout.monitors.map { "\($0.scale)x" }.joined(separator: " / ")
+    let percents = layout.monitors.map { "\($0.windowsPercent) %" }.joined(separator: " / ")
+    return loc("Session \(layout.width)×\(layout.height) px, client \(scales), Windows \(percents).",
+               "Sitzung \(layout.width)×\(layout.height) px, Client \(scales), Windows \(percents).")
 }
