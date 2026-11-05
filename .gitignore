@@ -9,3 +9,4 @@ signing/*.mobileprovision
 signing/DerivedData/
 DerivedData/
 signing/*.xcodeproj/
+.DS_Store

@@ -7,6 +7,9 @@ import QuartzCore
 final class SessionView: NSView {
     weak var remote: RemoteWindow?
     private let surfaceLayer = CALayer()
+    /// Dark overlay while the session is suspended (docs/20 §3.12.9); a sublayer, so the window and
+    /// its number stay the same.
+    private let dimLayer = CALayer()
     private var trackingArea: NSTrackingArea?
     private var scrollAccumulator: CGFloat = 0
 
@@ -19,7 +22,24 @@ final class SessionView: NSView {
         surfaceLayer.backgroundColor = NSColor.black.cgColor
         layer = surfaceLayer          // layer-hosting: we own the layer
         wantsLayer = true
+        dimLayer.backgroundColor = NSColor.black.cgColor
+        dimLayer.isHidden = true
+        dimLayer.zPosition = 1
+        surfaceLayer.addSublayer(dimLayer)
     }
+
+    /// Overlay alpha, or nil for none.
+    func setDim(_ alpha: CGFloat?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        dimLayer.frame = bounds
+        dimLayer.opacity = Float(alpha ?? 0)
+        dimLayer.isHidden = alpha == nil
+        CATransaction.commit()
+    }
+
+    /// Input is dropped while the session is suspended.
+    private var blocked: Bool { remote?.controller?.inputBlocked ?? false }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -64,6 +84,7 @@ final class SessionView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         updateContentsRect()
+        dimLayer.frame = bounds
         CATransaction.commit()
     }
 
@@ -139,6 +160,7 @@ final class SessionView: NSView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.type == .keyDown, window?.isKeyWindow == true, event.modifierFlags.contains(.command),
            let key = event.charactersIgnoringModifiers?.lowercased(), Self.remoteShortcuts.contains(key) {
+            if blocked { return true }
             vlog("key: Cmd-\(key.uppercased()) → remote Ctrl-\(key.uppercased())")
             remote?.controller?.keyboard.keyDown(event)
             return true
@@ -146,9 +168,9 @@ final class SessionView: NSView {
         return super.performKeyEquivalent(with: event)
     }
 
-    override func keyDown(with event: NSEvent) { remote?.controller?.keyboard.keyDown(event) }
-    override func keyUp(with event: NSEvent) { remote?.controller?.keyboard.keyUp(event) }
-    override func flagsChanged(with event: NSEvent) { remote?.controller?.keyboard.flagsChanged(event) }
+    override func keyDown(with event: NSEvent) { if !blocked { remote?.controller?.keyboard.keyDown(event) } }
+    override func keyUp(with event: NSEvent) { if !blocked { remote?.controller?.keyboard.keyUp(event) } }
+    override func flagsChanged(with event: NSEvent) { if !blocked { remote?.controller?.keyboard.flagsChanged(event) } }
 }
 
 /// Titled window for an `.appWindow`: a real NSWindow so switchers see an AXStandardWindow with
@@ -173,6 +195,22 @@ final class SeamlessWindow: NSWindow {
 
     override func sendEvent(_ event: NSEvent) {
         guard let remote, let view = contentView as? SessionView else { return super.sendEvent(event) }
+        if remote.controller?.inputBlocked == true {
+            // Suspended (docs/20 §3.12.3): mouse input is dropped; a click only brings the window
+            // forward locally. Keys go on to the view, which drops them too.
+            switch event.type {
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown: activateForClick()
+            case .leftMouseUp, .rightMouseUp, .otherMouseUp, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+                 .mouseMoved, .scrollWheel: break
+            default: super.sendEvent(event)
+            }
+            pendingCaption = nil
+            if drag != nil, event.type == .leftMouseUp {
+                drag = nil
+                remote.endLocalGeometry()
+            }
+            return
+        }
         let p = view.convert(event.locationInWindow, from: nil)   // flipped: remote window-relative pixels
         switch event.type {
         case .leftMouseDown:
@@ -319,7 +357,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
             var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
             if TWIWindowControls(style: info.style).resizable { style.insert(.resizable) }
             let w = SeamlessWindow(contentRect: frame, styleMask: style, backing: .buffered, defer: false)
-            w.title = info.title             // not shown, but AX and switchers read it
+            w.title = displayName(info.title)             // not shown, but AX and switchers read it
             w.titleVisibility = .hidden
             w.titlebarAppearsTransparent = true
             w.titlebarSeparatorStyle = .none
@@ -376,7 +414,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         info = new
         applyingRemote = true
         defer { applyingRemote = false }
-        if changes.contains(.title), isApp { window.title = new.title }
+        if changes.contains(.title), isApp { window.title = displayName(new.title) }
         if changes.contains(.style) {
             if new.isMinimized, !old.isMinimized, isApp, !window.isMiniaturized {
                 expectMiniaturize = true
@@ -512,6 +550,9 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
     var localRemoteRect: TWIRect {
         controller?.mapping.remoteRect(window.contentRect(forFrameRect: window.frame)) ?? info.windowRect
     }
+
+    /// Dark overlay while the session is suspended (nil = off).
+    func setDimmed(_ alpha: CGFloat?) { view.setDim(alpha) }
 
     func closeFromRemote() {
         closingFromRemote = true

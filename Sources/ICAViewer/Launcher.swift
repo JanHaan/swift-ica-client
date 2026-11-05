@@ -106,7 +106,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
 
     private func applyFilter() {
         let q = search.stringValue.trimmingCharacters(in: .whitespaces)
-        shown = q.isEmpty ? all : all.filter { $0.name.localizedCaseInsensitiveContains(q) }
+        shown = q.isEmpty ? all : all.filter { $0.name.localizedCaseInsensitiveContains(q) || displayName($0.name).localizedCaseInsensitiveContains(q) }
         table.reloadData()
         if !shown.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
     }
@@ -119,6 +119,9 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         onLaunch?(shown[row])
     }
 
+    /// The store sends no icons we use; every resource gets the system's generic application icon.
+    private static let genericIcon = NSWorkspace.shared.icon(for: .applicationBundle)
+
     func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -128,16 +131,24 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
             c.identifier = id
             let text = NSTextField(labelWithString: "")
             text.translatesAutoresizingMaskIntoConstraints = false
+            let icon = NSImageView(image: Self.genericIcon)
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            c.addSubview(icon)
             c.addSubview(text)
+            c.imageView = icon
             c.textField = text
             NSLayoutConstraint.activate([
-                text.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
+                icon.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
+                icon.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 18),
+                icon.heightAnchor.constraint(equalToConstant: 18),
+                text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
                 text.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
                 text.centerYAnchor.constraint(equalTo: c.centerYAnchor),
             ])
             return c
         }()
-        cell.textField?.stringValue = shown[row].name
+        cell.textField?.stringValue = displayName(shown[row].name)
         return cell
     }
 }

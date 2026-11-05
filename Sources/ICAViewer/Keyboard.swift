@@ -12,18 +12,31 @@ final class KeyboardTranslator {
     /// Option is held but Alt has not been sent yet (it might compose a character).
     private var pendingAlt: KeyMap.Code?
     private var altUsed = false
+    /// Keys go through the controller's input path, which may briefly hold them (and the mouse) behind
+    /// a clipboard announce; keys are queued while suspended, never dropped.
+    private func emit(_ body: @escaping (WinstationDriver) -> Void) {
+        controller?.sendInput(dropWhileSuspended: false, body)
+    }
+
+    /// Cmd-V or Ctrl-V, by character as the Edit menu matches it (so Dvorak's V counts too).
+    private func syncClipboardIfPaste(_ event: NSEvent, _ flags: NSEvent.ModifierFlags) {
+        guard flags.contains(.command) || flags.contains(.control) else { return }
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        guard key == "v" || (key == nil && event.keyCode == UInt16(kVK_ANSI_V)) else { return }
+        controller?.clipboardBeforePaste()
+    }
 
     private func send(_ code: KeyMap.Code, up: Bool) {
         controller?.noteActivity()
         if up { down.remove(code) } else { down.insert(code) }
-        controller?.session.send { wd, _ in
+        emit { wd in
             if code.extended { wd.keyScancodes([0xE0, code.code], up: up) } else { wd.keyScancode(code.code, up: up) }
         }
     }
 
     private func sendText(_ text: String) {
         controller?.noteActivity()
-        controller?.session.send { wd, _ in
+        emit { wd in
             for unit in text.utf16 {
                 if wd.unicodeInsertMode { wd.keyUnicode(unit, flags: .insert) }
                 else { wd.keyUnicode(unit, flags: []); wd.keyUnicode(unit, flags: .up) }
@@ -38,6 +51,8 @@ final class KeyboardTranslator {
     func keyDown(_ event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let code = KeyMap.scancode(event.keyCode)
+        // The pasteboard goes to the host before the paste key does (docs/70 §5.4).
+        if !event.isARepeat { syncClipboardIfPaste(event, flags) }
         if flags.contains(.command) {
             // Cmd shortcuts not taken by our menu: Ctrl+key on the server (copy, paste, …).
             guard let code else { return }

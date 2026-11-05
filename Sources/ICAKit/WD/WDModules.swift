@@ -59,6 +59,8 @@ public struct WDModuleIdentity: Sendable {
     public static let encryption = WDModuleIdentity(moduleClass: .pd, versionLow: 1, versionHigh: 1, name: "", hostName: "PDCRYPT1")
     public static let thinwire = WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 5, name: "", hostName: "VDTW30")
     public static let twi = WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA")
+    /// CTXCLIP: min 1 / max 0, as the reference really sends it (docs/70 §1.1, §1.2).
+    public static let clipboard = WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 0, name: "", hostName: "ICA")
     public static let ui = WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "UIModule.class", hostName: "")
 }
 
@@ -223,9 +225,16 @@ public enum WDModules {
         return w.bytes()
     }
 
+    /// Identities of VDs on fixed channels whose header differs from the generic VD (1/1, "ICA").
+    /// The driver builds generic VD modules by channel; a generic identity on one of these channels
+    /// is replaced here, so the module goes out as the spec says.
+    static let fixedVDIdentities: [UInt8: WDModuleIdentity] = [ClipboardWire.channelNumber: .clipboard]
+
     /// Common VD part (§5.5): channel number (cap 0x21 negotiated), no quota, no flow control.
     static func vdHeader(_ id: WDModuleIdentity, channel: UInt8, date: Date) -> WDOffsetWriter {
-        var w = header(id, date: date)
+        let generic = id.moduleClass == .vd && id.versionLow == 1 && id.versionHigh == 1 && id.name.isEmpty && id.hostName == "ICA"
+        let identity = generic ? fixedVDIdentities[channel] ?? id : id
+        var w = header(identity, date: date)
         w.u32(UInt32(channel))
         w.u8(0)
         w.u8(0)
@@ -235,6 +244,12 @@ public enum WDModules {
 
     public static func twi(channel: UInt8 = 12, date: Date = Date()) -> [UInt8] {
         vdHeader(.twi, channel: channel, date: date).bytes()
+    }
+
+    /// CTXCLIP module, 48 bytes, no VD-specific data (docs/70 §1.2). The bind entry
+    /// `CTXCLIP\0 11 00` comes from the WD module's bind table once the engine is registered.
+    public static func clipboard(channel: UInt8 = ClipboardWire.channelNumber, date: Date = Date()) -> [UInt8] {
+        vdHeader(.clipboard, channel: channel, date: date).bytes()
     }
 
     /// Thinwire `LargeCacheSize(w,h)` (docs/40-thinwire.md §2.2).

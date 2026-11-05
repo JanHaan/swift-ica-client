@@ -1,5 +1,6 @@
 import AppKit
 import ICAKit
+import Network
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var store: StoreService?
@@ -11,13 +12,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launching = false
     private var selfTest: SelfTest?
     private var probe: ActivationProbe?
+    private var demo: DemoController?
     /// ICAVIEWER_LAUNCH=<name>: launch this resource right after the list loads, without the launcher.
     private let autoLaunch = ProcessInfo.processInfo.environment["ICAVIEWER_LAUNCH"]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        if Demo.enabled {
+            // ICAVIEWER_DEMO=1: example windows for README screenshots; no network, no Keychain, no session.
+            demo = DemoController(service: StoreService())
+            demo?.start()
+            return
+        }
+        startSystemHooks()
         let launcher = LauncherWindowController()
-        launcher.onLaunch = { [weak self] in self?.launch($0) }
+        launcher.onLaunch = { [weak self] in self?.launch($0, interactive: true) }
         self.launcher = launcher
         if autoLaunch == nil {
             launcher.showWindow(nil)
@@ -58,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         NSApp.terminate(nil)
                         return
                     }
-                    launch(r)
+                    launch(r, interactive: false)
                 } else if StoreService.autofill {
                     vlog("autofill: resource list loaded; quitting (no session)")
                     NSApp.terminate(nil)
@@ -87,15 +96,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Resources already relaunched once after an early server drop.
     private var retried: Set<String> = []
 
-    private func launch(_ resource: StoreClient.Resource) {
+    /// `interactive`: the user chose the resource in the launcher. Automated launches (see `LaunchPolicy`)
+    /// are limited to the test resources.
+    private func launch(_ resource: StoreClient.Resource, interactive: Bool) {
         guard let store, !launching else { return }
-        // Live tests are limited to the test app unless explicitly allowed.
-        if resource.name != "Calculator", ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] != "1" {
-            launcher?.setStatus("Only \"Calculator\" may be launched (set ICA_ALLOW_ANY_RESOURCE=1)")
+        let automated = !interactive || LaunchPolicy.envAutomated()
+        if !LaunchPolicy.allows(resource.name, automated: automated) {
+            launcher?.setStatus("Automated runs may only launch the test resources (ICA_TEST_RESOURCES; ICA_ALLOW_ANY_RESOURCE=1 lifts this)")
+            vlog("automated launch of \"\(resource.name)\" refused (not in ICA_TEST_RESOURCES)")
+            if autoLaunch != nil { NSApp.terminate(nil) }
             return
         }
         launching = true
-        launcher?.setStatus("Launching \(resource.name)…")
+        launcher?.setStatus("Launching \(displayName(resource.name))…")
         Task { @MainActor in
             defer { launching = false }
             do {
@@ -118,10 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.retried.insert(resource.name)
                         self.sessions.removeAll { $0 === c }
                         vlog("session dropped before the seamless channel came up (\(c.endReason)); relaunching once")
-                        self.launch(resource)
+                        self.launch(resource, interactive: interactive)
                         return
                     }
                     self.sessionEnded(c)
+                }
+                controller.onRelaunch = { [weak self] c in
+                    // Session reliability gave up and the user chose Reconnect (docs/20 §3.12.11).
+                    self?.sessions.removeAll { $0 === c }
+                    self?.refreshSessionRows()
+                    self?.launcher?.showWindow(nil)
+                    self?.launch(resource, interactive: true)   // the user pressed Reconnect
                 }
                 controller.onParkedChanged = { [weak self] c in
                     self?.refreshSessionRows()
@@ -159,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         SessionController.timerQueue.asyncAfter(deadline: .now() + hold, execute: work)
                     }
                 }
-                launcher?.setStatus("\(resource.name): connecting…")
+                launcher?.setStatus("\(displayName(resource.name)): connecting…")
                 if autoLaunch == nil { launcher?.window?.orderOut(nil) }
             } catch {
                 vlog("launch failed: \(error)")
@@ -177,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshSessionRows() {
         launcher?.setSessions(sessions.filter { !$0.ended }.map { c in
             LauncherWindowController.SessionRow(
-                title: c.name, detail: c.isParked ? "no visible windows" : "running", canShow: c.isParked,
+                title: displayName(c.name), detail: c.isParked ? "no visible windows" : "running", canShow: c.isParked,
                 show: { [weak c] in c?.showParkedWindows() },
                 logoff: { [weak c] in vlog("launcher: log off \(c?.name ?? "")"); c?.logoff() })
         })
@@ -186,7 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func sessionEnded(_ controller: SessionController) {
         sessions.removeAll { $0 === controller }
         refreshSessionRows()
-        launcher?.setStatus("\(controller.name): session ended")
+        launcher?.setStatus("\(displayName(controller.name)): session ended")
         guard sessions.isEmpty else { return }
         if terminating {
             NSApp.reply(toApplicationShouldTerminate: true)
@@ -208,6 +228,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
+    /// Clipboard trigger: the user may have copied in another app (docs/70 §5.4).
+    func applicationDidBecomeActive(_ notification: Notification) {
+        sessions.filter { !$0.ended }.forEach { $0.clipboardCheck("app active") }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -216,6 +241,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showLauncher() { launcher?.showWindow(nil) }
+
+    // MARK: Sleep, wake and network path (docs/20 §3.12.2)
+
+    private var pathMonitor: NWPathMonitor?
+    private var lastPath: (satisfied: Bool, interface: String?)?
+
+    private func startSystemHooks() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            vlog("system will sleep")
+            self?.sessions.filter { !$0.ended }.forEach { $0.session.systemWillSleep() }
+        }
+        center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            vlog("system woke")
+            self?.sessions.filter { !$0.ended }.forEach { $0.session.systemDidWake() }
+        }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            let interface = path.availableInterfaces.first.map { "\($0.name) \($0.type)" }
+            DispatchQueue.main.async { self?.pathChanged(satisfied: satisfied, interface: interface) }
+        }
+        monitor.start(queue: DispatchQueue(label: "ica.viewer.path", qos: .utility))
+        pathMonitor = monitor
+    }
+
+    /// Offline = status not satisfied; online = satisfied again, or a different interface in use
+    /// while satisfied (Wi-Fi switch, VPN). The first update is the current state, not an event.
+    private func pathChanged(satisfied: Bool, interface: String?) {
+        defer { lastPath = (satisfied, interface) }
+        guard let last = lastPath, satisfied != last.satisfied || (satisfied && interface != last.interface) else { return }
+        vlog("network path: \(satisfied ? "satisfied" : "unsatisfied") via \(interface ?? "none")")
+        sessions.filter { !$0.ended }.forEach { $0.session.networkChanged(online: satisfied) }
+    }
 
     private func buildMenu() {
         let main = NSMenu()

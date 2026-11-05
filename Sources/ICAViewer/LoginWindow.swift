@@ -48,6 +48,8 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
     private let gatewayField = NSTextField()
     private let spinner = NSProgressIndicator()
 
+    /// Demo mode (ICAVIEWER_DEMO=1): the window shows example data and does nothing (see `showDemo`).
+    private var demo = false
     private let autofill = StoreService.autofill
     private let autofillRemember = ProcessInfo.processInfo.environment["ICAVIEWER_LOGIN_REMEMBER"] == "1"
     private var autofillDone: Set<Int> = []
@@ -79,6 +81,19 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
     required init?(coder: NSCoder) { fatalError() }
 
     // MARK: Flow
+
+    /// Demo mode: the window with a built-in form and example entries; no gateway, no network. The
+    /// passcode stays empty. Nothing is submitted.
+    func showDemo() {
+        demo = true
+        form = LogonForm.demo()
+        draft = ["login": Demo.username, "passwd": Demo.password, "passwd1": ""]
+        gatewayField.stringValue = "https://" + Demo.gateway
+        remember = false
+        render()
+        showWindow(nil)
+        window?.makeFirstResponder(nil)   // no caret in the screenshot
+    }
 
     /// Shows the window and returns once the gateway logon succeeded. Throws `LoginCancelled` on cancel.
     func run() async throws {
@@ -207,7 +222,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
     }
 
     @objc private func submit(_ sender: Any?) {
-        guard let form, let logon, !busy, isValid() else { return }
+        guard !demo, let form, let logon, !busy, isValid() else { return }
         captureDraft()
         let button = (sender as? NSButton)?.identifier?.rawValue
         var values: [String: String] = [:]
@@ -574,6 +589,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         window.setContentSize(stack.fittingSize)
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         updateSubmitState()
+        if demo { submitButton?.isEnabled = true; return }
         focusFirstEmpty()
     }
 

@@ -6,6 +6,8 @@ import ICAKit
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
+    /// Demo mode (ICAVIEWER_DEMO=1): example data, nothing is read from or written to settings or Keychain.
+    private let demo: Bool
     private var credentials: LoginCredentials { service.credentials }
 
     private let gatewayField = NSTextField()
@@ -32,8 +34,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private var previewTOTP: TOTP?
     private var previewUntil = Date.distantPast
 
-    init(service: StoreService) {
+    init(service: StoreService, demo: Bool = false) {
         self.service = service
+        self.demo = demo
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = loc("Settings", "Einstellungen")
@@ -45,6 +48,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func show() {
+        if demo {
+            loadDemo()
+            showWindow(nil)
+            window?.center()
+            return
+        }
         load()
         showWindow(nil)
         window?.center()
@@ -147,6 +156,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         window?.setContentSize(stack.fittingSize)
     }
 
+    private func loadDemo() {
+        gatewayField.stringValue = Demo.gateway
+        usernameField.stringValue = Demo.username
+        passwordField.stringValue = Demo.password
+        secretField.stringValue = Demo.totpSecret
+        protectBox.state = .on
+        promptRadio.state = .off
+        totpRadio.state = .on
+        digitsPopup.selectItem(withTitle: "6")
+        periodField.stringValue = "30"
+        algorithmPopup.selectItem(withTitle: "SHA1")
+        status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
+                                 "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
+        modeChanged()
+    }
+
     private func load() {
         let s = credentials.settings.load()
         gatewayField.stringValue = s.gateway?.host ?? (service.gateway?.host ?? "")
@@ -215,6 +240,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     private func updatePreview() {
+        if demo {
+            preview.stringValue = loc("Current code: ", "Aktueller Code: ") + Demo.totpPreview
+            showCodeButton.isHidden = true
+            return
+        }
         guard totpRadio.state == .on else {
             preview.stringValue = ""
             showCodeButton.isHidden = true
@@ -259,6 +289,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     @objc private func forgetAll() {
+        guard !demo else { return }
         guard let host = LoginSettings.gatewayURL(from: gatewayField.stringValue)?.host ?? service.gateway?.host else { return }
         credentials.forgetAll(host: host)
         load()
@@ -268,6 +299,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     @objc private func cancelClicked() { close() }
 
     @objc private func saveClicked() {
+        if demo { close(); return }
         let s = currentSettings
         let password = FieldText.clean(passwordField.stringValue, password: true, final: true)
         let secret = FieldText.clean(secretField.stringValue, password: false, final: true)

@@ -326,11 +326,11 @@ private let vis = F.visible
     #expect(engine.model.windows[8]?.appKey == "exe:c:\\z\\z.exe")
 }
 
-/// Replays real channel-12 captures from .session/ch12-*.bin (raw concatenated channel payloads).
-/// Skips when none exist. Prints message type counts only (no titles other than the test app's).
+/// Replays real channel-12 captures from .session/replay/ch12-*.bin (raw concatenated channel payloads,
+/// written by `ICA_CAPTURE_REPLAY=1 icactl session`). Skips when none exist. Prints message type counts only (no titles other than the test app's).
 @Test func replayRealCapturesIfPresent() throws {
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    let dir = root.appendingPathComponent(".session")
+    let dir = root.appendingPathComponent(".session/replay")
     let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
         .filter { $0.hasPrefix("ch12-") && $0.hasSuffix(".bin") }.sorted()
     guard !files.isEmpty else { return }
@@ -363,9 +363,11 @@ private let vis = F.visible
     }
     for a in apps.value { print("TWI replay: app \(a.key) name \(a.name)") }
     #expect(engine.malformedCount == 0)
-    // The capture of a "Calculator" session: one calculator window, ended by logoff.
-    if let w = added.value.first(where: { $0.title == "Rechner" }) {
-        #expect(added.value.filter { $0.kind == .appWindow }.count == 1)
+    // The lifecycle checks need a complete fresh-logon capture of "Calculator": the logon UI, then one
+    // calculator window that is removed again (logoff). A reconnect or a cut-off capture only replays.
+    let sawLogonUI = added.value.contains { $0.appKey.lowercased().hasSuffix("\\logonui.exe") }
+    if sawLogonUI, let w = added.value.first(where: { $0.title == "Rechner" }), removed.value.contains(w.id) {
+        #expect(added.value.filter { $0.kind == .appWindow && !$0.appKey.lowercased().hasSuffix("\\logonui.exe") }.count == 1)
         #expect(w.kind == .appWindow && w.hasTaskbarEntry)
         #expect(w.windowRect.width > 100 && w.windowRect.height > 100)
         #expect(apps.value.contains { $0.windowIds == [w.id] && !$0.name.isEmpty && $0.key != WindowModel.sessionAppKey })

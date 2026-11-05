@@ -1,0 +1,24 @@
+swift-ica-client
+Copyright (c) 2026 Jan Haan
+
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+This repository is dual-licensed.  You may use it under the terms of either
+
+  * the MIT license, in LICENSE-MIT, or
+  * the Apache License, Version 2.0, in LICENSE-APACHE,
+
+at your option.  You need not comply with both; pick whichever one suits
+you.  The MIT option exists because Apache-2.0 is incompatible with GPLv2,
+so a GPLv2 project can take the MIT terms instead.
+
+These terms cover the ICAKit library, the ICAViewer app, the icactl tool,
+the tests, the fixtures and the scripts in this repository.
+
+Citrix, ICA, HDX, NetScaler and StoreFront are trademarks of Cloud Software
+Group, Inc.  This project is not affiliated with or endorsed by them, and
+these licences grant no rights to those marks.
+
+Unless you state otherwise, a contribution you intentionally submit for
+inclusion in this repository is licensed under the same dual terms, without
+any additional conditions.
