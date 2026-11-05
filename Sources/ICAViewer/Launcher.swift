@@ -7,6 +7,8 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     private var all: [StoreClient.Resource] = []
     private var shown: [StoreClient.Resource] = []
     private let table = NSTableView()
+    private let scroll = NSScrollView()
+    private var sized = false
     private let search = NSSearchField()
     private let status = NSTextField(labelWithString: "")
     private let sessionsStack = NSStackView()
@@ -37,7 +39,6 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         table.target = self
         table.doubleAction = #selector(launchSelected)
         table.usesAlternatingRowBackgroundColors = true
-        let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
 
@@ -102,6 +103,21 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     func setResources(_ list: [StoreClient.Resource]) {
         all = list.filter { $0.disabled != true }
         applyFilter()
+        fitWindowToContent()
+    }
+
+    /// Once, with the first list: the window is as tall as its rows need (260 to 520 pt), so a short
+    /// list leaves no empty striped rows below it. The top edge stays where it is.
+    private func fitWindowToContent() {
+        guard !sized, let window, !all.isEmpty, let content = window.contentView else { return }
+        sized = true
+        content.layoutSubtreeIfNeeded()
+        let chrome = content.frame.height - scroll.frame.height
+        let rows = CGFloat(all.count) * (table.rowHeight + table.intercellSpacing.height)
+        let height = min(max(chrome + rows + 2, 260), 520)
+        let old = window.frame
+        window.setContentSize(NSSize(width: content.frame.width, height: height))
+        window.setFrameOrigin(NSPoint(x: old.minX, y: old.maxY - window.frame.height))
     }
 
     private func applyFilter() {

@@ -10,3 +10,7 @@ signing/DerivedData/
 DerivedData/
 signing/*.xcodeproj/
 .DS_Store
+
+# Local screenshot-check word lists (private)
+.shotcheck-forbidden
+.shotcheck-censor
