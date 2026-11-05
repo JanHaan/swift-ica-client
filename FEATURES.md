@@ -43,7 +43,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Full desktops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ? [9] |
 | Session sharing (several apps, one session) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Reconnect to disconnected session / Follow Me | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [10] |
-| Connection Center / session management | ✅† | ? | ? | ? | ? | ? | ? | ❌ [11] |
+| Connection Center / session management | ✅† | ? | ? | ? | ? | ? | ? | ⚠️ [11] |
 | **Transport** | | | | | | | | |
 | TLS via Gateway | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Session reliability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [12] |
@@ -56,7 +56,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | H.265 / AV1 | ✅ | ⚠️ [17] | ⚠️ [17] | ? | ? | ? | ? | ❌ |
 | YUV444 (4:4:4) | ✅ | ✅ | ? | ? | ? | ? | ? | ❌ |
 | True multi-monitor | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [18] | ⚠️ [18] | ✅ [19] |
-| DPI scaling / HiDPI | ✅† | ? | ? | ✅ | ? | ✅ | ✅ | ⚠️ [20] |
+| DPI scaling / HiDPI | ✅† | ? | ? | ✅ | ? | ✅ | ✅ | ✅ [20] |
 | Adaptive display / throughput | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ [21] |
 | **Seamless integration** | | | | | | | | |
 | Native per-window integration | ✅† | ⚠️ [5] | ? | ❌ [6] | ? | ❌† | ❌† | ✅ [22] |
@@ -73,14 +73,14 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Touch / pen | ✅ [29] | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | **Devices & redirection** | | | | | | | | |
 | Clipboard (text / image / files) | ✅† | ✅ | ✅ | ⚠️ [30] | ? | ? | ? | ⚠️ [31] |
-| Client drive mapping / file transfer | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [32] |
-| Printing (client printers) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Client drive mapping / file transfer | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [32] |
+| Printing (client printers) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ⚠️ [41] |
 | Generic USB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Smart card into session | ✅† | ? | ✅ | ? | ? | ? | ? | ❌ |
 | Scanners / TWAIN | ✅ | ❌ | ⚠️ [33] | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Webcam | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [32] |
-| Audio out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [32] |
-| Microphone (bidirectional audio) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [32] |
+| Webcam | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [43] |
+| Audio out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [42] |
+| Microphone (bidirectional audio) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [43] |
 | MS Teams optimisation | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ [34] |
 | Zoom / WebEx optimisation | ✅† | ? | ? | ? | ? | ? | ? | ❌ |
 | Browser content redirection | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -112,7 +112,10 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 8. Tested live with a calculator and a mail client.
 9. Not tested. The seamless path is the only one exercised.
 10. Implicit: launching a resource reconnects to the existing session. Verified live.
-11. Planned: the `Sessions/List`, `Disconnect` and `Logoff` store endpoints.
+11. A Connection Center window lists sessions and can reconnect, disconnect or log off through the
+    store's session endpoints; Cmd-Q asks Disconnect (default) or Log off. The store operations are
+    verified live; the window UI has not yet been reviewed by a user. Session sharing and the
+    reconnect offer at start are not done.
 12. Resumes after a network drop, a Wi-Fi change or a short sleep, as long as the outage stays within
     the server's reliability timeout (typically 180 s). Verified live. On longer outages a Reconnect
     panel relaunches the app, which reconnects to the disconnected session.
@@ -130,7 +133,11 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 18. Matrix: "External monitor support" yes, "True multi-monitor" no.
 19. The session desktop is the union of all screens; its size stays fixed for the session even if
     screens change.
-20. One session pixel is one point; no Retina resolution. A 200 % DPI request made the host render 2x.
+20. Windows scaling and client scaling are separate settings. Auto (default) is Retina-sharp at normal
+    size: per screen, 2x with a 200 % Windows DPI on Retina, 1x otherwise. It falls back to 1x when
+    the session would exceed the protocol's size limit (5120x4096). Verified live on a single Retina
+    screen (pixel-exact 2x, mouse mapping correct). The size limit with several screens is not yet
+    verified live. A settings change mid-session offers a reconnect.
 21. ICAViewer uses a client-side frame-rate governor (5 fps idle, 30 fps active), not Citrix's HDX
     adaptive throughput. Idle host repaints (about 154 kB/s for a mail client) still arrive.
 22. Each remote window is a real `NSWindow`: `AXStandardWindow`, working minimize, no duplicate title
@@ -147,7 +154,9 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 31. Text works both ways (verified live). HTML, RTF and images are implemented but not yet verified
     live. Files are not supported yet: the host offers `FileGroupDescriptorW` / `FileContents`, which
     remains to be investigated.
-32. Planned: client drive mapping (`CTXCDM`) or `CTXFILE`, then audio out, microphone and webcam.
+32. One shared folder (default `~/Citrix Shared`, read-write, strict confinement, quarantine flag on
+    files written by the session) is exposed as a client drive. Implemented and security-reviewed,
+    but not verified live: the test site does not redirect client drives. No general file transfer.
 33. Linux lists SANE scanner optimisation (2604) but no TWAIN.
 34. Not currently planned.
 35. Not needed: the transport is TLS to the gateway. Basic encryption was never started by the server
@@ -158,6 +167,11 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 38. Linux has centralised management settings but no Global App Config.
 39. Updates via the App Store or Play Store, not the Citrix auto-update service.
 40. None, by design.
+41. PDF printing through the host's PDF printer to the macOS print panel; nothing prints without a
+    click. Implemented, off by default, not verified live: the test site creates no client printers.
+42. Playback (PCM, Opus) is implemented and the channel negotiation works live, but actual sound
+    output is not yet verified.
+43. Not implemented.
 
 ## Gaps that matter most
 
@@ -165,17 +179,17 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 
 1. **Auto client reconnect.** Session reliability now covers short outages; automatic reconnect
    after longer ones is still manual (the Reconnect panel).
-2. **Clipboard beyond text.** Text works both ways; files, and live verification of images, HTML and
-   RTF, are open.
-3. **File transfer** (client drive mapping or `CTXFILE`). Attachments and exports need to cross.
-4. **Printing.** There is no client printer path at all.
-5. **Audio out.** Notification sounds and alerts; microphone and webcam follow (Teams optimisation
-   is a separate, larger piece).
-6. **Per-app Dock / Cmd-Tab identity and app icons.** The windows switch correctly, but all remote
-   apps share one Dock entry.
-7. **Retina rendering.** Text is soft on HiDPI screens; the host renders at 1x.
-8. **Session management** (Connection Center, session sharing, full-desktop launch). Needed for
-   cleanup after a crash and for running a second app without a second session.
+2. **Live verification of what is already built.** Client drive mapping, printing and audio sound
+   output are implemented but need a site that redirects drives and printers and a sound-playing
+   app; clipboard HTML, RTF and images are unverified too, and the multi-screen scaling limit is
+   untested.
+3. **Per-app Dock / Cmd-Tab identity and app icons.** The windows switch correctly, but all remote
+   apps share one Dock entry (designed, not started).
+4. **Microphone and webcam.** Not implemented (Teams optimisation is a separate, larger piece).
+5. **Session sharing and full-desktop launch.** Needed for running a second app without a second
+   session. The Connection Center covers cleanup.
+6. **General file transfer and clipboard files.** Only the shared folder exists.
+7. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,
 Citrix Cloud, App Protection, EPA, GACS, auto-update.
@@ -189,7 +203,7 @@ skip them. The Dock icons come from placeholder "Husk" processes (`com.citrix.ct
 no windows, controlled by `enableAppDockEnhancement` / `EnableAppPreview`. In ICAViewer each remote
 window is an `AXStandardWindow` with an enabled minimize button that round-trips to a TWI minimise,
 a single caption (the remote one), and no helper processes. Verified across two screens. The one
-open piece is per-app Dock/Cmd-Tab identity (gap 6).
+open piece is per-app Dock/Cmd-Tab identity (gap 3).
 
 Secondary points: no telemetry, no background services, and the whole client is small enough to
 read in one sitting. These are design choices rather than features, and they come at the price of
