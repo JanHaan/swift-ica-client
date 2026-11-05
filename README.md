@@ -44,17 +44,35 @@ The calculator above is a live session; the other images use the app's demo mode
   with an adaptive frame-rate limit. An H.264 path (VideoToolbox) exists but is untested.
 - Seamless windows (TWI): native windows and popups, local move and resize without round trips,
   minimise, multi-monitor sessions spanning all screens.
-- Reconnecting to an existing disconnected session.
+- Reconnecting to an existing disconnected session. A start that drops early is retried a few times.
+- Display scaling: Windows scaling and client scaling are set separately. The Auto default is
+  Retina-sharp at normal size (2x / 200 %), chosen per screen, and falls back to 1x when the
+  session would exceed the protocol's size limit (5120x4096). Verified live on a single Retina
+  screen; the limit with several screens is not yet verified live.
+- Session management: a Connection Center window (Cmd-Shift-C) lists sessions and can reconnect,
+  disconnect or log them off. Cmd-Q asks whether to Disconnect (default) or Log off. The store
+  operations behind it are verified live; the window itself has not yet been reviewed by a user.
+- Clipboard: text works both ways in the app (verified live).
 
 ## Status
 
 See [FEATURES.md](FEATURES.md) for a feature-by-feature comparison with the official clients.
 
-Clipboard: text works both ways; HTML, RTF and images are implemented but not yet verified.
-Not implemented yet: Retina rendering and DPI scaling, client drive
-mapping and file transfer, printing, audio, microphone and webcam, a connection centre, session
-sharing, one Dock entry per remote app, EDT/UDP, other authentication methods (SAML, smart card,
-FIDO2). Only seamless app launches are exercised; full desktops are untested.
+Implemented but not yet verified live:
+
+- Clipboard HTML, RTF and images.
+- Client drive mapping: one shared folder (default `~/Citrix Shared`, read-write, strictly
+  confined, files written by the session get the quarantine flag). Security-reviewed; the test site
+  does not redirect client drives.
+- Printing: PDF printing through the host's PDF printer to the macOS print panel. Off by default;
+  the test site creates no client printers.
+- Audio playback (PCM, Opus). The channel negotiation works live; actual sound output is not yet
+  verified.
+
+Not implemented yet: microphone and webcam, one Dock entry per remote app (designed), session
+sharing, EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
+shared folder. H.264 is untested. Only seamless app launches are exercised; full desktops are
+untested.
 
 ## Requirements
 
