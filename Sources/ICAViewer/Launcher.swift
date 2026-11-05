@@ -41,6 +41,9 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         table.usesAlternatingRowBackgroundColors = true
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 6, right: 0)   // the last row is not flush
+        table.rowHeight = 24
 
         search.placeholderString = "Search"
         search.delegate = self
@@ -107,17 +110,33 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     /// Once, with the first list: the window is as tall as its rows need (260 to 520 pt), so a short
-    /// list leaves no empty striped rows below it. The top edge stays where it is.
+    /// list leaves no empty striped rows and no scroller. Measured, not estimated: the rows' real
+    /// extent (`rect(ofRow:)`, with row and intercell spacing), the scroll view's border and a small
+    /// bottom inset. The top edge stays where it is.
     private func fitWindowToContent() {
         guard !sized, let window, !all.isEmpty, let content = window.contentView else { return }
         sized = true
+        table.layoutSubtreeIfNeeded()
         content.layoutSubtreeIfNeeded()
-        let chrome = content.frame.height - scroll.frame.height
-        let rows = CGFloat(all.count) * (table.rowHeight + table.intercellSpacing.height)
-        let height = min(max(chrome + rows + 2, 260), 520)
+        let tableHeight = table.rect(ofRow: all.count - 1).maxY
+        let border = scroll.frame.height - scroll.contentSize.height + scroll.contentInsets.top + scroll.contentInsets.bottom
+        let needed = tableHeight + border
         let old = window.frame
-        window.setContentSize(NSSize(width: content.frame.width, height: height))
-        window.setFrameOrigin(NSPoint(x: old.minX, y: old.maxY - window.frame.height))
+        func apply(_ scrollHeight: CGFloat) {
+            let chrome = content.frame.height - scroll.frame.height
+            let height = min(max(chrome + scrollHeight, 260), 520)
+            window.setContentSize(NSSize(width: content.frame.width, height: height))
+            window.setFrameOrigin(NSPoint(x: old.minX, y: old.maxY - window.frame.height))
+            content.layoutSubtreeIfNeeded()
+        }
+        apply(needed)
+        // Verify on the laid-out result and grow once if the rows still do not fit (up to the maximum).
+        let visible = scroll.contentSize.height - scroll.contentInsets.top - scroll.contentInsets.bottom
+        let shortfall = tableHeight - visible
+        if shortfall > 0.5 { apply(scroll.frame.height + shortfall) }
+        let after = scroll.contentSize.height - scroll.contentInsets.top - scroll.contentInsets.bottom
+        vlog(String(format: "launcher: %d rows need %.1f pt, visible %.1f pt, window content %.0f pt",
+                    all.count, tableHeight, after, content.frame.height))
     }
 
     private func applyFilter() {

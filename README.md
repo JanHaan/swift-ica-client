@@ -13,6 +13,23 @@ and not a replacement for the official client. Expect gaps; see [Status](#status
 > Cloud Software Group, Inc. They are used here only to describe what this software
 > interoperates with. This project contains no code from any Citrix product.
 
+<p align="center">
+  <img src="assets/screenshots/remote-calculator.png" width="214" alt="A Windows calculator published through the gateway, shown as a native macOS window">
+</p>
+
+## Screenshots
+
+| Sign-in (generated from the gateway's form) | App launcher |
+|---|---|
+| <img src="assets/screenshots/login.png" width="440" alt="Sign-in window"> | <img src="assets/screenshots/launcher.png" width="420" alt="Launcher"> |
+
+| Settings and Keychain storage | Reconnecting after a network drop |
+|---|---|
+| <img src="assets/screenshots/settings.png" width="540" alt="Settings window"> | <img src="assets/screenshots/hud.png" width="360" alt="Reconnect status"><br><br><img src="assets/screenshots/gaveup.png" width="360" alt="Reconnect panel"> |
+
+The calculator above is a live session; the other images use the app's demo mode
+(`ICAVIEWER_DEMO=1`) with example data.
+
 ## What works
 
 - Gateway logon (nFactor ExplicitForms with username, password and TOTP passcode), store resource
@@ -44,6 +61,14 @@ FIDO2). Only seamless app launches are exercised; full desktops are untested.
 - macOS 14 or later, Swift 6 toolchain (Xcode 16 or newer).
 - An environment reachable through a NetScaler Gateway with an ExplicitForms nFactor policy.
 
+## Install
+
+Download `swift-ica-client-<version>.dmg` from the
+[Releases](https://github.com/JanHaan/swift-ica-client/releases) page, open it and drag ICAViewer
+to Applications. The app is a universal binary (Apple silicon and Intel), signed with a
+Developer ID and notarized by Apple, so it opens without Gatekeeper warnings. Each release lists
+the DMG's SHA-256.
+
 ## Build and run
 
 ```sh
@@ -60,6 +85,10 @@ Keychain entitlements, which enables Keychain-enforced Touch ID protection
 team in `signing/project.yml`.
 
 On first start ICAViewer asks for the gateway URL and your credentials.
+
+`scripts/make-dmg.sh [version]` builds a universal release DMG into `.build/dist/` (ad hoc signed by
+default; with `ICA_SIGN=developer-id ICA_NOTARY_PROFILE=<notarytool keychain profile>` it signs with
+your Developer ID, notarizes and staples).
 
 ## Command-line tool
 
