@@ -12,6 +12,8 @@ enum Paths {
     static var envFile: String { ProcessInfo.processInfo.environment["ICA_ENV"] ?? root.appendingPathComponent(".env").path }
     static var sessionDir: URL { root.appendingPathComponent(".session") }
     static var cookieFile: String { sessionDir.appendingPathComponent("cookies.plist").path }
+    /// Last TOTP window used (gateways accept each code once).
+    static var totpState: String { sessionDir.appendingPathComponent("totp-last").path }
 }
 
 private let logStart = Date()
@@ -22,7 +24,9 @@ func vlog(_ text: String) {
     FileHandle.standardError.write(Data(line.utf8))
 }
 
-/// Login, resource list and launch through the gateway, using the `.env` flow of `icactl`.
+/// Login, resource list and launch through the gateway.
+/// Logon: with CITRIX_USERNAME and CITRIX_PASSWORD in `.env`, non-interactively as `icactl` does
+/// (automated tests); otherwise through the login window, with the settings and Keychain as source.
 final class StoreService: @unchecked Sendable {
     enum Failure: Error, CustomStringConvertible {
         case config(String)
@@ -30,54 +34,107 @@ final class StoreService: @unchecked Sendable {
     }
 
     let http = HTTPClient()
-    let env: Env
-    let gateway: URL
-    var store: StoreClient { StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL) }
+    let env: Env?
+    let credentials: LoginCredentials
+    /// Gateway root URL (`https://host/`); nil until the user enters one.
+    private(set) var gateway: URL?
+    /// The login window; set by the app delegate. Throws if the user cancels.
+    var interactiveLogon: (@MainActor () async throws -> Void)?
+    var store: StoreClient? { gateway.map { StoreClient(http: http, base: URL(string: "welcome/", relativeTo: $0)!.absoluteURL) } }
 
-    init() throws {
-        do { env = try Env(path: Paths.envFile) } catch { throw Failure.config("cannot read .env") }
-        guard let url = URL(string: (env["CITRIX_GATEWAY_URL"] ?? "https://gateway.example.com") + "/") else {
-            throw Failure.config("bad CITRIX_GATEWAY_URL")
+    /// ICAVIEWER_LOGIN_AUTOFILL=1: always use the login window (test mode, see LoginWindowController).
+    static let autofill = ProcessInfo.processInfo.environment["ICAVIEWER_LOGIN_AUTOFILL"] == "1"
+
+    /// True if `.env` supplies the credentials (non-interactive logon).
+    var usesEnvCredentials: Bool {
+        !Self.autofill && env?["CITRIX_USERNAME"] != nil && env?["CITRIX_PASSWORD"] != nil
+    }
+
+    init() {
+        env = try? Env(path: Paths.envFile)
+        let keychain = KeychainSecretStore()
+        keychain.log = { vlog($0) }
+        credentials = LoginCredentials(settings: UserDefaultsSettingsStore(), secrets: keychain)
+        credentials.log = { vlog($0) }
+        let settings = credentials.settings.load()
+        let envGateway = env?["CITRIX_GATEWAY_URL"].flatMap(LoginSettings.gatewayURL(from:))
+        if env?["CITRIX_USERNAME"] != nil && env?["CITRIX_PASSWORD"] != nil && !Self.autofill {
+            gateway = envGateway ?? settings.gateway ?? URL(string: "https://gateway.example.com/")
+        } else {
+            gateway = settings.gateway ?? envGateway
         }
-        gateway = url
+        vlog("gateway: \(gateway?.host ?? "none"); logon: \(usesEnvCredentials ? ".env" : "login window")")
         try? FileManager.default.createDirectory(at: Paths.sessionDir, withIntermediateDirectories: true)
         http.trace = { vlog("http " + $0) }   // paths and cookie names only (HTTPClient redacts query values)
         try? http.loadCookies(from: Paths.cookieFile)
     }
 
-    /// nFactor logon at the gateway (username, password, TOTP passcode from `.env`).
+    /// Changes the gateway and stores it in the settings.
+    func setGateway(_ url: URL) {
+        if url.host != gateway?.host { http.clearCookies() }
+        gateway = url
+        var settings = credentials.settings.load()
+        settings.gatewayURL = url.absoluteString
+        credentials.settings.save(settings)
+    }
+
+    /// Logs on at the gateway (`.env` or the login window).
     func logon() async throws {
-        guard let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
+        if usesEnvCredentials {
+            try await envLogon()
+        } else {
+            guard let interactiveLogon else { throw Failure.config("no login window") }
+            try await interactiveLogon()
+        }
+        try? http.saveCookies(to: Paths.cookieFile)
+    }
+
+    /// nFactor logon with username, password and TOTP passcode from `.env`.
+    private func envLogon() async throws {
+        guard let env, let gateway, let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
             throw Failure.config("CITRIX_USERNAME and CITRIX_PASSWORD must be set in .env")
         }
-        let username = env["CITRIX_DOMAIN"].map { "\($0)\\\(user)" } ?? user
-        let totp = env["CITRIX_TOTP_SECRET"].flatMap {
+        let totp = Self.envTOTP(env)
+        guard let totp else { throw Failure.config("CITRIX_TOTP_SECRET must be set in .env") }
+        try await GatewayLogon(http: http, base: gateway).logon(.init(username: Self.envUsername(env, user), password: password, passcode: {
+            return totp.freshCode(statePath: Paths.totpState)
+        }))
+    }
+
+    static func envUsername(_ env: Env, _ user: String) -> String {
+        env["CITRIX_DOMAIN"].map { "\($0)\\\(user)" } ?? user
+    }
+
+    static func envTOTP(_ env: Env) -> TOTP? {
+        env["CITRIX_TOTP_SECRET"].flatMap {
             TOTP(base32Secret: $0, digits: Int(env["CITRIX_TOTP_DIGITS"] ?? "") ?? 6,
                  period: Int(env["CITRIX_TOTP_PERIOD"] ?? "") ?? 30,
                  algorithm: TOTP.Algorithm(rawValue: (env["CITRIX_TOTP_ALGORITHM"] ?? "SHA1").uppercased()) ?? .sha1)
         }
-        guard let totp else { throw Failure.config("CITRIX_TOTP_SECRET must be set in .env") }
-        try await GatewayLogon(http: http, base: gateway).logon(.init(username: username, password: password, passcode: {
-            return totp.freshCode(statePath: Paths.sessionDir.appendingPathComponent("totp-last").path)
-        }))
-        try? http.saveCookies(to: Paths.cookieFile)
     }
 
-    /// Resource list; logs on first when the saved gateway session is missing or expired.
-    func resources() async throws -> [StoreClient.Resource] {
+    /// Resource list; logs on first when there is no gateway session or it has expired.
+    func resources(forceLogon: Bool = false) async throws -> [StoreClient.Resource] {
         let list: [StoreClient.Resource]
-        do {
-            list = try await store.resources()
-        } catch {
-            vlog("resource list failed (\(error)); logging on")
+        if forceLogon || gateway == nil || http.cookieNames.isEmpty {
             try await logon()
+            guard let store else { throw Failure.config("no gateway") }
             list = try await store.resources()
+        } else {
+            do {
+                list = try await store!.resources()
+            } catch {
+                vlog("resource list failed (\(error)); logging on")
+                try await logon()
+                list = try await store!.resources()
+            }
         }
         try? http.saveCookies(to: Paths.cookieFile)
         return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     func launch(_ resource: StoreClient.Resource) async throws -> ICAFile {
+        guard let store else { throw Failure.config("no gateway") }
         let text = try await store.launchICA(resource)
         try? http.saveCookies(to: Paths.cookieFile)
         guard let ica = ICAFile(text: text) else { throw Failure.config("launch did not return an ICA file") }

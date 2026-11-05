@@ -1,0 +1,23 @@
+# Stub macOS app used only to let Xcode create the development provisioning profile for
+# local.alttab.ICAViewer with Keychain Sharing (see scripts/fetch-profile.sh). Not part of the build.
+name: ICAViewerSigning
+options:
+  bundleIdPrefix: local.alttab
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  ICAViewerSigning:
+    type: application
+    platform: macOS
+    sources: [Stub]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.alttab.ICAViewer
+        PRODUCT_NAME: ICAViewerSigning
+        DEVELOPMENT_TEAM: TEAMID0000
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        CODE_SIGN_ENTITLEMENTS: ICAViewer.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"

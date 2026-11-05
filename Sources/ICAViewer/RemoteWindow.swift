@@ -131,6 +131,21 @@ final class SessionView: NSView {
 
     // MARK: Keyboard
 
+    /// Cmd shortcuts the Edit menu would take; in a remote window they go to the server as Ctrl+key.
+    /// Cmd-Q, Cmd-H, Cmd-, and the other menu shortcuts stay with macOS (Cmd-Tab never reaches the app).
+    static let remoteShortcuts: Set<String> = ["z", "x", "c", "v", "a"]
+
+    /// Key equivalents reach the key window's views before the main menu.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, window?.isKeyWindow == true, event.modifierFlags.contains(.command),
+           let key = event.charactersIgnoringModifiers?.lowercased(), Self.remoteShortcuts.contains(key) {
+            vlog("key: Cmd-\(key.uppercased()) → remote Ctrl-\(key.uppercased())")
+            remote?.controller?.keyboard.keyDown(event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) { remote?.controller?.keyboard.keyDown(event) }
     override func keyUp(with event: NSEvent) { remote?.controller?.keyboard.keyUp(event) }
     override func flagsChanged(with event: NSEvent) { remote?.controller?.keyboard.flagsChanged(event) }

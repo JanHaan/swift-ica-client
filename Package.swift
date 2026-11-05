@@ -13,7 +13,7 @@ let package = Package(
         .target(name: "ICAKit"),
         .executableTarget(name: "icactl", dependencies: ["ICAKit"]),
         .executableTarget(name: "ICAViewer", dependencies: ["ICAKit"]),
-        .testTarget(name: "ICAKitTests", dependencies: ["ICAKit"]),
+        .testTarget(name: "ICAKitTests", dependencies: ["ICAKit"], resources: [.copy("Fixtures")]),
     ],
     swiftLanguageModes: [.v5]
 )

@@ -3,6 +3,8 @@ import ICAKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var store: StoreService?
+    private var login: LoginWindowController?
+    private var settings: SettingsWindowController?
     private var launcher: LauncherWindowController?
     private var sessions: [SessionController] = []
     private var terminating = false
@@ -21,17 +23,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             launcher.showWindow(nil)
             NSApp.activate()
         }
-        do { store = try StoreService() } catch {
-            launcher.setStatus("\(error)")
-            launcher.showWindow(nil)
+        let store = StoreService()
+        self.store = store
+        let login = LoginWindowController(service: store)
+        self.login = login
+        store.interactiveLogon = { [weak login] in try await login?.run() }
+        // ICAVIEWER_FORGET_LOGIN=1: delete the saved login for the gateway and quit.
+        if ProcessInfo.processInfo.environment["ICAVIEWER_FORGET_LOGIN"] == "1" {
+            if let host = store.gateway?.host { store.credentials.forgetAll(host: host) }
+            NSApp.terminate(nil)
             return
         }
-        launcher.setStatus("Signing in…")
+        // The login test mode always signs in; ICAVIEWER_SIGNIN=1 too (ignores a saved gateway session).
+        loadResources(forceLogon: StoreService.autofill || ProcessInfo.processInfo.environment["ICAVIEWER_SIGNIN"] == "1")
+    }
+
+    private var loading = false
+
+    /// Signs in if needed (window or `.env`) and fills the launcher.
+    private func loadResources(forceLogon: Bool = false) {
+        guard let store, let launcher, !loading else { return }
+        loading = true
+        launcher.setStatus(loc("Signing in…", "Anmeldung…"))
         Task { @MainActor in
+            defer { loading = false }
             do {
-                let list = try await store!.resources()
+                let list = try await store.resources(forceLogon: forceLogon)
                 launcher.setResources(list)
                 launcher.setStatus("\(list.count) resources")
+                vlog("resource list: \(list.count) resources")
                 if let name = autoLaunch {
                     guard let r = list.first(where: { $0.name == name }) else {
                         vlog("no resource named \(name)")
@@ -39,13 +59,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
                     launch(r)
+                } else if StoreService.autofill {
+                    vlog("autofill: resource list loaded; quitting (no session)")
+                    NSApp.terminate(nil)
                 }
+            } catch is LoginCancelled {
+                vlog("sign-in cancelled")
+                launcher.setStatus(loc("Not signed in. Choose Sign In… from the menu.", "Nicht angemeldet. Menü „Anmelden…“ wählen."))
+                launcher.showWindow(nil)
             } catch {
                 vlog("sign-in failed: \(error)")
                 launcher.setStatus("Sign-in failed: \(error)")
                 launcher.showWindow(nil)
+                if StoreService.autofill { NSApp.terminate(nil) }
             }
         }
+    }
+
+    @MainActor @objc private func signIn() { loadResources(forceLogon: true) }
+
+    @MainActor @objc private func showSettings() {
+        guard let store else { return }
+        if settings == nil { settings = SettingsWindowController(service: store) }
+        settings?.show()
     }
 
     /// Resources already relaunched once after an early server drop.
@@ -63,7 +99,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             defer { launching = false }
             do {
-                let ica = try await store.launch(resource)
+                let ica: ICAFile
+                do {
+                    ica = try await store.launch(resource)
+                } catch let error where !(error is LoginCancelled) && !Self.isLaunchStatusError(error) {
+                    // An expired gateway session fails before any ICA file exists, so signing in
+                    // again and repeating the launch once cannot start a second session.
+                    vlog("launch failed (\(error)); signing in again")
+                    try await store.logon()
+                    ica = try await store.launch(resource)
+                }
                 let controller = try SessionController(name: resource.name, ica: ica)
                 controller.onEnded = { [weak self] c in
                     guard let self else { return }
@@ -124,6 +169,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private static func isLaunchStatusError(_ error: Error) -> Bool {
+        if case StoreClient.Failure.launch = error { return true }
+        return false
+    }
+
     private func refreshSessionRows() {
         launcher?.setSessions(sessions.filter { !$0.ended }.map { c in
             LauncherWindowController.SessionRow(
@@ -172,12 +222,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: loc("Settings…", "Einstellungen…"), action: #selector(showSettings), keyEquivalent: ",")
+        appMenu.addItem(withTitle: loc("Sign In…", "Anmelden…"), action: #selector(signIn), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Show Launcher", action: #selector(showLauncher), keyEquivalent: "l")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide ICA Viewer", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit ICA Viewer (log off)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
+        // Standard Edit menu, so text fields (login, settings, search) get Cut/Copy/Paste/Undo shortcuts.
+        // Remote windows take Cmd-Z/X/C/V/A before the menu does (SessionView.performKeyEquivalent).
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let editMenu = NSMenu(title: loc("Edit", "Bearbeiten"))
+        editMenu.addItem(withTitle: loc("Undo", "Widerrufen"), action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: loc("Redo", "Wiederholen"), action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: loc("Cut", "Ausschneiden"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: loc("Copy", "Kopieren"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: loc("Paste", "Einsetzen"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: loc("Select All", "Alles auswählen"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
         let windowItem = NSMenuItem()
         main.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")

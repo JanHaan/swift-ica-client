@@ -2,3 +2,10 @@
 .build/
 .session/
 *.ica
+# Code signing: provisioning profiles and Xcode build output stay local
+signing/*.mobileprovision
+*.provisionprofile
+*.mobileprovision
+signing/DerivedData/
+DerivedData/
+signing/*.xcodeproj/
