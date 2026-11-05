@@ -43,6 +43,9 @@ public final class ICASession: @unchecked Sendable {
     /// Client drive mapping engine (`CTXCDM `, ch 10), when the session was created with a CDM config.
     /// Set `cdm.onEvent` before `start`; it is called on the session queue.
     public let cdm: CDMEngine?
+    /// Client printing engine (`CTXCPM `, ch 4, PDF mode), when the session was created with a printing
+    /// config. Set `printer.onEvent` before `start`; it is called on the session queue.
+    public let printer: PrinterEngine?
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -62,9 +65,10 @@ public final class ICASession: @unchecked Sendable {
     private var suspendedFlag = false
 
     /// `clipboard` nil: no CTXCLIP module and no bind entry, so the host has no clipboard channel
-    /// (docs/70 §5.7). `cdm` nil: no CTXCDM module, so no client drive (docs/95 §A).
+    /// (docs/70 §5.7). `cdm` nil: no CTXCDM module, so no client drive (docs/95 §A). `printing` nil: no
+    /// CTXCPM module, so the host creates no PDF printer for this client (docs/97 §6.2).
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
-                cdm: CDMEngine.Config? = nil) throws {
+                cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -89,6 +93,9 @@ public final class ICASession: @unchecked Sendable {
         if let engine = self.clipboard { wd.register(engine) }
         self.cdm = cdm.map { CDMEngine(config: $0) }
         if let engine = self.cdm { wd.register(engine) }
+        // After CTXCLIP (docs/97 §1.2 [P]); the module and its per-command ACKs come from the engine.
+        self.printer = printing.map { PrinterEngine(config: $0) }
+        if let engine = self.printer { wd.register(engine) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
@@ -159,6 +166,7 @@ public final class ICASession: @unchecked Sendable {
             closed = true
             setSuspended(false)
             cdm?.shutdown()
+            printer?.shutdown()
             onEvent(.closed(reason))
         }
     }

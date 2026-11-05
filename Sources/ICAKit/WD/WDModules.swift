@@ -64,6 +64,9 @@ public struct WDModuleIdentity: Sendable {
     /// CTXCDM: versions 1…10 (docs/95 §A.1).
     public static let cdm = WDModuleIdentity(moduleClass: .vd, versionLow: CDMWire.versionLow, versionHigh: CDMWire.versionHigh,
                                              name: "", hostName: "ICA")
+    /// CTXCPM: versions 4…7 (docs/97 §1.1).
+    public static let printer = WDModuleIdentity(moduleClass: .vd, versionLow: PrinterWire.versionLow,
+                                                 versionHigh: PrinterWire.versionHigh, name: "", hostName: "ICA")
     public static let ui = WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "UIModule.class", hostName: "")
 }
 
@@ -283,6 +286,25 @@ public enum WDModules {
         w.reference(entries)      // 0 when there are no drives
         w.u16(1)
         w.zeros(12)
+        return w.bytes()
+    }
+
+    /// CTXCPM module, PDF mode, 56 bytes (docs/97 §1.2): VD header with flow type 1 (ACK, MaxWindowSize
+    /// 62500, WindowSize 4102), then the VD data `00 00`, u16 string encoding (0 ASCII), `00 00`, u16
+    /// capability flags 0x8000. No client printers are announced. The bind entry `CTXCPM \0 04 00` comes
+    /// from the WD module's table.
+    public static func printer(channel: UInt8 = PrinterWire.channelNumber, date: Date = Date()) -> [UInt8] {
+        var w = header(.printer, date: date)
+        w.u32(UInt32(channel))
+        w.u8(0)                   // bandwidth quota
+        w.u8(PrinterWire.flowType)
+        w.u16(0)                  // pad
+        w.u16(PrinterWire.maxWindowSize)
+        w.u16(PrinterWire.windowSize)
+        w.u8(0); w.u8(0)
+        w.u16(0)                  // string encoding: ASCII
+        w.u16(0)
+        w.u16(PrinterWire.pdfModeFlags)
         return w.bytes()
     }
 

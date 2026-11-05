@@ -5,7 +5,8 @@ import ICAKit
 /// display scaling (Windows scaling, client scaling; D29, docs/80 §4). Secrets are written to the
 /// Keychain only; the fields never show stored values. Scaling applies at connect; saving a change
 /// while sessions run offers to reconnect them. The shared folder (client drive M, docs/95 §A, D32)
-/// applies at the next connect.
+/// applies at the next connect, as does printing (docs/97 §6, PDF mode: receive jobs from the host's Citrix PDF
+/// Printer; which action the job window offers first).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -46,6 +47,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                                               "Nur lesen (die Sitzung kann nichts ändern)"),
                                        target: nil, action: nil)
     private var sharedFolder = CDMSettings.defaultFolder
+    private let printBox = NSButton(checkboxWithTitle: loc("Receive print jobs (Citrix PDF Printer in the session)",
+                                                           "Druckaufträge empfangen (Citrix PDF Printer in der Sitzung)"),
+                                    target: nil, action: nil)
+    private let printActionPopup = NSPopUpButton()
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -141,6 +146,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             b.controlSize = .small
             b.bezelStyle = .inline
         }
+        printBox.target = self
+        printBox.action = #selector(printChanged)
+        printActionPopup.addItems(withTitles: [loc("Show the print dialog first", "Zuerst den Druckdialog zeigen"),
+                                               loc("Open in Preview first", "Zuerst in Vorschau öffnen")])
         folderPath.lineBreakMode = .byTruncatingMiddle
         folderPath.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
         status.textColor = .secondaryLabelColor
@@ -174,6 +183,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [label(loc("Shared folder:", "Freigabe:")), shareBox],
             [NSGridCell.emptyContentView, folderRow],
             [NSGridCell.emptyContentView, readOnlyBox],
+            [label(loc("Printing:", "Drucken:")), printBox],
+            [NSGridCell.emptyContentView, printActionPopup],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -186,6 +197,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 4).topPadding = 8
         grid.row(at: 9).topPadding = 12
         grid.row(at: 12).topPadding = 12
+        grid.row(at: 15).topPadding = 12
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
                               target: self, action: #selector(forgetAll))
@@ -227,6 +239,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
         selectScaling(ScalingSettings())
         selectDriveMapping(CDMSettings())
+        selectPrinting(PrintSettings())
         modeChanged()
     }
 
@@ -282,6 +295,25 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         guard settings != CDMSettings.load(env: [:]) else { return }
         settings.save()
         vlog("drive mapping: saved (\(settings.enabled ? "on" : "off"), \(settings.readOnly ? "read-only" : "read-write")); applies at the next connect")
+    }
+
+    // MARK: Printing
+
+    private func selectPrinting(_ settings: PrintSettings) {
+        printBox.state = settings.enabled ? .on : .off
+        printActionPopup.selectItem(at: settings.action == .preview ? 1 : 0)
+        printChanged()
+    }
+
+    @objc private func printChanged() { printActionPopup.isEnabled = printBox.state == .on }
+
+    private func savePrinting() {
+        var settings = PrintSettings.load(env: [:])
+        settings.enabled = printBox.state == .on
+        settings.action = printActionPopup.indexOfSelectedItem == 1 ? .preview : .printDialog
+        guard settings != PrintSettings.load(env: [:]) else { return }
+        settings.save()
+        vlog("printing: saved (\(settings.enabled ? "on" : "off"), \(settings.action.rawValue) first); on/off applies at the next connect")
     }
 
     // MARK: Scaling
@@ -356,6 +388,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         algorithmPopup.selectItem(withTitle: s.totpAlgorithm.rawValue)
         selectScaling(ScalingSettings.load(env: [:]))
         selectDriveMapping(CDMSettings.load(env: [:]))
+        selectPrinting(PrintSettings.load(env: [:]))
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",
@@ -483,6 +516,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                 }
                 close()
                 saveDriveMapping()
+                savePrinting()
                 saveScaling()
             } catch CredentialError.invalidTOTPSecret {
                 status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",
