@@ -9,6 +9,17 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     private let table = NSTableView()
     private let search = NSSearchField()
     private let status = NSTextField(labelWithString: "")
+    private let sessionsStack = NSStackView()
+
+    /// One running session in the launcher.
+    struct SessionRow {
+        var title: String
+        var detail: String
+        var canShow: Bool
+        var show: () -> Void
+        var logoff: () -> Void
+    }
+    private var rowActions: [Int: () -> Void] = [:]
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
@@ -37,12 +48,15 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
 
-        let stack = NSStackView(views: [search, scroll, status])
+        sessionsStack.orientation = .vertical
+        sessionsStack.alignment = .leading
+        sessionsStack.spacing = 4
+        let stack = NSStackView(views: [search, scroll, sessionsStack, status])
         stack.orientation = .vertical
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.spacing = 8
         stack.alignment = .leading
-        for v in [search, scroll, status] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [search, scroll, sessionsStack, status] { v.translatesAutoresizingMaskIntoConstraints = false }
         window.contentView = stack
         NSLayoutConstraint.activate([
             search.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
@@ -55,6 +69,35 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     required init?(coder: NSCoder) { fatalError() }
 
     func setStatus(_ text: String) { status.stringValue = text }
+
+    /// Running sessions, each with Show (when it has no visible window) and Log off.
+    func setSessions(_ rows: [SessionRow]) {
+        sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        rowActions.removeAll()
+        var tag = 0
+        func button(_ title: String, _ action: @escaping () -> Void) -> NSButton {
+            tag += 1
+            rowActions[tag] = action
+            let b = NSButton(title: title, target: self, action: #selector(rowButton(_:)))
+            b.tag = tag
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            return b
+        }
+        for row in rows {
+            let label = NSTextField(labelWithString: "\(row.title): \(row.detail)")
+            label.lineBreakMode = .byTruncatingTail
+            var views: [NSView] = [label]
+            if row.canShow { views.append(button("Show", row.show)) }
+            views.append(button("Log off", row.logoff))
+            let line = NSStackView(views: views)
+            line.orientation = .horizontal
+            line.spacing = 6
+            sessionsStack.addArrangedSubview(line)
+        }
+    }
+
+    @objc private func rowButton(_ sender: NSButton) { rowActions[sender.tag]?() }
 
     func setResources(_ list: [StoreClient.Resource]) {
         all = list.filter { $0.disabled != true }

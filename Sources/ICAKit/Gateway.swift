@@ -43,6 +43,8 @@ public struct GatewayLogon {
     }
 
     public func logon(_ credentials: Credentials) async throws {
+        // An expired NSC_AAAC makes the gateway drop the connection, so start with an empty jar.
+        http.clearCookies()
         _ = try await http.send("GET", base)
         let headers = [
             "X-Citrix-AM-CredentialTypes": Self.credentialTypes,
@@ -51,11 +53,21 @@ public struct GatewayLogon {
         ]
         var response = try await http.send(
             "POST", URL(string: "nf/auth/getAuthenticationRequirements.do", relativeTo: base)!, headers: headers)
+        var postedFields: Set<String> = []
         for _ in 0..<5 {
             let form = try FormResponse(response)
             http.trace("  nFactor result=\(form.result) fields=\(form.requirements.map(\.id).joined(separator: ","))")
+            // The same credential fields again means the previous post was rejected. Never repost
+            // a password automatically: repeated attempts can lock the directory account.
+            let fields = Set(form.requirements.filter { ["username", "password", "passcode"].contains($0.type) }.map(\.id))
+            if form.result == "more-info", !fields.isEmpty, !fields.isDisjoint(with: postedFields) {
+                throw Failure.rejected(form.labels.filter { !$0.hasPrefix("dualauth_") || $0.contains("fail") || $0.contains("incorrect") })
+            }
+            postedFields.formUnion(fields)
             switch form.result {
             case "success":
+                // Select the Workspace/ICA client mode; without it the store under /welcome/ answers 404.
+                _ = try await http.send("GET", URL(string: "cgi/setclient?wica", relativeTo: base)!)
                 return
             case "more-info":
                 guard let postBack = form.postBack else { throw Failure.unexpectedResponse("no PostBack") }

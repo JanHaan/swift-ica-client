@@ -64,7 +64,9 @@ final class SelfTest {
 
         // Move the macOS window: +120 right, 60 down (screen y is bottom-up).
         let before = w.info.windowRect
-        w.window.setFrameOrigin(NSPoint(x: w.window.frame.minX + 120, y: w.window.frame.minY - 60))
+        // ICAVIEWER_SELFTEST_MOVE_DX moves further, e.g. onto a second screen.
+        let dx = ProcessInfo.processInfo.environment["ICAVIEWER_SELFTEST_MOVE_DX"].flatMap(Double.init) ?? 120
+        w.window.setFrameOrigin(NSPoint(x: w.window.frame.minX + dx, y: w.window.frame.minY - 60))
         await pause(3)
         let after = c.currentInfo(w.info.id)?.windowRect
         vlog("selftest: remote rect before \(before.left),\(before.top) after \(after.map { "\($0.left),\($0.top)" } ?? "?") local \(w.localRemoteRect.left),\(w.localRemoteRect.top)")

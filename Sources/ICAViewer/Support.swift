@@ -58,8 +58,7 @@ final class StoreService: @unchecked Sendable {
         }
         guard let totp else { throw Failure.config("CITRIX_TOTP_SECRET must be set in .env") }
         try await GatewayLogon(http: http, base: gateway).logon(.init(username: username, password: password, passcode: {
-            if totp.secondsRemaining() < 3 { Thread.sleep(forTimeInterval: Double(totp.secondsRemaining()) + 0.5) }
-            return totp.code()
+            return totp.freshCode(statePath: Paths.sessionDir.appendingPathComponent("totp-last").path)
         }))
         try? http.saveCookies(to: Paths.cookieFile)
     }
@@ -86,34 +85,81 @@ final class StoreService: @unchecked Sendable {
     }
 }
 
-/// Session coordinates (top-left origin, 1 session pixel = 1 point) ↔ the primary screen's
-/// coordinate space (bottom-left origin).
-struct ScreenMapping {
-    let height: CGFloat
-    let width: CGFloat
+/// Session coordinates ↔ macOS global screen coordinates. The session desktop is the bounding box
+/// of all screens (1 session pixel = 1 point); session (0,0) is the box's top-left, so screens left
+/// of or above the main screen get positive session coordinates too. macOS y grows upwards.
+struct ScreenMapping: Equatable {
+    struct Screen: Equatable {
+        var frame: CGRect
+        var visible: CGRect
+        var scale: CGFloat
+    }
+    /// Main screen first (it becomes the primary monitor).
+    let screens: [Screen]
+    /// Union of all screen frames, macOS global coordinates.
+    let union: CGRect
 
-    static var primary: ScreenMapping {
-        let frame = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1920, height: 1080)
-        return ScreenMapping(height: frame.height, width: frame.width)
+    init(screens: [Screen]) {
+        let list = screens.isEmpty ? [Screen(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080),
+                                             visible: CGRect(x: 0, y: 0, width: 1920, height: 1080), scale: 1)] : screens
+        self.screens = list
+        union = list.dropFirst().reduce(list[0].frame) { $0.union($1.frame) }
     }
 
+    /// Keeps an earlier union (session origin and size) with a new screen list.
+    init(screens: [Screen], union: CGRect) {
+        self.screens = screens.isEmpty ? [Screen(frame: union, visible: union, scale: 1)] : screens
+        self.union = union
+    }
+
+    /// True if some screen shows the top strip (title area) of this remote rect.
+    func isOnScreen(_ r: TWIRect) -> Bool {
+        let top = screenRect(TWIRect(x: r.left, y: r.top, width: r.width, height: min(r.height, 40)))
+        return screens.contains { $0.frame.intersection(top).width >= 40 }
+    }
+
+    static var current: ScreenMapping {
+        // ICAVIEWER_SINGLE_SCREEN=1: main screen only (test: create a session with another layout).
+        let screens = ProcessInfo.processInfo.environment["ICAVIEWER_SINGLE_SCREEN"] == "1" ? Array(NSScreen.screens.prefix(1)) : NSScreen.screens
+        return ScreenMapping(screens: screens.map { Screen(frame: $0.frame, visible: $0.visibleFrame, scale: $0.backingScaleFactor) })
+    }
+
+    /// Session size: the union, rounded down to even (the server rounds odd sizes down).
+    var sessionWidth: Int { Int(union.width) & ~1 }
+    var sessionHeight: Int { Int(union.height) & ~1 }
+
     func screenRect(_ r: TWIRect) -> NSRect {
-        NSRect(x: CGFloat(r.left), y: height - CGFloat(r.bottom), width: CGFloat(r.width), height: CGFloat(r.height))
+        NSRect(x: union.minX + CGFloat(r.left), y: union.maxY - CGFloat(r.bottom), width: CGFloat(r.width), height: CGFloat(r.height))
     }
 
     func remoteRect(_ r: NSRect) -> TWIRect {
-        let left = Int32(r.minX.rounded()), top = Int32((height - r.maxY).rounded())
+        let left = Int32((r.minX - union.minX).rounded()), top = Int32((union.maxY - r.maxY).rounded())
         return TWIRect(x: left, y: top, width: Int32(r.width.rounded()), height: Int32(r.height.rounded()))
     }
 
-    /// Monitor for TWI: whole screen, work area = visible frame minus room for our title bar on top,
-    /// so a window the host maximises still has its macOS title bar below the menu bar.
-    func monitor(titleBar: CGFloat) -> TWIMonitor {
-        let screen = NSScreen.screens.first
-        let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: width, height: height)
-        let bounds = TWIRect(x: 0, y: 0, width: Int32(width), height: Int32(height))
-        let top = Int32((height - visible.maxY + titleBar).rounded())
-        let work = TWIRect(left: Int32(visible.minX), top: top, right: Int32(visible.maxX), bottom: Int32((height - visible.minY).rounded()))
-        return TWIMonitor(bounds: bounds, workArea: work)
+    /// Monitors for TWI (0x35/0x3b) and Thinwire (cap 0x11 / 0x1D), primary first. Work area = visible
+    /// frame minus room for our title bar on top, so a window the host maximises keeps its macOS title
+    /// bar below the menu bar.
+    func monitors(titleBar: CGFloat) -> [(twi: TWIMonitor, wd: WDMonitor)] {
+        screens.map { s in
+            let b = remoteRect(s.frame)
+            var work = remoteRect(s.visible)
+            work.top += Int32(titleBar.rounded())
+            let wd = WDMonitor(left: Int(b.left), top: Int(b.top), right: Int(b.right), bottom: Int(b.bottom),
+                               workLeft: Int(work.left), workTop: Int(work.top), workRight: Int(work.right), workBottom: Int(work.bottom),
+                               // 1 session pixel = 1 point, so the host must render at 100 % (live: 200 %
+                               // per-monitor DPI doubled every window).
+                               scalePercent: 100)
+            return (TWIMonitor(bounds: b, workArea: work), wd)
+        }
+    }
+
+    /// Clamps a remote rect so that its top-left part lies on the main screen (used to bring back a
+    /// window that ended up outside every screen).
+    func onMainScreen(_ r: TWIRect) -> TWIRect {
+        let main = remoteRect(screens[0].visible)
+        let x = min(max(r.left, main.left), max(main.left, main.right - r.width))
+        let y = min(max(r.top, main.top + 30), max(main.top, main.bottom - r.height))
+        return TWIRect(x: x, y: y, width: r.width, height: r.height)
     }
 }

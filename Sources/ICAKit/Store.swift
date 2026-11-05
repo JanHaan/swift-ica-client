@@ -43,6 +43,8 @@ public struct StoreClient {
     public func signIn() async throws {
         let config = try await post("Home/Configuration")
         guard config.status == 200 else { throw Failure.http("Home/Configuration", config.status) }
+        // GatewayAuth/Login answers "fail / fatalerror" unless the auth methods were queried first.
+        _ = try await post("Authentication/GetAuthMethods")
         let login = try await post("GatewayAuth/Login")
         guard login.status == 200, login.text.contains("<Result>success</Result>") else {
             throw Failure.http("GatewayAuth/Login", login.status)

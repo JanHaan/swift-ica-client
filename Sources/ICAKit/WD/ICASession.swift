@@ -31,6 +31,11 @@ public final class ICASession: @unchecked Sendable {
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
+    /// Thinwire INIT (session queue), after the session's own handling. Use this instead of
+    /// `thinwire.onInit`, which the session owns.
+    public var onThinwireInit: ((ThinwireSessionInfo) -> Void)?
+    /// Send TWI PAUSE + RESUME after each Thinwire INIT (reference behaviour). Off only for experiments.
+    public var pauseResumeOnThinwireInit = true
 
     private let ticket: String
     private let cgp = CGPSession()
@@ -75,6 +80,15 @@ public final class ICASession: @unchecked Sendable {
         }
         wd.onEvent = { [weak self] event in self?.onEvent(.wd(event)) }
         stream.onSendError = { [weak self] error in self?.perform { self?.finish("send failed: \(error)") } }
+        // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
+        thinwire.onInit = { [weak self] info in
+            guard let self else { return }
+            let text: String
+            if !self.pauseResumeOnThinwireInit { text = "disabled" }
+            else { text = self.seamless.pauseResume() ? "sent" : "not possible yet (no TWI host init)" }
+            self.onEvent(.log("Thinwire INIT \(info.width)x\(info.height) → TWI PAUSE/RESUME \(text)"))
+            self.onThinwireInit?(info)
+        }
     }
 
     /// Runs `block` on the session queue (inline if already there).

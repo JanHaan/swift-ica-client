@@ -83,6 +83,9 @@ public enum SeamlessEvent {
     case iconChanged(windowId: UInt32, TWIIcon)
     case processCreated(TWIProcessInfo)
     case processEnded(processId: UInt32)
+    /// The window list is about to be cleared (OPEN, RESUME, CLOSE); the host usually re-announces the
+    /// same windows right after, so a UI may keep its windows briefly and reuse them by id.
+    case windowsReset
 }
 
 /// Window list state machine (docs/50 §4). Feed it host messages with `apply`; it publishes `SeamlessEvent`s.
@@ -173,6 +176,7 @@ public final class WindowModel {
     /// Clears all windows (OPEN, RESUME, CLOSE). Processes are kept.
     public func reset() {
         let removed = orderedWindows
+        if !removed.isEmpty { events.append(.windowsReset) }
         windows.removeAll(); creationOrder.removeAll(); pendingIcons.removeAll()
         let hadForeground = foregroundWindow != nil
         foregroundWindow = nil

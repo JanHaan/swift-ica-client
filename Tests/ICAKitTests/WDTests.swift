@@ -398,3 +398,22 @@ final class RecordingEngine: VirtualChannelEngine {
     #expect(session.seamless.config.sessionWidth == 1800 && session.seamless.config.sessionHeight == 1169)
     #expect(session.seamless.config.seamless)
 }
+
+@Test func thinwireCapsCarryMonitorLayoutAndH264Toggle() {
+    let mons = [WDMonitor(left: 0, top: 271, right: 1800, bottom: 1440, workLeft: 0, workTop: 338, workRight: 1800, workBottom: 1440, scalePercent: 200),
+                WDMonitor(left: 1800, top: 0, right: 4360, bottom: 1440, workLeft: 1800, workTop: 28, workRight: 4360, workBottom: 1440, scalePercent: 200)]
+    let single = WDModules.thinwireCapabilities(scalePercent: 100)
+    #expect(single == WDModules.thinwireCapabilities(scalePercent: 100, monitors: [], h264: true))
+    let multi = WDModules.thinwireCapabilities(scalePercent: 100, monitors: mons, h264: true)
+    #expect(multi[1] == single[1] + 1)                                    // one more entry: 0x11
+    // DPI entry first: flags 2, n = 2, then two scales of 200.
+    #expect(Array(multi[4..<16]) == [0x0C, 0x00, 0x20, 0x00, 0x02, 0x00, 0x02, 0x00, 0xC8, 0x00, 0xC8, 0x00])
+    // Cap 0x11: len 4 + 8 + 32, u32 total 40, n 2, primary 0.
+    #expect(Array(multi[16..<28]) == [44, 0, 0x11, 0x00, 40, 0, 0, 0, 2, 0, 0, 0])
+    #expect(Array(multi[28..<32]) == [0, 0, 0x0F, 0x01])                  // first monitor left 0, top 271
+    let compat = WDModules.thinwireCapabilities(scalePercent: 100, monitors: [], h264: false)
+    #expect(compat[1] == 9)
+    let update = WDModules.thinwireMonitorUpdate(mons)
+    #expect(Array(update[0..<6]) == [0x3A, 43, 0, 0x1D, 40, 0])          // 3A len16 1D u16 n
+    #expect(update[6] == 8 && update.count == 6 + 40)
+}

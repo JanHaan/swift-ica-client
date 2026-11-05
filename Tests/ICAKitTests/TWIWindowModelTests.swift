@@ -31,6 +31,7 @@ private func names(_ events: [SeamlessEvent]) -> [String] {
         case .iconChanged(let id, _): "icon:\(id)"
         case .processCreated(let p): "proc+\(p.processId)"
         case .processEnded(let p): "proc-\(p)"
+        case .windowsReset: "reset"
         }
     }
 }
@@ -371,4 +372,72 @@ private let vis = F.visible
         #expect(removed.value.contains(w.id))
         #expect(icons.value.allSatisfy { $0.1 > 0 })
     }
+}
+
+/// Live reconnect sequence (docs/50 §7.1): host init, OPEN, metrics; after the second Thinwire INIT the
+/// client sends PAUSE + RESUME (reference behaviour); the host then (re)announces its windows.
+@Test func pauseResumeAfterThinwireInitOnReconnect() {
+    let engine = SeamlessEngine()
+    let sent = Box<[UInt8]>([])
+    let events = Box<[SeamlessEvent]>([])
+    engine.onEvent = { events.value.append($0) }
+    engine.output = { if case .channel(let d) = $0, let t = d.first { sent.value.append(t) } }
+    #expect(!engine.pauseResume())                       // before the host init: nothing can be sent
+    #expect(sent.value.isEmpty)
+    // Multi-monitor host flags seen live (no 0x10: no monitor layout from us).
+    engine.receive(F.hostInit(flags: 0x015f_ff89))
+    engine.receive(F.open)
+    engine.receive(F.createV2(id: 7, style: vis | F.caption, pid: 1, title: "Rechner", appId: ""))
+    #expect(engine.model.windows.count == 1)
+    sent.value.removeAll()
+    #expect(engine.pauseResume())                        // second Thinwire INIT
+    #expect(sent.value == [0x05, 0x06])
+    #expect(engine.model.windows.isEmpty)                // RESUME resets the list; the host replays
+    #expect(names(events.value).contains("removed:7"))
+    engine.receive(F.hostInit(flags: 0x015f_ff89))
+    engine.receive(F.open)
+    engine.receive(F.createV2(id: 7, style: vis | F.caption, pid: 1, title: "Rechner", appId: ""))
+    #expect(engine.model.windows[7]?.kind == .appWindow)
+}
+
+@Test func pauseResumeResendsMonitorLayoutWhenHostWantsIt() {
+    let engine = SeamlessEngine()
+    let sent = Box<[UInt8]>([])
+    engine.output = { if case .channel(let d) = $0, let t = d.first { sent.value.append(t) } }
+    let r = TWIRect(x: 0, y: 0, width: 1800, height: 1168)
+    engine.setMonitors([TWIMonitor(bounds: r, workArea: r)])
+    engine.receive(F.hostInit(flags: 0x015f_ff99))       // single monitor: host has 0x10
+    sent.value.removeAll()
+    #expect(engine.pauseResume())
+    #expect(sent.value == [0x05, 0x06, 0x3b])
+    var config = SeamlessEngine.Config()
+    config.seamless = false
+    let windowed = SeamlessEngine(config: config)
+    windowed.output = { _ in }
+    windowed.receive(F.hostInit(flags: 0x015f_ff99))
+    #expect(!windowed.pauseResume())                     // only in seamless mode
+}
+
+/// A window the stock client left minimised arrives visible with WS_MINIMIZE (ARW_HIDE parks it
+/// off-screen): it is still an app window, and the model asks for a restore only via the config flag.
+@Test func minimisedWindowOnReconnectIsAnAppWindow() {
+    let (engine, _, sent) = setup()
+    engine.receive(F.createV2(id: 9, style: vis | F.caption | TWIStyle.minimize, pid: 1, title: "Mail", appId: ""))
+    #expect(engine.model.windows[9]?.kind == .appWindow)
+    #expect(engine.model.windows[9]?.isMinimized == true)
+    #expect(sent.value.count == 1)                       // RESTORE (restoreMinimizedOnCreate default)
+}
+
+
+/// A list reset (OPEN/RESUME) announces itself before the removals, so a UI can keep its windows.
+@Test func resetIsAnnouncedBeforeRemovals() {
+    let (engine, events, _) = setup()
+    engine.receive(F.createV2(id: 4, style: vis | F.caption, pid: 1, title: "A", appId: ""))
+    events.value.removeAll()
+    engine.receive(F.open)
+    let n = names(events.value)
+    #expect(n.firstIndex(of: "reset")! < n.firstIndex(of: "removed:4")!)
+    events.value.removeAll()
+    engine.receive(F.open)                       // empty list: no reset event
+    #expect(!names(events.value).contains("reset"))
 }

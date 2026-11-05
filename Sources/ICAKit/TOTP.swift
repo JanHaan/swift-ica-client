@@ -37,6 +37,23 @@ public struct TOTP {
         return String(repeating: "0", count: max(0, digits - text.count)) + text
     }
 
+    /// A code from a time window that has not been used before, recording the window in `statePath`.
+    /// Waits for the next window when the current one was already used (gateways accept a code once)
+    /// or is about to expire.
+    public func freshCode(statePath: String) -> String {
+        let lastUsed = (try? String(contentsOfFile: statePath, encoding: .utf8)).flatMap { Int($0) } ?? -1
+        var now = Date()
+        var window = Int(now.timeIntervalSince1970) / period
+        if window <= lastUsed || secondsRemaining(at: now) < 3 {
+            Thread.sleep(forTimeInterval: Double(secondsRemaining(at: now)) + 0.5)
+            now = Date()
+            window = Int(now.timeIntervalSince1970) / period
+        }
+        FileManager.default.createFile(atPath: statePath, contents: Data(String(window).utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        return code(at: now)
+    }
+
     /// Seconds until the current code expires.
     public func secondsRemaining(at date: Date = Date()) -> Int {
         period - Int(date.timeIntervalSince1970) % period

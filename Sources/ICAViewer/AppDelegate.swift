@@ -78,7 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     self.sessionEnded(c)
                 }
+                controller.onParkedChanged = { [weak self] c in
+                    self?.refreshSessionRows()
+                    if c.isParked { self?.launcher?.showWindow(nil) }
+                }
                 sessions.append(controller)
+                refreshSessionRows()
                 if ProcessInfo.processInfo.environment["ICAVIEWER_SELFTEST"] == "1" {
                     selfTest = SelfTest(controller: controller)
                 }
@@ -89,13 +94,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // ICAVIEWER_HOLD_SECONDS=N: no automated input; log the session off N seconds after the
                 // last app window appeared (logon shows a console window before the app's own).
                 if let hold = ProcessInfo.processInfo.environment["ICAVIEWER_HOLD_SECONDS"].flatMap(Double.init) {
+                    // Overall deadline, also when no app window ever appears (e.g. a reconnect to a
+                    // session without windows): end the hold the same way.
+                    SessionController.timerQueue.asyncAfter(deadline: .now() + hold + 60) { [weak controller] in
+                        guard let c = controller, !c.session.isClosed else { return }
+                        vlog("hold deadline reached")
+                        c.endHold()
+                    }
                     var pending: DispatchWorkItem?
                     controller.onAppWindowShown = { c in
                         vlog("hold mode: logging off in \(Int(hold)) s")
                         pending?.cancel()
                         let work = DispatchWorkItem { [weak c] in
-                            vlog("hold time over: TWI logoff")
-                            c?.logoff()
+                            vlog("hold time over")
+                            c?.endHold()
                         }
                         pending = work
                         // Not on main: the logoff must happen even if the main thread stalls.
@@ -112,8 +124,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshSessionRows() {
+        launcher?.setSessions(sessions.filter { !$0.ended }.map { c in
+            LauncherWindowController.SessionRow(
+                title: c.name, detail: c.isParked ? "no visible windows" : "running", canShow: c.isParked,
+                show: { [weak c] in c?.showParkedWindows() },
+                logoff: { [weak c] in vlog("launcher: log off \(c?.name ?? "")"); c?.logoff() })
+        })
+    }
+
     private func sessionEnded(_ controller: SessionController) {
         sessions.removeAll { $0 === controller }
+        refreshSessionRows()
         launcher?.setStatus("\(controller.name): session ended")
         guard sessions.isEmpty else { return }
         if terminating {

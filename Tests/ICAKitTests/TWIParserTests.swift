@@ -372,3 +372,35 @@ private func openEngine(hostFlags: UInt32 = 0x0001_0810, config: SeamlessEngine.
     engine.receive(TWIFixture.close)
     #expect(engine.model.windows.isEmpty && !engine.isSeamlessActive)
 }
+
+/// Host message 0x47 (96 bytes, seen live three times on every reconnect) is not in the reference
+/// dispatch: it must be skipped by length, not counted as malformed, and not disturb what follows.
+@Test func unknownHostMessage47IsSkipped() {
+    let engine = SeamlessEngine()
+    engine.output = { _ in }
+    var p47 = [UInt8](repeating: 0, count: 96)
+    p47[0] = 8; p47[2] = 2; p47[4] = 1
+    engine.receive(TWIFixture.hostInit(flags: 0x015f_ff89))
+    engine.receive(TWIFixture.frame(0x47, p47) + TWIFixture.open)
+    #expect(engine.unknownTypeCounts[0x47] == 1)
+    #expect(engine.malformedCount == 0)
+    #expect(engine.isSeamlessActive)
+}
+
+/// The host answers PAUSE/RESUME with CLOSE (0x03) then OPEN (0x02): seamless goes inactive and active
+/// again, and the window list is rebuilt from what follows.
+@Test func hostCloseThenOpenAfterResume() {
+    let engine = SeamlessEngine()
+    let states = Box<[Bool]>([])
+    engine.onEvent = { if case .seamlessStateChanged(let a) = $0 { states.value.append(a) } }
+    engine.output = { _ in }
+    engine.receive(TWIFixture.hostInit(flags: 0x015f_ff89))
+    engine.receive(TWIFixture.open)
+    engine.receive(TWIFixture.createV2(id: 3, style: TWIFixture.visible | TWIFixture.caption, pid: 1, title: "A", appId: ""))
+    #expect(engine.pauseResume())
+    engine.receive(TWIFixture.frame(0x03, []) + TWIFixture.open)
+    #expect(states.value == [true, false, true])
+    #expect(engine.model.windows.isEmpty)
+    engine.receive(TWIFixture.createV2(id: 3, style: TWIFixture.visible | TWIFixture.caption, pid: 1, title: "A", appId: ""))
+    #expect(engine.model.windows.count == 1)
+}

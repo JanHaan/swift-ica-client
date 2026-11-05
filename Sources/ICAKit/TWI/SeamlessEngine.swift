@@ -184,10 +184,24 @@ public final class SeamlessEngine: VirtualChannelEngine {
     /// Thinwire display layout changed: PAUSE, RESUME, reset the window list, re-send the monitor layout.
     public func displayLayoutChanged() {
         guard isSeamlessActive else { return }
+        pauseResume()
+    }
+
+    /// The reference client sends PAUSE then RESUME after **every** Thinwire INIT in seamless mode
+    /// (display setup callback), whether or not the TWI channel is open yet; RESUME resets the local
+    /// window list and re-sends the monitor layout when the host wants it. Only possible after the host
+    /// init (before that the reference's send is a no-op too). Returns whether it was sent.
+    @discardableResult
+    public func pauseResume() -> Bool {
+        guard canSend, config.seamless else { return false }
         send(TWIRequest.pause())
         send(TWIRequest.resume())
         chunks.reset()
         model.reset()
         sendMonitorLayout()
+        pauseResumeCount += 1
+        return true
     }
+
+    public private(set) var pauseResumeCount = 0
 }

@@ -64,9 +64,7 @@ case "login":
     }
     let passcode: () -> String? = {
         if let totp {
-            // Avoid posting a code that expires in flight.
-            if totp.secondsRemaining() < 3 { Thread.sleep(forTimeInterval: Double(totp.secondsRemaining()) + 0.5) }
-            return totp.code()
+            return totp.freshCode(statePath: sessionDir.appendingPathComponent("totp-last").path)
         }
         print("Passcode: ", terminator: "")
         return readLine()
@@ -248,7 +246,7 @@ func runSession(ica: ICAFile, seconds: Double) async throws {
     }
     var frames = 0
     thinwire.log = { say($0) }
-    thinwire.onInit = { info in say("Thinwire INIT \(info.width)x\(info.height) profile \(info.profile)") }
+    session.onThinwireInit = { info in say("Thinwire INIT \(info.width)x\(info.height) profile \(info.profile)") }
     thinwire.onUpdate = { _ in frames += 1 }
     let captures = [ChannelCapture(number: 9, name: "CTXTW"), ChannelCapture(number: 12, name: "CTXTWI")]
 

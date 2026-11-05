@@ -101,9 +101,29 @@ public struct WDDisplay: Sendable {
     public var colorCaps: UInt16 = 8
     public var scalePercent: UInt16 = 100
 
+    /// Monitors in session coordinates (origin = top-left of the union of all monitors), primary first.
+    /// With more than one monitor the Thinwire caps carry the layout (cap 0x11, docs/40 §2.3).
+    public var monitors: [WDMonitor] = []
+    /// Advertise the H.264 capability group (0x0D, 0x16, 0x17, 0x18, 0x1A, 0x1C). Off = only the
+    /// "compatible mode" group, as a client without an H.264 decoder would send.
+    public var advertiseH264 = true
+
     public init(width: Int = 1920, height: Int = 1080) {
         self.width = width
         self.height = height
+    }
+}
+
+/// One monitor for the Thinwire layout (cap 0x11 / C2H 0x1D): bounds and work area, exclusive right/bottom.
+public struct WDMonitor: Equatable, Sendable {
+    public var left: Int, top: Int, right: Int, bottom: Int
+    public var workLeft: Int, workTop: Int, workRight: Int, workBottom: Int
+    public var scalePercent: UInt16
+    public init(left: Int, top: Int, right: Int, bottom: Int, workLeft: Int, workTop: Int, workRight: Int, workBottom: Int,
+                scalePercent: UInt16 = 100) {
+        self.left = left; self.top = top; self.right = right; self.bottom = bottom
+        self.workLeft = workLeft; self.workTop = workTop; self.workRight = workRight; self.workBottom = workBottom
+        self.scalePercent = scalePercent
     }
 }
 
@@ -249,8 +269,42 @@ public enum WDModules {
     /// The H.264 phase-1 capability blob (docs/40-thinwire.md §7), with the u16 first-entry
     /// offset the reference writer puts after the count (see "Live findings" in docs/30).
     public static func thinwireCapabilities(scalePercent: UInt16 = 100) -> [UInt8] {
-        let entries: [[UInt8]] = [
-            [0x0A, 0x00, 0x20, 0x00, 0x02, 0x00, 0x01, 0x00, UInt8(scalePercent & 0xff), UInt8(scalePercent >> 8)],
+        thinwireCapabilities(scalePercent: scalePercent, monitors: [], h264: true)
+    }
+
+    /// Monitor layout data as in cap 0x11 (docs/40 §2.3): u32 total, u8 n, u8 primary index, 2 zero
+    /// bytes, then per monitor bounds and work area as 8 × u16. The primary is index 0.
+    public static func monitorLayoutData(_ monitors: [WDMonitor]) -> [UInt8] {
+        var w = ByteWriter()
+        w.u32(UInt32(8 + 16 * monitors.count))
+        w.u8(UInt8(monitors.count)); w.u8(0); w.u8(0); w.u8(0)
+        for m in monitors {
+            for v in [m.left, m.top, m.right, m.bottom, m.workLeft, m.workTop, m.workRight, m.workBottom] {
+                w.u16(UInt16(truncatingIfNeeded: v))
+            }
+        }
+        return [UInt8](w.data)
+    }
+
+    /// Thinwire C2H 0x1D (monitor layout update): `3A len 1D u16 n data`, data = cap-0x11 data with its
+    /// first byte set to 8 (as the reference does).
+    public static func thinwireMonitorUpdate(_ monitors: [WDMonitor]) -> [UInt8] {
+        var data = monitorLayoutData(monitors)
+        data[0] = 8
+        return WDBuild.thinwire(sub: 0x1D, [UInt8(data.count & 0xff), UInt8(data.count >> 8)] + data)
+    }
+
+    public static func thinwireCapabilities(scalePercent: UInt16, monitors: [WDMonitor], h264: Bool) -> [UInt8] {
+        let scales = monitors.count > 1 ? monitors.map(\.scalePercent) : [scalePercent]
+        var dpi: [UInt8] = [0x02, 0x00, UInt8(scales.count), 0x00]
+        for sc in scales { dpi += [UInt8(sc & 0xff), UInt8(sc >> 8)] }
+        func entry(_ id: UInt8, _ data: [UInt8] = []) -> [UInt8] {
+            let n = 4 + data.count
+            return [UInt8(n & 0xff), UInt8(n >> 8), id, 0x00] + data
+        }
+        var entries: [[UInt8]] = [entry(0x20, dpi)]
+        if monitors.count > 1 { entries.append(entry(0x11, monitorLayoutData(monitors))) }
+        entries += [
             [0x04, 0x00, 0x04, 0x00],
             [0x04, 0x00, 0x03, 0x00],
             [0x04, 0x00, 0x08, 0x00],
@@ -259,13 +313,15 @@ public enum WDModules {
             [0x06, 0x00, 0x10, 0x00, 0x0F, 0x00],
             [0x04, 0x00, 0x15, 0x00],
             [0x04, 0x00, 0x22, 0x00],
+        ]
+        if h264 { entries += [
             [0x08, 0x00, 0x0D, 0x00, 0x04, 0x00, 0x00, 0x00],
             [0x04, 0x00, 0x16, 0x00],
             [0x08, 0x00, 0x18, 0x00, 0x01, 0x00, 0x01, 0x00],
             [0x04, 0x00, 0x1C, 0x00],
             [0x08, 0x00, 0x17, 0x00, 0x02, 0x00, 0x00, 0x00],
             [0x05, 0x00, 0x1A, 0x00, 0x00],
-        ]
+        ] }
         return [0x00, UInt8(entries.count), 0x04, 0x00] + entries.flatMap { $0 }
     }
 
@@ -291,7 +347,7 @@ public enum WDModules {
         w.u8(0)
         w.u32(UInt32((1 << bits) / 12))
         w.u32(0)
-        let caps = thinwireCapabilities(scalePercent: display.scalePercent)
+        let caps = thinwireCapabilities(scalePercent: display.scalePercent, monitors: display.monitors, h264: display.advertiseH264)
         w.u16(UInt16(caps.count))
         w.reference(caps)
         return w.bytes()

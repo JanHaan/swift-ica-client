@@ -14,6 +14,7 @@ final class KeyboardTranslator {
     private var altUsed = false
 
     private func send(_ code: KeyMap.Code, up: Bool) {
+        controller?.noteActivity()
         if up { down.remove(code) } else { down.insert(code) }
         controller?.session.send { wd, _ in
             if code.extended { wd.keyScancodes([0xE0, code.code], up: up) } else { wd.keyScancode(code.code, up: up) }
@@ -21,6 +22,7 @@ final class KeyboardTranslator {
     }
 
     private func sendText(_ text: String) {
+        controller?.noteActivity()
         controller?.session.send { wd, _ in
             for unit in text.utf16 {
                 if wd.unicodeInsertMode { wd.keyUnicode(unit, flags: .insert) }

@@ -36,6 +36,10 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
 
     public var cookieNames: [String] { (jar.cookies ?? []).map(\.name).sorted() }
 
+    public func clearCookies() {
+        for cookie in jar.cookies ?? [] { jar.deleteCookie(cookie) }
+    }
+
     public func send(
         _ method: String, _ url: URL, headers: [String: String] = [:], form: [(String, String)]? = nil
     ) async throws -> Response {
