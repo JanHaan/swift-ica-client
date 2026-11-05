@@ -23,8 +23,10 @@ public final class CGPSession {
     public enum Event {
         case signature
         case bindResponse([Capability])
-        case channelOpenResponse(channelId: Int, status: UInt16)
+        case channelOpenResponse(channelId: Int, status: UInt16, raw: Data)
         case data(Data)
+        /// 0x05 from the peer; `raw` is the packet body (flags + reliability header).
+        case keepalive(raw: Data)
         case finishRequest(closeType: UInt8, reason: UInt8)
         case finishResponse
         case other(command: UInt8, body: Data)
@@ -39,6 +41,10 @@ public final class CGPSession {
     private var lastAcked = 0
     public private(set) var tcpProxyServiceId: UInt16 = 1
     public private(set) var reconnectCookie = Data()
+    /// Our packets the peer has acknowledged so far.
+    public private(set) var peerAcked = 0
+    /// Control packets whose body did not parse (kept for diagnostics).
+    public private(set) var parseFailures = 0
 
     public init() {}
 
@@ -127,8 +133,8 @@ public final class CGPSession {
     }
 
     /// ICA bytes on the default channel; piggybacks a pending ack.
-    public func dataPacket(_ ica: Data) -> Data {
-        let delta = takeAckDelta()
+    public func dataPacket(_ ica: Data, piggybackAck: Bool = true) -> Data {
+        let delta = piggybackAck ? takeAckDelta() : 0
         if delta == 0 { return Self.packet(.data, ica) }
         var body = ByteWriter()
         body.varlen(delta)
@@ -147,6 +153,21 @@ public final class CGPSession {
         appendReliability(&body, sequenced: false)
         return Self.packet(.ack, body.data)
     }
+
+    /// 0x05 keepalive in the same form the server uses: flags 0x08 and a reliability header that
+    /// carries the pending ack, if any.
+    public func keepalive() -> Data {
+        var body = ByteWriter()
+        body.u8(0x08)
+        appendReliability(&body, sequenced: false)
+        return Self.packet(.ack, body.data)
+    }
+
+    /// Received sequenced packets so far.
+    public var receivedSequenced: Int { rxCount }
+
+    /// Received packets not yet acknowledged.
+    public var unacknowledged: Int { rxCount - lastAcked }
 
     public func finishRequest(closeType: UInt8 = 0, reason: UInt8 = 0) -> Data {
         Self.packet(.finishRequest, Data([0x00, closeType, reason]))
@@ -220,15 +241,26 @@ public final class CGPSession {
         case .bindRequest:
             throw Failure.badPacket(commandByte)
         default:
-            try readFlags(&r)
+            let raw = r.rest()
+            r = ByteReader(raw)
+            // Flagged commands with a short or empty body (seen live for 0x05) are reported, not fatal.
+            do { try readFlags(&r) } catch {
+                parseFailures += 1
+                return command == .ack ? .keepalive(raw: raw) : .other(command: commandByte, body: raw)
+            }
             switch command {
+            case .ack:
+                return .keepalive(raw: raw)
             case .finishRequest:
                 return .finishRequest(closeType: (try? r.u8()) ?? 0, reason: (try? r.u8()) ?? 0)
             case .finishResponse:
                 return .finishResponse
             case .channelOpenResponse:
-                let channel = try r.varlen()
-                return .channelOpenResponse(channelId: channel, status: try r.u16())
+                guard let channel = try? r.varlen(), let status = try? r.u16() else {
+                    parseFailures += 1
+                    return .other(command: commandByte, body: raw)
+                }
+                return .channelOpenResponse(channelId: channel, status: status, raw: raw)
             default:
                 return .other(command: commandByte, body: r.rest())
             }
@@ -245,12 +277,16 @@ public final class CGPSession {
             shift += 7
             if byte & 0x80 == 0 { break }
         }
-        if flags & 0x01 != 0 { _ = try r.bytes() }
+        // With bit 0 the headers that follow are read from inside the length-prefixed extension
+        // block; the main reader continues after it (seen live: `09 02 02 05` = ack of 5).
+        var headers = r
+        if flags & 0x01 != 0 { headers = ByteReader(try r.bytes()) }
         for bit in [0x02, 0x04, 0x08] where flags & bit != 0 {
-            let rflags = try r.u8()
-            if rflags & 0x02 != 0 { _ = try r.varlen() }
+            let rflags = try headers.u8()
+            if rflags & 0x02 != 0 { peerAcked += try headers.varlen() }
             if rflags & 0x01 != 0 { rxCount += 1 }
         }
+        if flags & 0x01 == 0 { r = headers }
     }
 
     private func readServices(_ body: Data) {

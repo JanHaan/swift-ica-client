@@ -139,77 +139,21 @@ case "launch":
         fail("\(error)")
     }
 
-case "connect":
-    // icactl connect [resource name] — fresh ICA file, TLS to the gateway, CGP bind, ICA detect, dump
+case "connect", "session":
+    // icactl session [resource] — full ICA session: logon, capture channel data to .session/, then logoff.
+    // ICA_DUMP_SECONDS (default 20) keeps it up; ICA_CREDS_IN_UI=1 skips cap 0x12 (logon strings in the UI module).
     let name = args.first ?? env["CITRIX_RESOURCE"] ?? "Calculator"
+    guard name == "Calculator" || ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else {
+        fail("live tests are limited to \"Calculator\"")
+    }
+    let seconds = Double(ProcessInfo.processInfo.environment["ICA_DUMP_SECONDS"] ?? "") ?? 20
     let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
         guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
-            fail("ICA file lacks SSLProxyHost/Address/CGPSecurityTicket")
-        }
-        let colon = proxy.lastIndex(of: ":")
-        let host = colon.map { String(proxy[..<$0]) } ?? proxy
-        let port = colon.flatMap { UInt16(proxy[proxy.index(after: $0)...]) } ?? 443
-        let stream = TLSStream(host: host, port: port)
-        try await stream.connect()
-        print("TLS connected to \(host):\(port)")
-        let cgp = CGPSession()
-        try await stream.send(cgp.bindRequest(ticket: ticket))
-        print("→ CGP bind request (ticket \(ticket.count) chars)")
-
-        let deadline = Date().addingTimeInterval(Double(ProcessInfo.processInfo.environment["ICA_DUMP_SECONDS"] ?? "") ?? 15)
-        let watchdog = Task { try await Task.sleep(until: .now + .seconds(deadline.timeIntervalSinceNow)); stream.close() }
-        var sawDetect = false
-        var captureIndex = 0
-        receive: while true {
-            let chunk: Data
-            do { chunk = try await stream.receive() } catch { print("receive ended: \(error)"); break }
-            for event in try cgp.feed(chunk) {
-                switch event {
-                case .signature:
-                    print("← CGP signature")
-                case .bindResponse(let caps):
-                    print("← bind response: \(caps.map(\.description).joined(separator: ", "))")
-                    // Cap 6 carries the reconnect ticket and cap 5 the reconnect cookie: never dump them.
-                    for cap in caps where cap.capId != 6 && cap.capId != 5 {
-                        print("   \(cap)\n" + cap.body.hexDump(limit: 64).split(separator: "\n").map { "     " + $0 }.joined(separator: "\n"))
-                    }
-                    try await stream.send(cgp.channelOpenRequest())
-                    print("→ channel open (service \(cgp.tcpProxyServiceId))")
-                case .channelOpenResponse(let channel, let status):
-                    print("← channel open response: channel \(channel) status \(status)")
-                case .data(let payload):
-                    if !sawDetect, payload.starts(with: CGPSession.icaDetect) {
-                        sawDetect = true
-                        print("← ICA detect\(payload.count > 6 ? " + \(payload.count - 6) bytes" : "")")
-                        try await stream.send(cgp.detectReply())
-                        print("→ ICA detect reply")
-                        if payload.count > 6 { print(payload.dropFirst(6).hexDump()) }
-                    } else {
-                        captureIndex += 1
-                        let path = sessionDir.appendingPathComponent("capture-\(captureIndex).bin").path
-                        FileManager.default.createFile(atPath: path, contents: payload, attributes: [.posixPermissions: 0o600])
-                        print("← ICA data \(payload.count)B → \(path)\n" + payload.hexDump(limit: 64))
-                    }
-                case .finishRequest(let type, let reason):
-                    print("← finish request type \(type) reason 0x\(String(reason, radix: 16))")
-                    try? await stream.send(cgp.finishResponse(closeType: type))
-                    break receive
-                case .finishResponse:
-                    print("← finish response")
-                case .other(let command, let body):
-                    print("← CGP cmd 0x\(String(command, radix: 16)) \(body.count)B\n" + body.hexDump(limit: 64))
-                }
-            }
-            if let ack = cgp.pendingAck() { try await stream.send(ack) }
-        }
-        watchdog.cancel()
-        try? await stream.send(cgp.finishRequest())
-        stream.close()
+        try await runSession(ica: ica, seconds: seconds)
     } catch {
         fail("\(error)")
     }
@@ -223,5 +167,189 @@ default:
       icactl login                       nFactor logon at the gateway, saves cookies in .session/
       icactl req GET|POST <path> [k=v]   request with saved cookies (bodies redacted)
       icactl cookies                     list saved cookie names
+      icactl session [resource]          launch, logon, capture channel data, log off (ICA_DUMP_SECONDS)
     """)
+}
+
+// MARK: - Session command
+
+/// Saves every payload of one channel to .session/ch<N>-<seq>.bin (0600, first `limit`).
+final class ChannelCapture {
+    let number: UInt8
+    let name: String
+    var writes = 0
+    var bytes = 0
+    var saved = 0
+    let limit = 300
+
+    init(number: UInt8, name: String) {
+        self.number = number
+        self.name = name
+    }
+
+    func record(_ data: [UInt8]) {
+        if writes == 0 {
+            // First payload of this run: drop this channel's files from an earlier run.
+            let prefix = "ch\(number)-"
+            for file in (try? FileManager.default.contentsOfDirectory(atPath: sessionDir.path)) ?? []
+            where file.hasPrefix(prefix) && file.hasSuffix(".bin") {
+                try? FileManager.default.removeItem(at: sessionDir.appendingPathComponent(file))
+            }
+        }
+        writes += 1
+        bytes += data.count
+        if saved < limit {
+            saved += 1
+            let path = sessionDir.appendingPathComponent(String(format: "ch%d-%04d.bin", number, saved)).path
+            FileManager.default.createFile(atPath: path, contents: Data(data), attributes: [.posixPermissions: 0o600])
+        }
+    }
+}
+
+/// Session-info tags whose values are safe to print (server/VDA identity, not user or session secrets).
+/// (Statics, not globals: top-level globals declared below the command switch are not yet initialised.)
+enum SessionTags { static let printable: Set<String> = ["CTXSRVR", "CTXVERS", "CTXTYPE", "CTXDG00", "CTXDG01", "CTXDG02", "CTXDG03", "CTXDG04"] }
+
+enum Clock { static let start = Date() }
+/// Log line with seconds since the first log line.
+func say(_ text: String) { print(String(format: "%6.2f ", Date().timeIntervalSince(Clock.start)) + text) }
+
+func hexLine(_ bytes: [UInt8], limit: Int = 48) -> String {
+    bytes.prefix(limit).map { String(format: "%02x", $0) }.joined(separator: " ") + (bytes.count > limit ? " … (\(bytes.count)B)" : "")
+}
+
+func runSession(ica: ICAFile, seconds: Double) async throws {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    var config = WinstationDriver.Configuration()
+    config.logon = WDLogon(ica: ica)
+    if ProcessInfo.processInfo.environment["ICA_CREDS_IN_UI"] == "1" { config.policy.credentialRequest = false }
+    if let flags = ProcessInfo.processInfo.environment["ICA_REDUCER_FLAGS"].flatMap({ UInt16($0, radix: 16) }) {
+        config.policy.reducerFlags = flags
+    }
+    let width = Int(ProcessInfo.processInfo.environment["ICA_WIDTH"] ?? "") ?? 1920
+    let height = Int(ProcessInfo.processInfo.environment["ICA_HEIGHT"] ?? "") ?? 1080
+    config.display = WDDisplay(width: width, height: height)
+    let session = try ICASession(ica: ica, configuration: config)
+    let seamless = session.seamless
+    let thinwire = session.thinwire
+
+    var windowLines: [String] = []
+    seamless.onEvent = { event in
+        switch event {
+        case .channelReady(let host): say("TWI host init: flags 0x\(String(host.flags.rawValue, radix: 16))")
+        case .seamlessStateChanged(let active): say("TWI seamless active: \(active)")
+        case .windowAdded(let w):
+            let line = "window \(w.id) \(w.kind) \"\(w.title)\" \(w.windowRect.width)x\(w.windowRect.height)"
+            windowLines.append(line)
+            say("TWI " + line)
+        case .windowRemoved(let w): say("TWI window \(w.id) removed")
+        default: break
+        }
+    }
+    var frames = 0
+    thinwire.log = { say($0) }
+    thinwire.onInit = { info in say("Thinwire INIT \(info.width)x\(info.height) profile \(info.profile)") }
+    thinwire.onUpdate = { _ in frames += 1 }
+    let captures = [ChannelCapture(number: 9, name: "CTXTW"), ChannelCapture(number: 12, name: "CTXTWI")]
+
+    var packetCounts: [String: (count: Int, bytes: Int)] = [:]
+    var dropped: [UInt8: Int] = [:]
+    var keepalives = 0
+    var connectedAt: Date?
+    var terminateReason: UInt8?
+    session.onEvent = { event in
+        switch event {
+        case .log(let text): say(text)
+        case .cgpBound(let caps): say("← CGP bind response: \(caps.map(\.description).joined(separator: ", "))")
+        case .channelOpened(let status): say("← CGP channel open: status \(status)")
+        case .detect: say("← ICA detect, replied")
+        case .keepalive(let raw):
+            keepalives += 1
+            if keepalives == 1 { say("← CGP keepalive [\(hexLine([UInt8](raw)))] (further ones counted)") }
+        case .closed(let reason): say("session closed: \(reason)")
+        case .wd(let e):
+            switch e {
+            case .initRequest(let r):
+                say("← INIT_REQUEST level \(r.level), \(r.capabilities.count) caps, host OS \(r.hostOS.map(String.init) ?? "?"), wheel \(r.extendedMouse)")
+                for cap in r.capabilities { say("     " + cap.description) }
+            case .initResponseSent(let modules, let negotiated):
+                say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+                say("     negotiated: \(negotiated.map(\.description).joined(separator: ", "))")
+            case .initConnect(let remaining, let moduleClass, let payload):
+                // Hex only for WD/PD/VD modules; other classes may echo client data.
+                let shown = [2, 3, 4].contains(moduleClass) ? " [\(hexLine(payload, limit: 40))]" : " (\(payload.count)B)"
+                say("← INIT_CONNECT remaining \(remaining) class \(moduleClass)" + shown)
+                let path = sessionDir.appendingPathComponent("initconnect-\(remaining).bin").path
+                FileManager.default.createFile(atPath: path, contents: Data(payload), attributes: [.posixPermissions: 0o600])
+            case .connected(let version, let rp, let ep, let caps):
+                connectedAt = Date()
+                say("→ INIT_CONNECT_RESPONSE; connected (reducer v\(version), powers \(rp)/\(ep)); final caps: \(caps.map(\.description).joined(separator: ", "))")
+            case .encryption(let mode): say("encryption established: \(mode)")
+            case .sessionInfo(let tag, let value):
+                if SessionTags.printable.contains(tag) {
+                    let text = String(decoding: value.filter { $0 != 0 }, as: UTF8.self)
+                    say("← session info \(tag) = \(text)")
+                } else {
+                    say("← session info \(tag) (\(value.count)B, not shown)")
+                }
+            case .credentialRequest(let answered): say("← credential request 0x44; answered: \(answered) (strings not shown)")
+            case .setLED(let mask): say("← LED 0x\(String(mask, radix: 16))")
+            case .mousePosition(let x, let y): say("← mouse position \(x),\(y)")
+            case .terminate(let reason):
+                terminateReason = reason
+                say("← TERMINATE reason \(reason); acked")
+            case .packet(let p):
+                if let ch = p.channel, let capture = captures.first(where: { $0.number == ch }) { capture.record(p.payload) }
+                let key = p.channel.map { "VC ch\($0)" } ?? WDPacketType.name(p.type)
+                packetCounts[key, default: (0, 0)].count += 1
+                packetCounts[key, default: (0, 0)].bytes += p.payload.count
+                if p.channel == nil, ![0x00, 0x02, 0x05, 0x3B, 0x44, 0x3F].contains(p.type), packetCounts[key]!.count <= 3 {
+                    say("← \(key) (\(p.payload.count)B)")
+                }
+            case .droppedChannelData(let channel, let bytes): dropped[channel, default: 0] += bytes
+            case .failure(let text): say("WD failure: \(text)")
+            }
+        }
+    }
+
+    try await session.start()
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+
+    var ending = "session ended before the dump time was over"
+    if !session.isClosed {
+        let canLogoff: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        if canLogoff {
+            say("→ TWI LOGOFF")
+            let logoffDeadline = Date().addingTimeInterval(25)
+            while Date() < logoffDeadline, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+            ending = session.isClosed ? "logged off (server ended the session)" : "logoff sent, server did not end the session in 25 s"
+        } else {
+            ending = "no TWI channel to log off; disconnect only"
+        }
+        if !session.isClosed { await session.close() }
+    }
+
+    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+        session.perform {
+            say("\n=== summary ===")
+            say("connected: \(connectedAt.map { _ in "yes" } ?? "no"), terminate reason: \(terminateReason.map(String.init) ?? "none"), CGP keepalives: \(keepalives)")
+            for (key, value) in packetCounts.sorted(by: { $0.key < $1.key }) {
+                say(String(format: "  %-18@ %6d packets %9d bytes", key as NSString, value.count, value.bytes))
+            }
+            for (channel, bytes) in dropped.sorted(by: { $0.key < $1.key }) { say("  dropped ch\(channel): \(bytes) bytes") }
+            for capture in captures {
+                say("  ch\(capture.number) \(capture.name): \(capture.writes) writes, \(capture.bytes) bytes, \(capture.saved) files saved")
+            }
+            say("  Thinwire: \(thinwire.stats.commands) commands, \(frames) updates, \(thinwire.stats.errors) errors, \(thinwire.stats.resyncs) resyncs")
+            if let fb = thinwire.framebuffer, let png = ProcessInfo.processInfo.environment["ICA_PNG"] {
+                let url = URL(fileURLWithPath: png)
+                if fb.writePNG(to: url) { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
+            }
+            say("  TWI messages: \(seamless.messageCounts.sorted { $0.key < $1.key }.map { String(format: "0x%02x×%d", $0.key, $0.value) }.joined(separator: " ")), malformed \(seamless.malformedCount)")
+            for line in windowLines { say("  " + line) }
+            say("end: \(ending)")
+            c.resume()
+        }
+    }
 }

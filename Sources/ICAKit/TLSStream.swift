@@ -16,9 +16,11 @@ public final class TLSStream: @unchecked Sendable {
     }
 
     private let connection: NWConnection
-    private let queue = DispatchQueue(label: "ica.tls")
+    /// The queue all connection callbacks (and `startReceiving` handlers) run on.
+    public let queue: DispatchQueue
 
-    public init(host: String, port: UInt16, tls: Bool = true) {
+    public init(host: String, port: UInt16, tls: Bool = true, queue: DispatchQueue = DispatchQueue(label: "ica.tls")) {
+        self.queue = queue
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let parameters = NWParameters(tls: tls ? NWProtocolTLS.Options() : nil, tcp: tcp)
@@ -64,6 +66,25 @@ public final class TLSStream: @unchecked Sendable {
                 else if isComplete { continuation.resume(throwing: Failure.closed) }
                 else { continuation.resume(returning: Data()) }
             }
+        }
+    }
+
+    /// Fire-and-forget send; writes keep their call order. Errors go to `onSendError`.
+    public func enqueue(_ data: Data) {
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let error { self?.onSendError?(Failure.failed("\(error)")) }
+        })
+    }
+
+    public var onSendError: ((Error) -> Void)?
+
+    /// Receives continuously; `handler` runs on `queue` for every chunk, and once with a failure at the end.
+    public func startReceiving(_ handler: @escaping (Result<Data, Error>) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            if let data, !data.isEmpty { handler(.success(data)) }
+            if let error { handler(.failure(Failure.failed("\(error)"))); return }
+            if isComplete { handler(.failure(Failure.closed)); return }
+            self?.startReceiving(handler)
         }
     }
 
