@@ -6,7 +6,9 @@
 //                                                 every further image centred over in1 (HUD over a window)
 //   shotcheck selftest <dir>                      writes synthetic PNGs to <dir> and checks them
 //
-// check (1): Vision OCR (accurate, en + de) must not recognise ABC, XYZ, "example" or "gw." (case-insensitive);
+// check (1): Vision OCR (accurate, en + de) must not recognise any forbidden word (case-insensitive regexes
+//            from env ICA_SHOT_FORBIDDEN, one per line or separated by ";", and from the git-ignored file
+//            .shotcheck-forbidden, one per line, in the package root; none built in, a warning if none);
 //            all recognised strings are printed for review.
 // check (2): the four corner pixels must be fully transparent, or the image is a composite: opaque and
 //            equal to the flat background. The outer 3 px ring is summarised.
@@ -17,7 +19,33 @@ import Vision
 
 let background: (r: UInt8, g: UInt8, b: UInt8) = (0xE5, 0xE5, 0xEA)
 let padding = 48
-let forbidden = try! NSRegularExpression(pattern: "ABC|XYZ|" + "exa" + "mple|gw\\.", options: [.caseInsensitive])
+
+/// Forbidden-word regexes (case-insensitive) from the environment and the package root's file.
+func loadForbidden() -> [NSRegularExpression] {
+    var patterns: [String] = []
+    if let env = ProcessInfo.processInfo.environment["ICA_SHOT_FORBIDDEN"] {
+        patterns += env.split(whereSeparator: { $0 == "\n" || $0 == ";" }).map(String.init)
+    }
+    var dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    while true {
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("Package.swift").path) {
+            if let text = try? String(contentsOf: dir.appendingPathComponent(".shotcheck-forbidden"), encoding: .utf8) {
+                patterns += text.split(separator: "\n").map(String.init)
+            }
+            break
+        }
+        let parent = dir.deletingLastPathComponent()
+        if parent.path == dir.path { break }
+        dir = parent
+    }
+    patterns = patterns.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
+    return patterns.map {
+        guard let regex = try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) else { fail("bad forbidden regex: \($0)") }
+        return regex
+    }
+}
+
+var forbidden: [NSRegularExpression] = []
 
 func fail(_ text: String) -> Never {
     FileHandle.standardError.write(Data((text + "\n").utf8))
@@ -118,7 +146,7 @@ func check(_ paths: [String]) -> Bool {
         var problems = edgeCheck(image, name: path)
         let strings = recognise(image)
         print("  OCR (\(strings.count) strings): " + strings.map { "\"\($0)\"" }.joined(separator: ", "))
-        for s in strings where forbidden.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil {
+        for s in strings where forbidden.contains(where: { $0.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }) {
             problems.append("OCR found forbidden text: \"\(s)\"")
         }
         for p in problems { print("  FAIL: \(p)") }
@@ -175,8 +203,9 @@ func selftest(dir: String) -> Bool {
     }
     let good = make("good.png", text: ["Calculator", "Sign In demo"], rounded: true)
     let hud = make("hud.png", text: ["Calculator", "Reconnecting 2:54"], rounded: true, size: CGSize(width: 300, height: 110))
-    let leakyABC = make("leak-ekm.png", text: ["Tool ABC"], rounded: true)
-    let leakyHost = make("leak-host.png", text: ["gateway gw.corp.test"], rounded: true)
+    forbidden = ["SECRETCORP", "Tool QRS"].map { try! NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    let leakyTag = make("leak-tag.png", text: ["Tool QRS"], rounded: true)
+    let leakyName = make("leak-name.png", text: ["Welcome to SECRETCORP"], rounded: true)
     let square = make("square.png", text: ["Calculator"], rounded: false)
     let comp = dir + "/composite.png"
     composite(out: comp, inputs: [good, hud])
@@ -189,8 +218,8 @@ func selftest(dir: String) -> Bool {
     expect("good window", passes: true, good)
     expect("hud", passes: true, hud)
     expect("composite", passes: true, comp)
-    expect("ABC text", passes: false, leakyABC)
-    expect("gw. host text", passes: false, leakyHost)
+    expect("forbidden tag text", passes: false, leakyTag)
+    expect("forbidden name text", passes: false, leakyName)
     expect("square opaque corners", passes: false, square)
     print(failures.isEmpty ? "selftest ok" : "selftest FAILED: \(failures.joined(separator: ", "))")
     return failures.isEmpty
@@ -199,6 +228,10 @@ func selftest(dir: String) -> Bool {
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
 case "check" where args.count > 1:
+    forbidden = loadForbidden()
+    if forbidden.isEmpty {
+        print("WARNING: no forbidden words configured (ICA_SHOT_FORBIDDEN or .shotcheck-forbidden); only the corner check is meaningful")
+    }
     exit(check(Array(args.dropFirst())) ? 0 : 1)
 case "composite" where args.count >= 3:
     composite(out: args[1], inputs: Array(args.dropFirst(2)))

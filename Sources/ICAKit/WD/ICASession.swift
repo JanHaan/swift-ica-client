@@ -110,6 +110,8 @@ public final class ICASession: @unchecked Sendable {
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
         thinwire.onInit = { [weak self] info in
             guard let self else { return }
+            // From the first Thinwire INIT on, a dead link is resumed (docs/20 §3.12.2, early drop).
+            self.transport.markEstablished()
             let text: String
             if !self.pauseResumeOnThinwireInit { text = "disabled" }
             else if self.seamless.pauseResume() {
@@ -213,6 +215,10 @@ public final class ICASession: @unchecked Sendable {
     public func waitUntilClosed() async { await transport.waitUntilClosed() }
 
     public var isClosed: Bool { transport.isClosed }
+
+    /// True once the first Thinwire INIT arrived: the host built the session's display. Before that a
+    /// dead link is an early drop, not resumed (docs/20 §3.12.2). Any thread.
+    public var isEstablished: Bool { transport.isEstablished }
 
     public var acksSent: Int { transport.status.acksSent }
 
@@ -328,6 +334,9 @@ public final class CGPTransport: @unchecked Sendable {
     private var finishing = false
     /// Set once the session is ending on the ICA level (TERMINATE received, logoff sent).
     private var endExpected: String?
+    /// Set by the owner once the session is established (ICA: first Thinwire INIT). Before that a
+    /// dead link is an early drop: closed at once, no SR (deviation, docs/20 §3.12.2).
+    private var established = false
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var counters = Status()
 
@@ -705,6 +714,16 @@ public final class CGPTransport: @unchecked Sendable {
 
     // MARK: Suspend and resume (§3.12.3, §3.12.4)
 
+    /// The session got past its handshake (ICA: first Thinwire INIT); from now on a dead link is resumed.
+    public func markEstablished() {
+        perform { [self] in
+            guard !established else { return }
+            established = true
+        }
+    }
+
+    public var isEstablished: Bool { onQueue { established } }
+
     /// The session is ending above CGP (WD TERMINATE received, TWI logoff sent): from now on a closed
     /// or silent link ends the session instead of suspending it.
     public func expectServerClose(_ why: String) {
@@ -716,6 +735,11 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func suspend(_ reason: String) {
         guard cgp.state == .connected, !closed else { return }
+        if !established {
+            // Early drop (D10: the VDA sometimes closes ~20 ms after INIT_CONNECT_RESPONSE, before
+            // logon). Nothing to resume; a fresh launch is the remedy, so end now (deviation, §3.12.2).
+            return finish("early drop: link closed before the session was established (\(reason))")
+        }
         if let why = endExpected {
             // Live: after ICA TERMINATE the host closes TCP without CGP FINISH. Not a dead link:
             // state 9, no suspend, no resume (docs/20 §3.12.2).

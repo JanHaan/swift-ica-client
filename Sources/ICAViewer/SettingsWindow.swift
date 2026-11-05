@@ -130,6 +130,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.columnSpacing = 8
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
+        // Fixed column widths and window width: the longest checkbox/radio label (about 310 pt in English or
+        // German) fits with the same 20 pt margin on the right as on the left.
+        grid.column(at: 0).width = 120
+        grid.column(at: 1).width = 360
         grid.row(at: 4).topPadding = 8
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
@@ -148,6 +152,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         stack.alignment = .leading
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
+        stack.widthAnchor.constraint(equalToConstant: 540).isActive = true
         for v in [status, buttons] {
             v.translatesAutoresizingMaskIntoConstraints = false
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true

@@ -30,6 +30,8 @@ final class FakeCGPServer: @unchecked Sendable {
     var finishResumeReason: UInt8?
     var closeResumeAttempts = 0
     var rejectConnections = false
+    /// Close the connection right after the first bind response (the early drop, D10).
+    var dropAfterBind = false
     /// Drop the link once this many client packets have been processed: the rest of that read is
     /// lost and `loseOnDrop` server packets are queued but never written (in flight).
     var dropAtClientPacket: Int?
@@ -269,6 +271,7 @@ final class FakeCGPServer: @unchecked Sendable {
                 CGPFixture.paramsCap(timeout: srTimeout, dimming: 80),
                 CGPFixture.keepaliveCap(c2h: keepaliveMs, h2c: keepaliveMs),
                 CGPFixture.servicesCap])))
+            if dropAfterBind { queue.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.drop() } }
             return
         }
         if closeResumeAttempts > 0 { closeResumeAttempts -= 1; return drop() }
@@ -330,6 +333,8 @@ final class ResumeClient: @unchecked Sendable {
     let queue = DispatchQueue(label: "test.cgp.client")
     let transport: CGPTransport
     let stream = U32Stream()
+    /// Mark the transport established at the detect string (the real session waits for Thinwire INIT).
+    var establishOnDetect = true
     private let lock = NSLock()
     private var _ica = Data()
     private var _events: [String] = []
@@ -357,7 +362,9 @@ final class ResumeClient: @unchecked Sendable {
         defer { lock.unlock() }
         switch event {
         case .data(let d): _ica.append(d)
-        case .detect: _detect = true
+        case .detect:
+            _detect = true
+            if establishOnDetect { transport.markEstablished() }
         case .suspended(let s): _events.append("suspended: \(s.reason)")
         case .resuming(let n): _events.append("resuming \(n)")
         case .resumed(let r): _resumes.append(r); _events.append("resumed")
@@ -667,4 +674,20 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     #expect(client.giveUp == nil && client.transport.status.attempts == 0)
     #expect(client.transport.status.state == .closed)
     #expect(server.sync { server.finishRequests } == 0)
+}
+
+@Test func earlyDropBeforeEstablishmentClosesWithoutSR() async throws {
+    // The gateway drops the link right after the bind response, before the session is established.
+    let server = FakeCGPServer()
+    server.dropAfterBind = true
+    try await server.start()
+    defer { server.stop() }
+    let client = ResumeClient(port: server.port)
+    client.establishOnDetect = false
+    try await client.transport.start()
+    #expect(await waitUntil(3) { client.closed }, "\(client.events)")
+    #expect(!client.events.contains { $0.hasPrefix("suspended") || $0.hasPrefix("resuming") }, "\(client.events)")
+    #expect(client.events.last?.hasPrefix("closed: early drop: link closed before the session was established") == true, "\(client.events)")
+    #expect(client.giveUp == nil && client.transport.status.attempts == 0 && !client.transport.isEstablished)
+    #expect(server.sync { (server.connections, server.finishRequests) } == (1, 0))
 }

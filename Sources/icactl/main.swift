@@ -412,7 +412,7 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
     if session.isClosed, let reason = terminateReason { ending = "ended by server before the dump time was over (TERMINATE reason \(reason))" }
     let fresh: Bool = await withCheckedContinuation { c in session.perform { c.resume(returning: logon.isFresh) } }
     var mayLogoff = fresh
-    if !session.isClosed, !fresh, let guardList {
+    if !session.isClosed, session.isEstablished, !fresh, let guardList {
         // Reconnect: windows are re-announced after the PAUSE/RESUME; give them at least 10 s (at most 30 s more).
         let waitUntil = Date().addingTimeInterval(30)
         while !session.isClosed, Date() < waitUntil {
@@ -435,7 +435,11 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
             say("guarded logoff refused: \(seen.isEmpty ? "no window seen" : seen.joined(separator: ", "))")
         }
     }
-    if !session.isClosed, !mayLogoff {
+    if !session.isClosed, !session.isEstablished {
+        say("session never got past the handshake: disconnecting")
+        await session.close()
+        ending = "disconnected before the session was established"
+    } else if !session.isClosed, !mayLogoff {
         say("not a fresh logon by this run: disconnecting without logoff")
         await session.close()
         ending = "disconnected (CGP FINISH), not logged off"

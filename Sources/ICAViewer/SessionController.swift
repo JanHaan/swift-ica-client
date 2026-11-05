@@ -684,7 +684,12 @@ final class SessionController: NSObject {
             return
         default: break
         }
-        if freshLogon {
+        if !session.isEstablished {
+            // Never past the handshake: there is no session to log off or to call a reconnect.
+            vlog("session never got past the handshake: closing")
+            let session = self.session
+            Task { await session.close() }
+        } else if freshLogon {
             logoff()
         } else {
             vlog("not a fresh logon by this run (reconnect to an existing session): disconnecting without logoff")

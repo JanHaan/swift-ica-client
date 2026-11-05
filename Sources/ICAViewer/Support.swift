@@ -69,10 +69,18 @@ enum LaunchPolicy {
     }
 }
 
+/// Organisation words to replace in screenshot mode: `word=replacement` rules from ICA_SHOT_CENSOR
+/// (separated by `;`) or from the git-ignored file `.shotcheck-censor` in the package root. None by default.
+private let censorRules: [(word: String, with: String)] = {
+    if let text = ProcessInfo.processInfo.environment["ICA_SHOT_CENSOR"] { return DisplayName.parseReplacements(text) }
+    let file = Paths.root.appendingPathComponent(".shotcheck-censor")
+    return (try? String(contentsOf: file, encoding: .utf8)).map(DisplayName.parseReplacements) ?? []
+}()
+
 /// Resource and app names as shown in the UI. With ICAVIEWER_SCREENSHOT=1 they are censored for
 /// screenshots (`DisplayName.censored`); never used for matching or for the protocol.
 func displayName(_ name: String) -> String {
-    Demo.screenshotMode ? DisplayName.censored(name) : name
+    Demo.screenshotMode ? DisplayName.censored(name, replacing: censorRules) : name
 }
 
 /// Login, resource list and launch through the gateway.

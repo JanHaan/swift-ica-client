@@ -14,16 +14,24 @@ import Testing
         #expect(DisplayName.censored("Command Prompt") == "Command Prompt")
         #expect(DisplayName.censored("Notepad PLUSPLUS") == "Notepad PLUSPLUS")   // 8 letters
         #expect(DisplayName.censored("Tool X") == "Tool X")                       // 1 letter
-        #expect(DisplayName.censored("Tool Ekm") == "Tool Ekm")                   // not all caps
+        #expect(DisplayName.censored("Tool Abc") == "Tool Abc")                   // not all caps
         #expect(DisplayName.censored("Tool ABC Pro") == "Tool ABC Pro")           // not trailing
         #expect(DisplayName.censored("ABC") == "ABC")                             // nothing else left
-        #expect(DisplayName.censored("Tool12 EK1") == "Tool12 EK1")
+        #expect(DisplayName.censored("Tool12 AB1") == "Tool12 AB1")
     }
 
-    @Test func replacesOrganisationNameInAnyCase() {
-        #expect(DisplayName.censored("example Tool") == "example Tool")
-        #expect(DisplayName.censored("Tool example") == "Tool example")
-        #expect(DisplayName.censored("example Tool ABC") == "example Tool")
+    @Test func replacesConfiguredWordsInAnyCase() {
+        let rules = [(word: "secretcorp", with: "example")]
+        #expect(DisplayName.censored("SECRETCORP Tool", replacing: rules) == "example Tool")
+        #expect(DisplayName.censored("Tool secretcorp", replacing: rules) == "Tool example")
+        #expect(DisplayName.censored("SecretCorp Tool QRS", replacing: rules) == "example Tool")
+        #expect(DisplayName.censored("SecretCorp Tool") == "SecretCorp Tool")   // no rules, no change
+    }
+
+    @Test func parsesReplacementRules() {
+        let rules = DisplayName.parseReplacements("# comment\nsecretcorp=example\n\n bad line \nfoo = bar ;baz=")
+        #expect(rules.map(\.word) == ["secretcorp", "foo", "baz"])
+        #expect(rules.map(\.with) == ["example", "bar", ""])
     }
 
     @Test func demoFormHasBuiltInLabelsOnly() {
