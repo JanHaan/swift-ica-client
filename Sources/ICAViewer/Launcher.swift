@@ -79,6 +79,9 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
         ])
         window.center()
+        NotificationCenter.default.addObserver(forName: .storeIconsChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.updateVisibleIcons()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -193,8 +196,36 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     /// The app delegate's launch finished (connected or failed).
     func launchEnded() { starting = nil }
 
-    /// The store sends no icons we use; every resource gets the system's generic application icon.
+    /// Placeholder until a resource's own icon is loaded (and for resources without one, and in demo mode).
     private static let genericIcon = NSWorkspace.shared.icon(for: .applicationBundle)
+
+    /// Row icon size in points; the images are rendered at 4x, so they stay sharp on Retina.
+    private static let iconSide: CGFloat = 18
+    private var rowIcons: [String: NSImage] = [:]   // iconurl → rendered row icon
+
+    /// The resource's own icon if it is loaded. Asking starts the fetch (StoreIconCache, shared with the
+    /// Dock icon), so only rows that are laid out ask: a view-based table makes cells for visible rows only.
+    private func rowIcon(for resource: StoreClient.Resource) -> NSImage? {
+        guard let url = resource.iconurl, !url.isEmpty else { return nil }
+        if let icon = rowIcons[url] { return icon }
+        guard let image = StoreIconCache.shared.image(forIconURL: url),
+              let canvas = IconCanvas.render(image, side: Int(Self.iconSide * 4), inset: 0) else { return nil }
+        let icon = NSImage(cgImage: canvas, size: NSSize(width: Self.iconSide, height: Self.iconSide))
+        rowIcons[url] = icon
+        return icon
+    }
+
+    /// An icon arrived (or the store changed): swap it into the visible cells in place, no reload.
+    private func updateVisibleIcons() {
+        guard window?.isVisible == true else { return }
+        let range = table.rows(in: table.visibleRect)
+        guard range.length > 0 else { return }
+        for row in range.location..<(range.location + range.length) where row < shown.count {
+            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
+                  let icon = rowIcon(for: shown[row]) else { continue }
+            cell.imageView?.image = icon
+        }
+    }
 
     func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
 
@@ -223,6 +254,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
             return c
         }()
         cell.textField?.stringValue = displayName(shown[row].name)
+        cell.imageView?.image = rowIcon(for: shown[row]) ?? Self.genericIcon
         return cell
     }
 }

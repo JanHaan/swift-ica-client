@@ -190,7 +190,12 @@ final class StoreService: @unchecked Sendable {
             }
         }
         try? http.saveCookies(to: Paths.cookieFile)
-        if let store { DispatchQueue.main.async { DockIcon.shared.register(resources: list, store: store) } }   // Dock icon (docs/99)
+        if let store {   // icons and menu title (docs/99 Phase 0)
+            DispatchQueue.main.async {
+                StoreIconCache.shared.register(store: store)
+                DockIcon.shared.register(resources: list)
+            }
+        }
         return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
