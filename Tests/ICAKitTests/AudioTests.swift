@@ -795,3 +795,34 @@ private func code3Packet(_ frames: [Data]) -> Data {
         #expect(!after)
     }
 }
+
+@Suite struct AudioTestKeysTests {
+    @Test func parsesTheExampleSequence() throws {
+        let steps = try AudioTestKeys.parse("ctrl+tab, tab ,Alt+T,esc", keyboardLayout: 0x0407)
+        #expect(steps.map(\.text) == ["ctrl+tab", "tab", "alt+t", "esc"])
+        #expect(steps.map(\.scancode) == [0x0F, 0x0F, 0x14, 0x01])
+        #expect(steps[0].modifiers == [0x1D] && steps[1].modifiers.isEmpty && steps[2].modifiers == [0x38])
+        #expect(!steps.contains { $0.scancode == 0x1C || $0.scancode == 0x39 })   // no Enter/Space unless written
+    }
+
+    @Test func keysAndLayouts() throws {
+        let us = try AudioTestKeys.parse("y,z,0,1,9,f1,f10,f11,f12,enter,space,shift+ctrl+alt+a", keyboardLayout: 0x0409)
+        #expect(us.map(\.scancode) == [0x15, 0x2C, 0x0B, 0x02, 0x0A, 0x3B, 0x44, 0x57, 0x58, 0x1C, 0x39, 0x1E])
+        #expect(us.last?.modifiers == [0x1D, 0x38, 0x2A])
+        let de = try AudioTestKeys.parse("y,z", keyboardLayout: 0x0407)
+        #expect(de.map(\.scancode) == [0x2C, 0x15])   // QWERTZ: the keys that type y and z
+        let nav = try AudioTestKeys.parse("up,down,left,right,home,end,pgup,pgdn", keyboardLayout: 0x0409)
+        #expect(nav.allSatisfy(\.extended) && nav.map(\.scancode) == [0x48, 0x50, 0x4B, 0x4D, 0x47, 0x4F, 0x49, 0x51])
+    }
+
+    @Test func invalidSequencesSendNothing() {
+        let bad: [(String, AudioTestKeys.Failure)] = [
+            ("", .empty), ("tab,,esc", .badStep("")), ("ctrl+", .badStep("ctrl+")), ("meta+a", .badStep("meta+a")),
+            ("tab,returnx", .unknownKey("returnx")), ("f13", .unknownKey("f13")), ("ä", .unknownKey("ä")),
+            (Array(repeating: "tab", count: 31).joined(separator: ","), .tooLong(31)),
+        ]
+        for (text, failure) in bad {
+            #expect(throws: failure) { try AudioTestKeys.parse(text, keyboardLayout: 0x0407) }
+        }
+    }
+}
