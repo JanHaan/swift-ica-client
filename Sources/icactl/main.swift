@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import ICAKit
 
@@ -284,6 +285,28 @@ case "audiotest":
         fail("\(error)")
     }
 
+case "camtest":
+    // icactl camtest [resource] — webcam channel test, "Notepad" or "Sound ABC" only (docs/98b §14 L1–L2, §13): announces
+    // the 50-byte CTXMM module and logs everything on ch 18 (BIND_REQUEST capability list, our BIND_RESPONSE,
+    // BIND_COMMIT, any CREATE_CONTEXT/CONTROL). Frames come only from the synthetic test pattern: icactl has no camera
+    // path. Sends no input at all. Before connecting it encodes a few pattern frames offline (VideoToolbox, Annex B
+    // check). The synthetic H.264 stream goes to .session/camtest.h264. Logs off only its own fresh session.
+    let name = args.first ?? "Notepad"
+    guard ["Notepad", "Sound ABC"].contains(name) else { fail("camtest is limited to \"Notepad\" and \"Sound ABC\"") }
+    if let v = ProcessInfo.processInfo.environment["ICA_WEBCAM_SOURCE"], v.lowercased() != "synthetic" {
+        fail("icactl has no camera path: ICA_WEBCAM_SOURCE may only be \"synthetic\"")
+    }
+    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
+        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runCamTest(ica: ica, resource: name)
+    } catch {
+        fail("\(error)")
+    }
+
 case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)
@@ -324,6 +347,10 @@ default:
                                          "Sound ABC"/"Sound XYZ": window screenshot .session/audiotest-sound-0.png; keys
                                          only from ICA_AUDIOTEST_KEYS="ctrl+tab,tab,alt+t" (1.5 s apart, screenshot each)
                                          ICA_AUDIOTEST_MIC=tone: also announce the capture device, fed by a 440 Hz sine
+      icactl camtest [resource]          webcam channel test in "Notepad" or "Sound ABC": CTXMM module, BIND exchange,
+                                         contexts on ch 18 (ICA_CAMTEST_OBSERVE s after connect, default 90); no input;
+                                         synthetic test pattern only (never the camera), H.264 to .session/camtest.h264
+                                         ICA_CAMTEST_VERSIONS=3/3: the §13 W6 module-version variant
       icactl sessions list [--names]     store sessions (Sessions/List + ListAvailable), read-only; ids as fingerprints
       icactl sessions probe              read-only live checks of docs/90 §11 items 1, 2, 4–7 (keys, counts, states)
       icactl sessions disconnect <id>    Sessions/DisconnectSessions; only sessions whose apps are all test resources
@@ -1739,6 +1766,200 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
     say("verdict: " + d.verdict(soundTriggered: soundTriggered))
     say("fresh logon: \(fresh)")
     for step in steps { say("  " + step) }
+    say("end: \(ending)")
+}
+
+// MARK: - Webcam test (docs/98b §14)
+
+/// Encodes `count` test-pattern frames offline and checks the Annex B output (§7.1, §10.3, W13): the first sample a
+/// key frame with SPS, PPS and IDR, start codes everywhere, a key frame at least every 2 s.
+func camtestEncoderCheck(count: Int, write: (Data) -> Void) -> String {
+    let format = WebcamFormat.standard
+    let encoder: WebcamH264Encoder
+    do { encoder = try WebcamH264Encoder(format: format) } catch { return "encoder check FAILED: \(error)" }
+    defer { encoder.invalidate() }
+    let pattern = WebcamTestPattern(format: format)
+    let lock = NSLock()
+    var samples: [WebcamEncodedSample] = []
+    for n in 0..<count {
+        guard let frame = pattern.frame(n) else { return "encoder check FAILED: no pattern frame" }
+        encoder.encode(frame, time: CMTime(value: CMTimeValue(n), timescale: CMTimeScale(format.frameRate)), forceKeyFrame: n == 0) { sample in
+            guard let sample else { return }
+            lock.lock()
+            samples.append(sample)
+            lock.unlock()
+        }
+    }
+    encoder.flush()
+    lock.lock()
+    let out = samples
+    lock.unlock()
+    out.forEach { write($0.data) }
+    guard let first = out.first else { return "encoder check FAILED: no samples" }
+    let types = AnnexB.units(first.data).compactMap(AnnexB.nalType)
+    let keys = out.filter(\.isKeyFrame).count
+    let ok = first.isKeyFrame && Array(first.data.prefix(4)) == AnnexB.startCode && types.prefix(2) == [7, 8] && types.contains(5)
+    let bytes = out.reduce(0) { $0 + $1.data.count }
+    return "encoder check \(ok ? "ok" : "FAILED"): \(format), low latency \(encoder.lowLatency), refused [\(encoder.refusedProperties.joined(separator: ", "))]; "
+        + "\(out.count)/\(count) samples, \(keys) key, \(bytes) B; first \(first.data.count) B NAL types \(types)"
+}
+
+func runCamTest(ica: ICAFile, resource: String) async throws {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let env = ProcessInfo.processInfo.environment
+    let observe = env["ICA_CAMTEST_OBSERVE"].flatMap(Double.init) ?? 90
+    let streamURL = sessionDir.appendingPathComponent("camtest.h264")
+    try? FileManager.default.removeItem(at: streamURL)
+    FileManager.default.createFile(atPath: streamURL.path, contents: nil)
+    let stream = try FileHandle(forWritingTo: streamURL)
+    defer { try? stream.close() }
+    // Offline first: the VideoToolbox path with synthetic frames (the host will likely never send PLAY, §12).
+    say(camtestEncoderCheck(count: 45) { stream.write($0) })
+
+    var config = WinstationDriver.Configuration()
+    config.logon = WDLogon(ica: ica)
+    config.display = WDDisplay(width: 1920, height: 1080)
+    var webcamConfig = WebcamEngine.Config()
+    // §13 W6 variant: ICA_CAMTEST_VERSIONS=3/3 announces versions 3/3 instead of the reference's 3/0.
+    if let v = env["ICA_CAMTEST_VERSIONS"] {
+        guard v == "3/3" || v == "3/0" else { fail("ICA_CAMTEST_VERSIONS must be 3/0 (default) or 3/3 (W6 variant)") }
+        webcamConfig.moduleVersionHigh = v == "3/3" ? 3 : 0
+        say("module versions \(v) (W6 variant run)")
+    }
+    let session = try ICASession(ica: ica, configuration: config, clipboard: nil, cdm: nil, printing: nil, audio: nil,
+                                 webcam: webcamConfig)
+    guard let webcam = session.webcam else { fail("no webcam engine") }
+    // Synthetic frames only: icactl never creates an AVCaptureSession (docs/98b §10.6).
+    webcam.source = WebcamTestPattern()
+    webcam.sampleTap = { stream.write($0.data) }
+    let seamless = session.seamless
+
+    var logon = FreshLogonDetector()
+    var windowsSeen = SeenWindows()
+    var appWindows: [UInt32] = []
+    var commandLines: [String] = []
+    var terminateReason: UInt8?
+    var initResponseAt: Date?
+    var connectedAt: Date?
+    var modulesSent: [String] = []
+    let started = Date()
+
+    webcam.onEvent = { event in
+        say("cam: \(event)")
+        if case .command(let line) = event { commandLines.append(line) }
+    }
+    seamless.onEvent = { event in
+        switch event {
+        case .channelReady:
+            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+        case .windowAdded(let w):
+            logon.windowAdded(appKey: w.appKey)
+            windowsSeen.note(w)
+            if w.kind == .appWindow { appWindows.append(w.id) }
+            say("TWI window \(w.id) \(w.kind) \"\(w.title)\" app \(w.appKey)")
+        case .windowChanged(let w, _):
+            windowsSeen.note(w)
+        case .windowRemoved(let w):
+            appWindows.removeAll { $0 == w.id }
+        default: break
+        }
+    }
+    session.onThinwireInit = { _ in
+        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+    }
+    session.onEvent = { event in
+        switch event {
+        case .log(let text): say(text)
+        case .closed(let reason): say("session closed: \(reason)")
+        case .wd(let e):
+            switch e {
+            case .initResponseSent(let modules, _):
+                initResponseAt = Date()
+                modulesSent = modules
+                say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+            case .initConnect(let remaining, let moduleClass, let payload):
+                say("← INIT_CONNECT remaining \(remaining) class \(moduleClass) (\(payload.count) B)")
+            case .connected(_, _, _, let caps):
+                connectedAt = Date()
+                let priority = caps.first { $0.id == WDCapability.vcPriority }?.body
+                say("WD connected (host accepted the module list); cap 0x05 body (W7): " + (priority.map { hexLine($0, limit: 64) } ?? "none"))
+            case .packet(let p) where p.channel == WebcamWire.channelNumber:
+                if webcam.diagnostics.hostWrites == 0 {
+                    say(String(format: "first host write on ch 18 after %.1f s: %@", Date().timeIntervalSince(started), hexLine(p.payload, limit: 32)))
+                }
+            case .droppedChannelData(let channel, let bytes): say("dropped \(bytes) B on unregistered ch \(channel)")
+            case .terminate(let reason):
+                terminateReason = reason
+                say("← TERMINATE reason \(reason)")
+            case .failure(let text): say("WD failure: \(text)")
+            default: break
+            }
+        default: break
+        }
+    }
+
+    try await session.start()
+    let bindEntryInWD = session.wd.channelNumber(WebcamWire.channelName) == WebcamWire.channelNumber
+    // L1/L2: the host speaks first at logon, whatever the app does; no input is ever sent.
+    _ = await waitFor(session, 150) { connectedAt != nil && logon.isFresh && !appWindows.isEmpty }
+    let connected = await onSession(session) { connectedAt }
+    let deadline = (connected ?? Date()).addingTimeInterval(observe)
+    say("observing ch 18 until \(Int(observe)) s after connect (no input is sent)")
+    while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 500_000_000) }
+    let fresh = await onSession(session) { logon.isFresh }
+
+    var ending: String
+    if session.isClosed {
+        ending = "session ended by the server" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+    } else if !fresh {
+        await session.close()
+        ending = "disconnected (CGP FINISH), not logged off"
+    } else {
+        let sent: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        if sent {
+            say("→ TWI LOGOFF")
+            let end = Date().addingTimeInterval(25)
+            while Date() < end, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+        }
+        if session.isClosed {
+            ending = "logged off" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+        } else {
+            await session.close()
+            ending = sent ? "logoff sent but the session did not end in 25 s; disconnected" : "TWI not ready; disconnected"
+        }
+    }
+    let d = await onSession(session) { webcam.diagnostics }
+    let lines = await onSession(session) { commandLines }
+    let timing = await onSession(session) { (initResponseAt, connectedAt, terminateReason) }
+    let sentNames = await onSession(session) { modulesSent }
+
+    say("\n=== camtest summary (\(resource)) ===")
+    say("module (W6): \(d.moduleBytes.count) B " + hexLine(d.moduleBytes, limit: 64) + "; in INIT_RESPONSE: \(sentNames.contains("CTXMM  ")); "
+        + "bind entry CTXMM→18: \(bindEntryInWD)")
+    if timing.0 != nil, timing.1 == nil, timing.2 == nil {
+        say("W1 suspicion: no INIT_CONNECT completed after INIT_RESPONSE and no TERMINATE (module list rejected?); "
+            + "compare with a control run without CTXMM (icactl session announces none)")
+    }
+    say("ch 18: host writes \(d.hostWrites), \(d.hostBytes) B; first " + (d.firstHostBytes.map { String(format: "after %.1f s", $0.timeIntervalSince(started)) } ?? "never"))
+    say("by command: " + d.commandCounts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    say("BIND_REQUEST \(d.bindRequests)×, capabilities [\(d.hostCapabilities.map(\.description).joined(separator: ", "))]")
+    say("BIND_RESPONSE answers [\(d.answeredCapabilities.map(\.description).joined(separator: ", "))]: " + hexLine(d.bindResponseSent, limit: 96))
+    say("BIND_COMMIT \(d.bindCommits)×" + (d.bindCommitMissing ? " (W4: missing within 10 s)" : ""))
+    say("CREATE_CONTEXT \(d.contextRequests) (device \(d.deviceContexts)): 0x81 \(d.rejects), 0x86 success \(d.contextSuccesses), 0x86 error \(d.contextErrors); "
+        + String(format: "host encoder bits 0x%x", d.hostEncoderBits))
+    for path in d.recentDevicePaths { say("  DEVICE path \"\(path)\"") }
+    for block in d.recentFormatBlocks { say("  TYPE format block \(block)") }
+    say("CONTROL: " + (d.controls.isEmpty ? "none (PLAY needs a 32-bit host app that opens the camera, §12)"
+                                          : d.controls.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")))
+    say("frames: \(d.samplesSent) samples (\(d.keyFramesSent) key), \(d.sampleBytesSent) B in \(d.fragmentsSent) fragments, largest \(d.largestSample) B; "
+        + "skipped in flight \(d.framesSkippedInFlight), backlog \(d.framesSkippedBacklog); encode errors \(d.encodeErrors)")
+    if d.malformed + d.unknownCommands + d.protocolErrors > 0 {
+        say("malformed \(d.malformed), unknown \(d.unknownCommands), protocol errors \(d.protocolErrors)")
+    }
+    for line in lines.prefix(80) { say("  " + line) }
+    say("synthetic H.264 (offline check + any live samples): \(streamURL.path)")
+    say("verdict: " + d.verdict())
+    say("fresh logon: \(fresh)")
     say("end: \(ending)")
 }
 

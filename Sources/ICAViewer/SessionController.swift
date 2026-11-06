@@ -101,13 +101,15 @@ final class SessionController: NSObject {
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
-                                 printing: Self.printingConfig(), audio: omitAudio ? nil : Self.audioConfig())
+                                 printing: Self.printingConfig(), audio: omitAudio ? nil : Self.audioConfig(),
+                                 webcam: Self.webcamConfig())
         super.init()
         keyboard.controller = self
         setUpClipboard()
         setUpDriveMapping()
         setUpPrinting()
         setUpAudio()
+        setUpWebcam()
         session.seamless.setMonitors(layout.twiMonitors)
         session.pauseResumeOnThinwireInit = ProcessInfo.processInfo.environment["ICA_TWI_PAUSE_RESUME"] != "0"
         wireCallbacks()
@@ -871,9 +873,20 @@ final class SessionController: NSObject {
     private func microphoneRecording(_ on: Bool) {
         let session = self.session, title = displayName(name), recording = on && !ended
         MainActor.assumeIsolated {
-            MicrophoneIndicator.shared.update(self, name: title, recording: recording) {
+            DevicesIndicator.shared.update(self, device: .microphone, name: title, inUse: recording) {
                 vlog("audio: microphone disabled by the user for this session")
                 session.disableMicrophone()
+            }
+        }
+    }
+
+    /// Indicator and "Disable Camera" while this session uses the camera (docs/98b §10.4). Main thread.
+    private func cameraInUse(_ on: Bool) {
+        let session = self.session, title = displayName(name), inUse = on && !ended
+        MainActor.assumeIsolated {
+            DevicesIndicator.shared.update(self, device: .camera, name: title, inUse: inUse) {
+                vlog("webcam: camera disabled by the user for this session")
+                session.disableCamera()
             }
         }
     }
@@ -881,6 +894,7 @@ final class SessionController: NSObject {
     private func tearDown() {
         hud.hide()
         microphoneRecording(false)
+        cameraInUse(false)
         for id in Array(windows.keys) { remove(id) }
     }
 
@@ -965,8 +979,37 @@ final class SessionController: NSObject {
             vlog("audio: \(event)")
             switch event {
             case .module: DispatchQueue.main.async { self?.announcedAudio = true }
-            case .microphoneDenied: DispatchQueue.main.async { MicrophoneNote.show() }
+            case .microphoneDenied: DispatchQueue.main.async { DevicePermissionNote.show(.microphone) }
             case .recording(let on): DispatchQueue.main.async { self?.microphoneRecording(on) }
+            default: break
+            }
+        }
+    }
+
+    // MARK: Webcam (docs/98b)
+
+    /// Camera on (Settings, default off; ICA_WEBCAM overrides): announce CTXMM; nil: no module, no HDX camera.
+    static func webcamConfig() -> WebcamEngine.Config? {
+        let settings = WebcamSettings.load()
+        guard let config = settings.engineConfig else {
+            vlog("webcam: off")
+            return nil
+        }
+        vlog("webcam: on (\(config.format); \(settings.source == .synthetic ? "synthetic test pattern" : "Mac camera, opened only between PLAY and STOP"))")
+        return config
+    }
+
+    /// The camera (or, with ICA_WEBCAM_SOURCE=synthetic, the test pattern) opens only while the host plays; the
+    /// permission is asked for at the first PLAY. Nothing is written to disk (no sample tap in the app).
+    private func setUpWebcam() {
+        guard let engine = session.webcam else { return }
+        engine.source = WebcamSettings.load().source == .synthetic ? WebcamTestPattern(format: engine.config.format) : Camera()
+        // Session queue. Commands, handles, sizes, counts and the module bytes (no picture data).
+        engine.onEvent = { [weak self] event in
+            vlog("webcam: \(event)")
+            switch event {
+            case .cameraDenied: DispatchQueue.main.async { DevicePermissionNote.show(.camera) }
+            case .capturing(let on): DispatchQueue.main.async { self?.cameraInUse(on) }
             default: break
             }
         }

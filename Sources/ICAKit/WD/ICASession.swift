@@ -49,6 +49,9 @@ public final class ICASession: @unchecked Sendable {
     /// Client audio engine (`CTXCAM `, ch 19, playback), when the session was created with an audio config.
     /// Set `audio.sink` and `audio.onEvent` before `start`; both are called on the session queue.
     public let audio: AudioEngine?
+    /// Webcam engine (`CTXMM  `, ch 18), when the session was created with a webcam config. Set `webcam.source` and
+    /// `webcam.onEvent` before `start`; `onEvent` is called on the session queue.
+    public let webcam: WebcamEngine?
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -70,9 +73,11 @@ public final class ICASession: @unchecked Sendable {
     /// `clipboard` nil: no CTXCLIP module and no bind entry, so the host has no clipboard channel
     /// (docs/70 §5.7). `cdm` nil: no CTXCDM module, so no client drive (docs/95 §A). `printing` nil: no
     /// CTXCPM module, so the host creates no PDF printer for this client (docs/97 §6.2). `audio` nil: no CTXCAM
-    /// module, so the host plays no sound to this client (docs/98 §1).
+    /// module, so the host plays no sound to this client (docs/98 §1). `webcam` nil: no CTXMM module, so the host
+    /// shows no HDX camera (docs/98b §10.5).
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
-                cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil) throws {
+                cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
+                webcam: WebcamEngine.Config? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -97,6 +102,9 @@ public final class ICASession: @unchecked Sendable {
         if let engine = self.clipboard { wd.register(engine) }
         self.cdm = cdm.map { CDMEngine(config: $0) }
         if let engine = self.cdm { wd.register(engine) }
+        // After CTXCLIP and before CTXCPM (docs/98b §1.1, §11 step 1); the 50-byte module comes from the engine.
+        self.webcam = webcam.map { WebcamEngine(config: $0) }
+        if let engine = self.webcam { wd.register(engine) }
         // After CTXCLIP (docs/97 §1.2 [P]); the module and its per-command ACKs come from the engine.
         self.printer = printing.map { PrinterEngine(config: $0) }
         if let engine = self.printer { wd.register(engine) }
@@ -144,6 +152,14 @@ public final class ICASession: @unchecked Sendable {
             engine.schedule = { [weak self] block in self?.perform(block) }
             engine.captureQueue = DispatchQueue(label: "ica.audio.capture")
         }
+        if let engine = self.webcam {
+            let queue = self.queue
+            // Permission answers, frames and encoded samples come back to the session queue (docs/98b §10); the W4/W12
+            // checks run after a delay; frames are skipped before encoding while the CGP queue is long (§8).
+            engine.schedule = { [weak self] block in self?.perform(block) }
+            engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
+            engine.backlog = { [weak self] in self?.transport.status.queuedBytes ?? 0 }
+        }
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
         thinwire.onInit = { [weak self] info in
             guard let self else { return }
@@ -173,11 +189,13 @@ public final class ICASession: @unchecked Sendable {
         case .suspended(let info):
             setSuspended(true)
             audio?.suspend()
+            webcam?.suspend()
             onEvent(.suspended(info))
         case .resuming(let attempt): onEvent(.resuming(attempt: attempt))
         case .resumed(let result):
             setSuspended(false)
             audio?.resume()
+            webcam?.resume()
             onEvent(.resumed(result))
         case .gaveUp(let info): onEvent(.gaveUp(info))
         case .closed(let reason):
@@ -186,6 +204,7 @@ public final class ICASession: @unchecked Sendable {
             cdm?.shutdown()
             printer?.shutdown()
             audio?.shutdown()
+            webcam?.shutdown()
             onEvent(.closed(reason))
         }
     }
@@ -239,8 +258,9 @@ public final class ICASession: @unchecked Sendable {
     /// The server answers with WD TERMINATE 1 a few seconds later and the session closes.
     public func logoff(completion: @escaping (Bool) -> Void = { _ in }) {
         perform { [self] in
-            // The microphone stops the moment the session starts ending, not when the logoff completes.
+            // The microphone and the camera stop the moment the session starts ending, not when the logoff completes.
             audio?.disableMicrophone(notifyHost: false, reason: "logoff")
+            webcam?.disableCamera(notifyHost: false, reason: "logoff")
             guard !closed, !isSuspended, seamless.canSend else { return completion(false) }
             seamless.logoff()
             transport.expectServerClose("TWI logoff")
@@ -254,8 +274,11 @@ public final class ICASession: @unchecked Sendable {
     /// Ends the CGP session politely (FINISH_REQUEST), then closes after `timeout` at the latest.
     /// While suspended: closes at once, without FINISH.
     public func close(timeout: TimeInterval = 5) async {
-        // The microphone stops before FINISH goes out (disconnect, quit, reconnect to apply settings).
-        perform { [self] in audio?.disableMicrophone(notifyHost: false, reason: "disconnect") }
+        // The microphone and the camera stop before FINISH goes out (disconnect, quit, reconnect to apply settings).
+        perform { [self] in
+            audio?.disableMicrophone(notifyHost: false, reason: "disconnect")
+            webcam?.disableCamera(notifyHost: false, reason: "disconnect")
+        }
         await transport.close(timeout: timeout)
     }
 
@@ -263,6 +286,12 @@ public final class ICASession: @unchecked Sendable {
     /// device failed, and later capture OPENs are answered "failed" (docs/98 §10.3).
     public func disableMicrophone() {
         perform { [self] in audio?.disableMicrophone(notifyHost: !closed, reason: "disabled by the user") }
+    }
+
+    /// "Disable Camera for This Session" (any thread): the camera stops at once, the host gets the 0x86 error for the
+    /// open context, and later device contexts are answered with the error (docs/98b §10.4).
+    public func disableCamera() {
+        perform { [self] in webcam?.disableCamera(notifyHost: !closed, reason: "disabled by the user") }
     }
 
     /// Suspends until the session has ended.

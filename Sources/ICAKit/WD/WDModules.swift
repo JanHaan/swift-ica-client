@@ -70,6 +70,9 @@ public struct WDModuleIdentity: Sendable {
     /// CTXCAM: versions 1…2 (docs/98 §1.3; 4 would enable device enumeration).
     public static let audio = WDModuleIdentity(moduleClass: .vd, versionLow: AudioWire.versionLow, versionHigh: AudioWire.versionHigh,
                                                name: "", hostName: "ICA")
+    /// CTXMM: min 3 / max 0, as the reference sends them (docs/98b §1.1; 3/3 is only the W6 diagnostic).
+    public static let webcam = WDModuleIdentity(moduleClass: .vd, versionLow: WebcamWire.versionLow, versionHigh: WebcamWire.versionHigh,
+                                                name: "", hostName: "ICA")
     public static let ui = WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "UIModule.class", hostName: "")
 }
 
@@ -321,6 +324,18 @@ public enum WDModules {
         w.u16(AudioWire.bufferBudget)
         w.u8(AudioWire.vdFlag)
         w.u32(capabilities)
+        return w.bytes()
+    }
+
+    /// CTXMM module, 50 bytes (docs/98b §1.3): the common VD header (versions 3/0, no quota, flow type 0), then the VD
+    /// data u16 4996 `84 13` (a u16, not a u32). The bind entry `CTXMM  \0 12 00` comes from the WD module's table.
+    /// `versionHigh` 3 only for the §13 W6 diagnostic run (icactl camtest).
+    public static func webcam(channel: UInt8 = WebcamWire.channelNumber, versionHigh: UInt8 = WebcamWire.versionHigh,
+                              date: Date = Date()) -> [UInt8] {
+        var identity = WDModuleIdentity.webcam
+        identity.versionHigh = versionHigh
+        var w = vdHeader(identity, channel: channel, date: date)
+        w.u16(WebcamWire.maxChannelWrite)
         return w.bytes()
     }
 
