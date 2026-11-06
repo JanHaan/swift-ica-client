@@ -8,7 +8,8 @@ import ICAKit
 /// applies at the next connect, as does printing (docs/97 §6, PDF mode: receive jobs from the host's Citrix PDF
 /// Printer; which action the job window offers first) and session audio (docs/98 §10.4: play session sounds,
 /// default on; the volume follows macOS; the microphone, default off per §10.4, opens only while the host records) and
-/// the camera (docs/98b §10.5: default off; opens only between the host's PLAY and STOP).
+/// the camera (docs/98b §10.5: default off; opens only between the host's PLAY and STOP; which camera, by unique id,
+/// "Automatic" = the system default; listing the devices never opens one or asks for permission).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -38,6 +39,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let micTitle = Text(en: "Pass the microphone to the session", de: "Mikrofon an die Sitzung weitergeben")
     static let micHint = Text(en: "Only while a session app records.", de: "Nur während eine Sitzungs-App aufnimmt.")
     static let cameraTitle = Text(en: "Pass the camera to the session", de: "Kamera an die Sitzung weitergeben")
+    static let cameraAutomatic = Text(en: "Automatic (system default)", de: "Automatisch (Systemstandard)")
     static let cameraHint = Text(en: "Only while a session app uses it; 32-bit apps only.",
                                  de: "Nur während eine Sitzungs-App sie nutzt; nur 32-Bit-Apps.")
     /// Row labels (column 0), in grid order.
@@ -77,6 +79,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let audioBox = NSButton(checkboxWithTitle: T.audioTitle.shown, target: nil, action: nil)
     private let micBox = NSButton(checkboxWithTitle: T.micTitle.shown, target: nil, action: nil)
     private let cameraBox = NSButton(checkboxWithTitle: T.cameraTitle.shown, target: nil, action: nil)
+    private let cameraPopup = NSPopUpButton()
+    /// One per popup item: nil = automatic, else the device (possibly a stored one that is not connected).
+    private var cameraChoices: [CameraDevices.Device?] = [nil]
+    private let cameraAccessNote = NSTextField(wrappingLabelWithString: "")
+    private var cameraObservers: [NSObjectProtocol] = []
+    private var cameraGrid: NSGridView?
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -103,6 +111,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             return
         }
         load()
+        observeCameras()
         showWindow(nil)
         window?.center()
         NSApp.activate()
@@ -116,6 +125,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         timer?.invalidate()
         timer = nil
         clearSecrets()
+        cameraObservers.forEach(NotificationCenter.default.removeObserver)
+        cameraObservers = []
         super.close()
     }
 
@@ -176,6 +187,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         printBox.action = #selector(printChanged)
         audioBox.target = self
         audioBox.action = #selector(audioChanged)
+        cameraBox.target = self
+        cameraBox.action = #selector(cameraChanged)
+        cameraPopup.addItem(withTitle: T.cameraAutomatic.shown)
+        // Device names are not ours to shorten, but a long one must not widen the window.
+        (cameraPopup.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
         printActionPopup.addItems(withTitles: [loc("Show the print dialog first", "Zuerst den Druckdialog zeigen"),
                                                loc("Open in Preview first", "Zuerst in Vorschau öffnen")])
         folderPath.lineBreakMode = .byTruncatingMiddle
@@ -196,6 +212,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             l.preferredMaxLayoutWidth = widths.column1
             return l
         }
+        cameraAccessNote.textColor = .secondaryLabelColor
+        cameraAccessNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        cameraAccessNote.preferredMaxLayoutWidth = widths.column1
+        cameraPopup.widthAnchor.constraint(lessThanOrEqualToConstant: widths.column1).isActive = true
         scalingNote.preferredMaxLayoutWidth = widths.column1
         scalingNote.widthAnchor.constraint(equalToConstant: widths.column1).isActive = true
         let params = NSStackView(views: [digitsPopup, NSTextField(labelWithString: loc("digits", "Stellen")),
@@ -229,7 +249,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, micBox],
             [NSGridCell.emptyContentView, hint(T.micHint)],
             [label("camera"), cameraBox],
+            [NSGridCell.emptyContentView, cameraPopup],
             [NSGridCell.emptyContentView, hint(T.cameraHint)],
+            [NSGridCell.emptyContentView, cameraAccessNote],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -248,7 +270,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 19).topPadding = 0
         grid.row(at: 21).topPadding = 0
         grid.row(at: 22).topPadding = 12
-        grid.row(at: 23).topPadding = 0
+        grid.row(at: 24).topPadding = 0
+        grid.row(at: 25).topPadding = 0
+        grid.row(at: 25).isHidden = true   // shown only when the camera list needs an access hint
+        cameraGrid = grid
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
                               target: self, action: #selector(forgetAll))
@@ -286,6 +311,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let radios = [promptTitle, totpTitle].flatMap(\.both)
             .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
         let menus = popups.map { ($0.titleOfSelectedItem ?? "popup", $0.fittingSize.width) }
+            + cameraAutomatic.both.map { title -> (String, CGFloat) in
+                let p = NSPopUpButton()
+                p.addItem(withTitle: title)
+                return (title, p.fittingSize.width)
+            }
         let column0 = labels.max { $0.1 < $1.1 }!, column1 = (boxes + radios + menus).max { $0.1 < $1.1 }!
         let widths = (ceil(max(column0.1, 60)), ceil(max(column1.1, 360)))
         if Demo.enabled {
@@ -325,6 +355,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         micBox.state = AudioSettings.defaultMicrophone ? .on : .off
         audioChanged()
         cameraBox.state = WebcamSettings.defaultEnabled ? .on : .off
+        selectCamera(WebcamSettings(), devices: [])
         modeChanged()
     }
 
@@ -415,9 +446,64 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private func saveCamera() {
         var settings = WebcamSettings.load(env: [:])
         settings.enabled = cameraBox.state == .on
+        let index = cameraPopup.indexOfSelectedItem
+        let choice = index >= 0 && index < cameraChoices.count ? cameraChoices[index] : nil
+        settings.deviceID = choice?.id
+        settings.deviceName = choice?.name
         guard settings != WebcamSettings.load(env: [:]) else { return }
         settings.save()
-        vlog("webcam: saved (\(settings.enabled ? "on" : "off")); applies at the next connect")
+        vlog("webcam: saved (\(settings.enabled ? "on" : "off"), \(choice.map { "camera \"\($0.name)\"" } ?? "automatic camera")); applies at the next connect")
+    }
+
+    // MARK: Camera choice (docs/98b §10.5)
+
+    @objc private func cameraChanged() { cameraPopup.isEnabled = cameraBox.state == .on }
+
+    /// Fills the popup: "Automatic" first, then the connected devices; a stored device that is not connected stays
+    /// listed (marked) so the choice is not lost. Discovery only: no device is opened, no permission is asked.
+    private func selectCamera(_ settings: WebcamSettings, devices: [CameraDevices.Device]) {
+        var choices: [CameraDevices.Device?] = [nil]
+        choices += devices.map { Optional($0) }
+        var missing: CameraDevices.Device?
+        if let id = settings.deviceID, !devices.contains(where: { $0.id == id }) {
+            missing = CameraDevices.Device(id: id, name: settings.deviceName ?? id)
+            choices.append(missing)
+        }
+        cameraPopup.removeAllItems()
+        for choice in choices {
+            guard let device = choice else { cameraPopup.addItem(withTitle: T.cameraAutomatic.shown); continue }
+            let title = device == missing ? loc("\(device.name) (not connected)", "\(device.name) (nicht verbunden)") : device.name
+            // Titles must be unique for NSPopUpButton; two cameras with the same name get their id appended.
+            cameraPopup.addItem(withTitle: cameraPopup.itemTitles.contains(title) ? "\(title) (\(device.id))" : title)
+        }
+        cameraChoices = choices
+        cameraPopup.selectItem(at: choices.firstIndex { $0?.id == settings.deviceID && settings.deviceID != nil } ?? 0)
+        cameraChanged()
+        let note = demo ? nil : CameraDevices.accessHint(listEmpty: devices.isEmpty)
+        cameraAccessNote.stringValue = note ?? ""
+        if let grid = cameraGrid, grid.row(at: 25).isHidden != (note == nil) {
+            grid.row(at: 25).isHidden = note == nil
+            fitWindow()
+        }
+    }
+
+    /// Refreshes the list while Settings is open when a camera is connected or disconnected (keeps the selection).
+    private func observeCameras() {
+        guard cameraObservers.isEmpty else { return }
+        for name in CameraDevices.changeNotifications {
+            cameraObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshCameras() }
+            })
+        }
+    }
+
+    private func refreshCameras() {
+        var current = WebcamSettings.load(env: [:])
+        let index = cameraPopup.indexOfSelectedItem
+        let choice = index >= 0 && index < cameraChoices.count ? cameraChoices[index] : nil
+        current.deviceID = choice?.id
+        current.deviceName = choice?.name
+        selectCamera(current, devices: CameraDevices.list())
     }
 
     /// The microphone goes through the same channel: without session audio there is none.
@@ -516,7 +602,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         audioBox.state = audio.enabled ? .on : .off
         micBox.state = audio.microphone ? .on : .off
         audioChanged()
-        cameraBox.state = WebcamSettings.load(env: [:]).enabled ? .on : .off
+        let webcam = WebcamSettings.load(env: [:])
+        cameraBox.state = webcam.enabled ? .on : .off
+        selectCamera(webcam, devices: CameraDevices.list())
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",

@@ -184,13 +184,33 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
 
     private func start(_ resource: StoreClient.Resource) {
         if let starting {
-            vlog("launcher: \(resource.name) not launched; \(starting) is still starting")
+            vlog("launcher: \(logName(resource.name)) not launched; \(logName(starting)) is still starting")
             setStatus("Starting \(displayName(starting))…")
             return
         }
         starting = resource.name
         setStatus("Starting \(displayName(resource.name))…")
         onLaunch?(resource)
+    }
+
+    enum ReconnectChoice { case reconnect, notNow }
+
+    /// The reconnect offer after sign-in (docs/90 §9.5): a sheet on this window, so the rest of the
+    /// app stays usable. `dontAsk`: the "Don't ask again" box was ticked.
+    func offerReconnect(apps: [String], completion: @escaping (_ choice: ReconnectChoice, _ dontAsk: Bool) -> Void) {
+        guard let window else { return }
+        showWindow(nil)
+        let alert = NSAlert()
+        alert.messageText = String(format: loc("%d disconnected session(s)", "%d getrennte Sitzung(en)"), apps.count)
+        alert.informativeText = apps.joined(separator: "\n") + "\n\n"
+            + loc("Reconnect brings their windows back to this Mac.", "Verbinden holt ihre Fenster auf diesen Mac zurück.")
+        alert.addButton(withTitle: loc("Reconnect", "Verbinden"))
+        alert.addButton(withTitle: loc("Not Now", "Nicht jetzt"))
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = loc("Don't ask again", "Nicht mehr fragen")
+        alert.beginSheetModal(for: window) { response in
+            completion(response == .alertFirstButtonReturn ? .reconnect : .notNow, alert.suppressionButton?.state == .on)
+        }
     }
 
     /// The app delegate's launch finished (connected or failed).

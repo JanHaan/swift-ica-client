@@ -64,7 +64,7 @@ final class PrintJobsController: NSObject, NSWindowDelegate {
         counter += 1
         let number = counter
         guard inFlight + queue.count + (current == nil ? 0 : 1) < Self.maxJobs else {
-            vlog("print: job \(number) (\(source), session job \(job.id), \(job.data.count) B) refused: \(Self.maxJobs) jobs already waiting")
+            vlog("print: job \(number) (\(logName(source)), session job \(job.id), \(job.data.count) B) refused: \(Self.maxJobs) jobs already waiting")
             return
         }
         inFlight += 1
@@ -73,7 +73,7 @@ final class PrintJobsController: NSObject, NSWindowDelegate {
             let item: Item
             switch PrintDocument.inspect(job.data) {
             case .failure(let why):
-                vlog("print: job \(number) (\(source), session job \(job.id), \(job.data.count) B) refused: \(why)")
+                vlog("print: job \(number) (\(logName(source)), session job \(job.id), \(job.data.count) B) refused: \(why)")
                 item = .failed(why.description)
             case .success(let info):
                 let fallback = loc("Print job \(number)", "Druckauftrag \(number)")
@@ -85,7 +85,7 @@ final class PrintJobsController: NSObject, NSWindowDelegate {
                         // An odd title the file system refuses: the plain name.
                         url = try spool.write(job.data, name: PrintDocument.fileName(title: nil, fallback: fallback))
                     }
-                    vlog("print: job \(number) from \(source) (session job \(job.id)): \(info.byteCount) B, \(info.pageCount) page(s), "
+                    vlog("print: job \(number) from \(logName(source)) (session job \(job.id)): \(info.byteCount) B, \(info.pageCount) page(s), "
                          + "title \(info.title?.count ?? 0) chars, %%EOF \(info.hasEOF ? "yes" : "no")")
                     // Thumbnail here, off the main thread, from its own document.
                     let thumbnail = PDFDocument(data: job.data)?.page(at: 0)?.thumbnail(of: NSSize(width: 128, height: 176), for: .mediaBox)

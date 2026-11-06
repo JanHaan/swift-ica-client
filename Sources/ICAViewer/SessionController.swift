@@ -80,9 +80,35 @@ final class SessionController: NSObject {
     /// Reached the first Thinwire INIT or the seamless channel. Main thread.
     var wasEstablished: Bool { reachedSeamless || session.isEstablished }
 
+    // MARK: Session sharing (docs/55)
+
+    /// What decides whether a later launch belongs into this session (§2).
+    let shareKey: SessionShareKey
+    /// The resources running in this session, the launched one first, then those started over CTXCTL (status 0).
+    private(set) var appNames: [String]
+    /// The session announced CTXCTL (it can take further apps once the channel is ready).
+    var hasControl: Bool { session.control != nil }
+    /// CTXCTL capability commit seen (main thread).
+    private(set) var controlReady = false
+    /// Shared launches sent or queued and not yet answered, and those answered with status 0 whose app has not shown
+    /// a window yet: the session must not be logged off meanwhile (main thread).
+    private var sharedLaunchesBusy = 0
+    /// TWI app keys present when a shared launch went out; the first new key afterwards is that resource (Dock icon and
+    /// menu title, docs/99 Phase 0).
+    private var awaitingApps: [(resource: String, known: Set<String>)] = []
+    /// Resource name per TWI app key, for apps whose TWI data carries no published name.
+    private var appResources: [String: String] = [:]
+    /// A last-window logoff deferred while a shared launch was busy.
+    private var logoffDeferred = false
+    /// Processes of the app windows open at the first shared launch and of every app window after it (the logon's
+    /// windows are over by then); with several apps all must have ended before a last-window logoff. nil before.
+    private var appWindowProcesses: Set<UInt32>?
+
     /// `omitAudio`: announce no CTXCAM this time (the previous session with it dropped before it was established).
     init(name: String, ica: ICAFile, omitAudio: Bool = false) throws {
         self.name = name
+        appNames = [name]
+        shareKey = SessionShareKey(ica: ica)
         scalingSettings = ScalingSettings.load()
         layout = ScalingLayout.resolve(screens: Self.currentScreens(), settings: scalingSettings, limit: ScalingLimits.sessionLimit())
         var config = WinstationDriver.Configuration()
@@ -102,7 +128,7 @@ final class SessionController: NSObject {
         config.display = display
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
                                  printing: Self.printingConfig(), audio: omitAudio ? nil : Self.audioConfig(),
-                                 webcam: Self.webcamConfig())
+                                 webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless))
         super.init()
         keyboard.controller = self
         setUpClipboard()
@@ -110,6 +136,7 @@ final class SessionController: NSObject {
         setUpPrinting()
         setUpAudio()
         setUpWebcam()
+        setUpControl()
         session.seamless.setMonitors(layout.twiMonitors)
         session.pauseResumeOnThinwireInit = ProcessInfo.processInfo.environment["ICA_TWI_PAUSE_RESUME"] != "0"
         wireCallbacks()
@@ -174,7 +201,7 @@ final class SessionController: NSObject {
     /// relaunch the resource, which reconnects to the session with the new values (D18 path).
     func reconnectToApplySettings() {
         guard !ended, !relaunchAfterClose, onRelaunch != nil else { return }
-        vlog("scaling: reconnecting \(name) to apply \(ScalingSettings.load()) (disconnect, no logoff)")
+        vlog("scaling: reconnecting \(logName(name)) to apply \(ScalingSettings.load()) (disconnect, no logoff)")
         relaunchAfterClose = true
         keyboard.releaseAll()
         let session = self.session
@@ -326,7 +353,7 @@ final class SessionController: NSObject {
         let display = session.wd.configuration.display
         layout.logLines.forEach(vlog)
         if let note = layout.note { vlog("scaling: \(scalingNoteText(note, context: .current, english: true))") }
-        vlog("session \(name): \(layout.monitors.count) screen(s), display \(display.width)x\(display.height), cap 0x20 \(display.monitors.isEmpty ? [display.scalePercent] : display.monitors.map(\.scalePercent)) %, monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264)")
+        vlog("session \(logName(name)): \(layout.monitors.count) screen(s), display \(display.width)x\(display.height), cap 0x20 \(display.monitors.isEmpty ? [display.scalePercent] : display.monitors.map(\.scalePercent)) %, monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264)")
         try await session.start()
     }
 
@@ -496,11 +523,12 @@ final class SessionController: NSObject {
             infos[w.id] = w
             noteActivity()
             logon.windowAdded(appKey: w.appKey)
-            vlog("TWI window \(String(w.id, radix: 16)) added: \(w.kind) \(safeTitle(w)) rect \(w.windowRect.left),\(w.windowRect.top) \(w.windowRect.width)x\(w.windowRect.height) app \(w.appKey)")
+            vlog("TWI window \(String(w.id, radix: 16)) added: \(w.kind) \(safeTitle(w)) rect \(w.windowRect.left),\(w.windowRect.top) \(w.windowRect.width)x\(w.windowRect.height) app \(logName(w.appKey))")
             materialise(w)
         case .windowChanged(let w, let changes):
             infos[w.id] = w
             noteActivity()
+            if w.kind == .appWindow, let pid = w.processId { appWindowProcesses?.insert(pid) }
             if changes.contains(.icon) || changes.contains(.app) { DockIcon.shared.scheduleRefresh() }
             if changes.contains(.windowRect) || changes.contains(.kind) || changes.contains(.style) || changes.contains(.title) {
                 vlog("TWI window \(String(w.id, radix: 16)) changed \(changes.rawValue): \(w.kind) rect \(w.windowRect.left),\(w.windowRect.top) \(w.windowRect.width)x\(w.windowRect.height) min \(w.isMinimized)")
@@ -544,8 +572,13 @@ final class SessionController: NSObject {
                 w.window.makeKeyAndOrderFront(nil)
             }
         case .appAdded(let app):
-            vlog("TWI app added: \(app.key) \"\(app.name)\"")
+            vlog("TWI app added: \(logName(app.key)) \(logName(app.name))")
             apps[app.key] = app
+            if appResources[app.key] == nil, let i = awaitingApps.firstIndex(where: { !$0.known.contains(app.key) }) {
+                let resource = awaitingApps.remove(at: i).resource
+                appResources[app.key] = resource
+                vlog("session sharing: TWI app \(logName(app.key)) is \(logName(resource))")
+            }
             DockIcon.shared.scheduleRefresh()
         case .appChanged(let app):
             apps[app.key] = app
@@ -561,9 +594,9 @@ final class SessionController: NSObject {
         }
     }
 
-    /// Only the test app's title is logged verbatim.
+    /// Window titles are the user's documents: only their length is logged.
     private func safeTitle(_ w: TWIWindow) -> String {
-        w.title.hasPrefix("Rechner") ? "\"\(w.title)\"" : "(\(w.title.count) chars)"
+        "(\(w.title.count) chars)"
     }
 
     private var limbo: [UInt32: RemoteWindow] = [:]
@@ -587,9 +620,11 @@ final class SessionController: NSObject {
         remote.show(activate: w.kind == .appWindow && (foreground == w.id || appWindowCount == 1))
         if w.kind == .appWindow {
             sawAppWindow = true
+            if let pid = w.processId { appWindowProcesses?.insert(pid) }
             onAppWindowShown?(self)
             pendingLogoff?.cancel()
             lastAppWindows.removeAll()
+            logoffDeferred = false
             setParked(false)
             if appWindowCount == 1 { NSApp.activate() }
         }
@@ -612,17 +647,25 @@ final class SessionController: NSObject {
     /// If a process still runs, park the session (launcher: Show / Log off); if the host closed the
     /// windows itself and their processes ended (logon scripts), just wait.
     private func lastAppWindowGone() {
-        let pids = Set(lastAppWindows.values.compactMap(\.processId))
+        var pids = Set(lastAppWindows.values.compactMap(\.processId))
+        // Several apps in this session (docs/55): the last window of one app is not the end of the others.
+        if appNames.count > 1, let all = appWindowProcesses { pids.formUnion(all) }
         let allKnown = lastAppWindows.values.allSatisfy { $0.processId != nil }
         let allEnded = allKnown && !pids.isEmpty && pids.isSubset(of: endedProcesses)
         let closedByUser = lastAppWindows.keys.contains { userClosed.contains($0) }
         if allEnded, !closedByUser {
             vlog("no app window; the host closed it and its processes ended: waiting for the app")
             setParked(false)
+        } else if allEnded, sharedLaunchesBusy > 0 {
+            // Another app is being started in this session (docs/55): its window will come; decide again after.
+            vlog("no app window and the processes ended, but \(sharedLaunchesBusy) shared launch(es) are busy: no logoff yet")
+            logoffDeferred = true
+            setParked(false)
         } else if allEnded {
             pendingLogoff?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self, !self.session.isClosed else { return }
+                // A new window or a shared launch (main) cancels this item.
                 vlog("the app's processes have ended and no app window is left: TWI logoff")
                 self.logoff()
             }
@@ -668,7 +711,7 @@ final class SessionController: NSObject {
             for icon in info.icons.values where icon.image != nil && icon.width > (best?.width ?? 0) { best = icon }
         }
         let app = apps[key]
-        var names = [app?.publishedName, app?.name].compactMap { $0 }.filter { !$0.isEmpty }
+        var names = [app?.publishedName, appResources[key], app?.name].compactMap { $0 }.filter { !$0.isEmpty }
         if apps.count <= 1 { names.append(name) }   // a single-app session: the launched resource is that app
         return DockIcon.Source(key: key, names: names, twi: best?.image)
     }
@@ -839,9 +882,9 @@ final class SessionController: NSObject {
         clipboardTimer = nil
         clipboardSync?.channelClosed()
         setParked(false)
-        vlog("session \(name) closed: \(reason)")
+        vlog("session \(logName(name)) closed: \(reason)")
         if relaunchAfterClose, onRelaunch != nil {
-            vlog("scaling: relaunching \(name) with the new settings")
+            vlog("scaling: relaunching \(logName(name)) with the new settings")
             tearDown()
             onRelaunch?(self)
             return
@@ -852,7 +895,7 @@ final class SessionController: NSObject {
             setDim(dimAlpha ?? Self.dimAlpha(nil))
             hud.onReconnect = { [weak self] in
                 guard let self else { return }
-                vlog("reconnect chosen after give-up: relaunching \(self.name)")
+                vlog("reconnect chosen after give-up: relaunching \(logName(self.name))")
                 self.tearDown()
                 self.onRelaunch?(self)
             }
@@ -910,7 +953,9 @@ final class SessionController: NSObject {
         }
         do {
             let fs = try settings.makeFileSystem()
-            vlog("drive mapping: \(settings.letter): = \(fs.rootPath)\(settings.readOnly ? " (read-only)" : "")")
+            // The folder is the user's: only whether it is the default one, and the path length.
+            let folder = settings.folder.standardizedFileURL == CDMSettings.defaultFolder.standardizedFileURL ? "default folder" : "custom folder"
+            vlog("drive mapping: \(settings.letter): = \(folder) (\(fs.rootPath.count) chars)\(settings.readOnly ? " (read-only)" : "")")
             return CDMEngine.Config(fileSystem: fs, letter: settings.letter, label: settings.label)
         } catch {
             vlog("drive mapping: off (\(error))")
@@ -1003,7 +1048,9 @@ final class SessionController: NSObject {
     /// permission is asked for at the first PLAY. Nothing is written to disk (no sample tap in the app).
     private func setUpWebcam() {
         guard let engine = session.webcam else { return }
-        engine.source = WebcamSettings.load().source == .synthetic ? WebcamTestPattern(format: engine.config.format) : Camera()
+        let settings = WebcamSettings.load()
+        engine.source = settings.source == .synthetic ? WebcamTestPattern(format: engine.config.format)
+            : Camera(deviceID: settings.deviceID, deviceName: settings.deviceName) { vlog("webcam: \($0)") }
         // Session queue. Commands, handles, sizes, counts and the module bytes (no picture data).
         engine.onEvent = { [weak self] event in
             vlog("webcam: \(event)")
@@ -1012,6 +1059,72 @@ final class SessionController: NSObject {
             case .capturing(let on): DispatchQueue.main.async { self?.cameraInUse(on) }
             default: break
             }
+        }
+    }
+
+    // MARK: Session sharing over CTXCTL (docs/55)
+
+    /// CTXCTL in every seamless session (docs/55 §10 step 1); ICA_CTXCTL=0 leaves it out (diagnostics only: such a
+    /// session cannot take a second app). Our own app goes along for the §5.3 commit request.
+    static func controlConfig(ica: ICAFile, seamless: Bool, env: [String: String] = ProcessInfo.processInfo.environment) -> ControlEngine.Config? {
+        guard seamless else { return nil }
+        if env["ICA_CTXCTL"] == "0" {
+            vlog("ctxctl: off (ICA_CTXCTL=0); this session cannot take further apps")
+            return nil
+        }
+        var config = ControlEngine.Config()
+        config.own = ControlLaunch(ica: ica)
+        return config
+    }
+
+    private func setUpControl() {
+        guard let engine = session.control else { return }
+        // Session queue. Capabilities, statuses and the request bytes (app names only; a command line is shown as bytes).
+        engine.onEvent = { [weak self] event in
+            vlog("ctxctl: \(event)")
+            if case .ready = event { DispatchQueue.main.async { self?.controlReady = true } }
+        }
+    }
+
+    /// Starts `resource` inside this session over CTXCTL (docs/55 §6). Queued in the engine until the channel is ready
+    /// (bounded there); `completion` runs on main. Main thread.
+    func launchInSession(_ resource: String, launch: ControlLaunch, completion: @escaping (ControlEngine.LaunchResult) -> Void) {
+        sharedLaunchesBusy += 1
+        pendingLogoff?.cancel()
+        if appWindowProcesses == nil {
+            appWindowProcesses = Set(windows.values.filter(\.isApp).compactMap(\.info.processId)).union(lastAppWindows.values.compactMap(\.processId))
+        }
+        let entry = (resource: resource, known: Set(apps.keys))
+        // A single-app session: its one app is the resource it was launched for.
+        if apps.count == 1, let only = apps.keys.first, appResources[only] == nil { appResources[only] = name }
+        awaitingApps.append(entry)
+        vlog("session sharing: starting \(logName(resource)) in the session of \(appNames.map(logName).joined(separator: ", ")) over CTXCTL"
+             + (controlReady ? "" : " (queued until the channel is ready)"))
+        session.launchInSession(launch) { [weak self] result in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                vlog("session sharing: \(logName(resource)): \(result)")
+                if result == .started {
+                    if !self.appNames.contains(resource) { self.appNames.append(resource) }
+                    // The app's window follows over TWI; hold off a logoff a little longer for it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.sharedLaunchDone(resource, started: true) }
+                } else {
+                    self.sharedLaunchDone(resource, started: false)
+                }
+                completion(result)
+            }
+        }
+    }
+
+    private func sharedLaunchDone(_ resource: String, started: Bool) {
+        sharedLaunchesBusy = max(0, sharedLaunchesBusy - 1)
+        // Failed: its app will not come. Started: its time for the first TWI app is over (an app found removed it).
+        if let i = awaitingApps.firstIndex(where: { $0.resource == resource }) { awaitingApps.remove(at: i) }
+        guard sharedLaunchesBusy == 0, logoffDeferred, !ended else { return }
+        logoffDeferred = false
+        if appWindowCount == 0, !lastAppWindows.isEmpty {
+            vlog("session sharing: no window of the new app arrived; deciding about the session again")
+            lastAppWindowGone()
         }
     }
 
@@ -1124,7 +1237,7 @@ final class SessionController: NSObject {
 
     private func linkSuspended(_ info: CGPTransport.Suspension) {
         guard !ended else { return }
-        vlog("session \(name) suspended (\(info.reason)): input off, windows kept")
+        vlog("session \(logName(name)) suspended (\(info.reason)): input off, windows kept")
         // Keys and mouse buttons held right now: their ups are queued by CGP and reach the host after
         // the resume (input that follows is dropped).
         keyboard.releaseAll()
@@ -1139,7 +1252,7 @@ final class SessionController: NSObject {
 
     private func linkResumed() {
         guard !ended else { return }
-        vlog("session \(name) resumed: input on")
+        vlog("session \(logName(name)) resumed: input on")
         inputBlocked = false
         setDim(nil)
         hud.hide()

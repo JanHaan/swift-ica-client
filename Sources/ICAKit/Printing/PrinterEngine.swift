@@ -155,7 +155,8 @@ public final class PrinterEngine: VirtualChannelEngine, VirtualChannelModule {
                 for part in [e.first, e.second] where !part.isEmpty { hostNames.append(Self.trimNULs(encoding.decode(part))) }
             }
             let list = entries.map { e in
-                "\"\(printable(encoding.decode(e.first)))\"/\"\(printable(encoding.decode(e.second)))\" x \(e.unknown) flags \(e.flags)"
+                // Host printer and driver names can carry user or site names: lengths only.
+                "\(Self.trimNULs(encoding.decode(e.first)).count)/\(Self.trimNULs(encoding.decode(e.second)).count) chars x \(e.unknown) flags \(e.flags)"
             }
             log("SET_METAFILE tag \(tag): size \(size), \(entries.count) entries [\(list.joined(separator: ", "))]")
 
@@ -170,7 +171,7 @@ public final class PrinterEngine: VirtualChannelEngine, VirtualChannelModule {
             hostNames.append(printer)
             guard flags & PrinterWire.openRequiredFlags == PrinterWire.openRequiredFlags else {
                 reply(PrinterReply.open(tag: tag, result: PrinterWire.Result.accessDenied, context: 0xFFFF))
-                log(String(format: "OPEN tag %d flags 0x%02x \"%@\" → refused (flags lack 0x11)", tag, flags, printable(printer)))
+                log(String(format: "OPEN tag %d flags 0x%02x printer (%d chars) → refused (flags lack 0x11)", tag, flags, printer.count))
                 return
             }
             let context = PrinterWire.pdfContext
@@ -179,7 +180,7 @@ public final class PrinterEngine: VirtualChannelEngine, VirtualChannelModule {
             }
             let id = startJob(context: context, printer: printer)
             reply(PrinterReply.open(tag: tag, result: PrinterWire.Result.success, context: context))
-            log(String(format: "OPEN tag %d flags 0x%02x \"%@\" (%d B name) → context %d, job %d", tag, flags, printable(printer),
+            log(String(format: "OPEN tag %d flags 0x%02x printer (%d chars, %d B name) → context %d, job %d", tag, flags, printer.count,
                        name.count, context, id))
 
         case let .getInfo(context, flags, size):
@@ -279,8 +280,4 @@ public final class PrinterEngine: VirtualChannelEngine, VirtualChannelModule {
         return s
     }
 
-    /// Printer and driver names for logs: control characters replaced, at most 80 characters.
-    private func printable(_ text: String) -> String {
-        String(String.UnicodeScalarView(text.unicodeScalars.map { $0.value < 0x20 || $0.value == 0x7F ? "." : $0 }).prefix(80))
-    }
 }

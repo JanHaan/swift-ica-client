@@ -316,7 +316,8 @@ private struct FindReply {
         #expect(h.send(.getAttributes(path: p("M:\\notes.TXT")))![1] == h.lastID)
         // Never contents in the log.
         #expect(!h.events.joined().contains("hello"))
-        #expect(h.events.contains { $0.contains("CLOSE ctx 1 Notes.txt: read 14 B, written 11 B") })
+        #expect(h.events.contains { $0.contains("CLOSE ctx 1 \(CDMPath(["Notes.txt"]).logLabel): read 14 B, written 11 B") })
+        #expect(!h.events.joined().contains("Notes"))   // file names never reach the log
     }
 
     @Test func cdmCreateDispositions() {

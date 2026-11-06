@@ -44,9 +44,201 @@ enum Paths {
 private let logStart = Date()
 
 /// Diagnostic log on stderr. Never pass credentials, tickets, cookies or ICA file contents.
+/// Each line also goes to `LogStore` (memory and log file) for "Report a Problem".
 func vlog(_ text: String) {
-    let line = String(format: "%7.2f ", Date().timeIntervalSince(logStart)) + text + "\n"
-    FileHandle.standardError.write(Data(line.utf8))
+    let now = Date()
+    let line = String(format: "%7.2f ", now.timeIntervalSince(logStart)) + text
+    FileHandle.standardError.write(Data((line + "\n").utf8))
+    LogStore.shared.append(line, at: now)
+}
+
+/// A resource or app name in the log, always as «name»: a problem report hides every such name
+/// (ReportScrubber rule 16), also in logs of earlier runs whose store list it never saw.
+func logName(_ name: String) -> String { "«\(name)»" }
+
+/// The diagnostic log kept for "Report a Problem" (FeedbackWindow), which scrubs it before showing it.
+/// Memory: the last 5,000 lines or 2 MB of this run. File: `~/Library/Logs/ICAViewer/ICAViewer.log`
+/// (directory 0700, files 0600), each line prefixed with its UTC time; at 2 MB it becomes
+/// `ICAViewer.1.log` and `.1` becomes `.2` (3 files at most), so a report after a relaunch still has
+/// the previous run. No file in demo mode, with ICA_LOG_FILE=0 or with the setting `log.file` = NO;
+/// then (outside demo mode) the names list and the key that belong to the files are deleted too.
+/// `log-key` (0600) is the per-install secret for CDM path labels (CDMPath.logLabel).
+final class LogStore: @unchecked Sendable {
+    static let shared = LogStore()
+
+    struct Entry {
+        let date: Date
+        /// The stderr line without its newline.
+        let line: String
+    }
+
+    static let maxLines = 5_000
+    static let maxBytes = 2 << 20
+    static let fileLimit: UInt64 = 2 << 20
+    static let fileCount = 3
+
+    static var fileEnabled: Bool {
+        !Demo.enabled && ProcessInfo.processInfo.environment["ICA_LOG_FILE"] != "0"
+            && (UserDefaults.standard.object(forKey: "log.file") as? Bool ?? true)
+    }
+
+    static var directory: URL {
+        (FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library"))
+            .appendingPathComponent("Logs/ICAViewer")
+    }
+
+    static var keyFile: URL { directory.appendingPathComponent("log-key") }
+
+    /// Creates the log directory or resets it to 0700; false if that fails.
+    @discardableResult
+    static func ensureDirectory() -> Bool { PrivateFile.ensureDirectory(directory) }
+
+    /// Atomic and never readable by others (PrivateFile).
+    static func writePrivate(_ data: Data, to url: URL) throws { try PrivateFile.write(data, to: url) }
+
+    /// The per-install CDM label key: read, or created once (32 random bytes).
+    private static func loadOrCreateKey() -> Data? {
+        if let data = try? Data(contentsOf: keyFile), data.count == 32 { return data }
+        let key = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+        return (try? writePrivate(key, to: keyFile)) != nil ? key : nil
+    }
+
+    /// Current file first.
+    static var files: [URL] {
+        (0..<fileCount).map { directory.appendingPathComponent($0 == 0 ? "ICAViewer.log" : "ICAViewer.\($0).log") }
+    }
+
+    private let lock = NSLock()
+    private var ring: [Entry] = []
+    private var ringBytes = 0
+    private var handle: FileHandle?
+    private var fileSize: UInt64 = 0
+    private var fileOpened = false
+    private let stampFormat: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    func append(_ line: String, at date: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        ring.append(Entry(date: date, line: line))
+        ringBytes += line.utf8.count + 1
+        if ring.count > Self.maxLines + 500 || ringBytes > Self.maxBytes {
+            var drop = max(0, ring.count - Self.maxLines)
+            var bytes = ringBytes
+            for e in ring[..<drop] { bytes -= e.line.utf8.count + 1 }
+            while bytes > Self.maxBytes, drop < ring.count { bytes -= ring[drop].line.utf8.count + 1; drop += 1 }
+            ring.removeFirst(drop)
+            ringBytes = bytes
+        }
+        writeToFile(stampFormat.string(from: date) + " " + line + "\n")
+    }
+
+    private func writeToFile(_ text: String) {
+        if !fileOpened {
+            fileOpened = true
+            guard Self.fileEnabled else {
+                if !Demo.enabled {   // turned off: the names and the key go with the files' purpose
+                    try? FileManager.default.removeItem(at: ReportNames.file)
+                    try? FileManager.default.removeItem(at: Self.keyFile)
+                }
+                return
+            }
+            guard Self.ensureDirectory() else { return }
+            if let key = Self.loadOrCreateKey() { CDMPath.setLogKey(key) }
+            openFile()
+            if handle != nil {
+                let start = "\(stampFormat.string(from: Date())) ---- ICAViewer started (pid \(ProcessInfo.processInfo.processIdentifier)) ----\n"
+                write(Data(start.utf8))
+            }
+        }
+        guard handle != nil else { return }
+        let data = Data(text.utf8)
+        if fileSize + UInt64(data.count) > Self.fileLimit { rotate() }
+        write(data)
+    }
+
+    private func write(_ data: Data) {
+        guard let handle else { return }
+        do {
+            try handle.write(contentsOf: data)
+            fileSize += UInt64(data.count)
+        } catch {
+            try? handle.close()
+            self.handle = nil   // disk full or removed: memory only from now on
+        }
+    }
+
+    private func openFile() {
+        let fm = FileManager.default
+        let url = Self.files[0]
+        do {
+            guard Self.ensureDirectory() else { throw CocoaError(.fileWriteNoPermission) }
+            if !fm.fileExists(atPath: url.path) {
+                fm.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            } else {
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+            let h = try FileHandle(forWritingTo: url)
+            fileSize = try h.seekToEnd()
+            handle = h
+        } catch {
+            handle = nil
+        }
+    }
+
+    private func rotate() {
+        try? handle?.close()
+        handle = nil
+        let fm = FileManager.default
+        let files = Self.files
+        try? fm.removeItem(at: files[files.count - 1])
+        for i in stride(from: files.count - 2, through: 0, by: -1) where fm.fileExists(atPath: files[i].path) {
+            try? fm.moveItem(at: files[i], to: files[i + 1])
+        }
+        openFile()
+    }
+
+    /// This run's lines since `date` (memory).
+    func memoryEntries(since date: Date) -> [Entry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return ring.filter { $0.date >= date }
+    }
+
+    /// Lines since `date` from the log files, oldest first (earlier runs included); nil without a file.
+    func fileEntries(since date: Date) -> [Entry]? {
+        lock.lock()
+        let enabled = handle != nil
+        lock.unlock()
+        guard enabled else { return nil }
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var out: [Entry] = []
+        for url in Self.files.reversed() {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            for raw in text.split(separator: "\n") {
+                guard let space = raw.firstIndex(of: " "), let stamp = parser.date(from: String(raw[..<space])),
+                      stamp >= date else { continue }
+                out.append(Entry(date: stamp, line: String(raw[raw.index(after: space)...])))
+            }
+        }
+        return out
+    }
+
+    /// The report's lines: the files if they are written (they also hold earlier runs), else memory;
+    /// at most the newest 5,000 lines or 2 MB.
+    func recent(since date: Date) -> [Entry] {
+        var list = fileEntries(since: date) ?? memoryEntries(since: date)
+        if list.count > Self.maxLines { list.removeFirst(list.count - Self.maxLines) }
+        var bytes = list.reduce(0) { $0 + $1.line.utf8.count + 1 }
+        var drop = 0
+        while bytes > Self.maxBytes, drop < list.count { bytes -= list[drop].line.utf8.count + 1; drop += 1 }
+        return Array(list.dropFirst(drop))
+    }
 }
 
 /// Which resources this process may launch. Launches the user starts in the launcher are not
@@ -190,6 +382,7 @@ final class StoreService: @unchecked Sendable {
             }
         }
         try? http.saveCookies(to: Paths.cookieFile)
+        ReportNames.shared.record(list.map(\.name))   // hidden in problem reports (FeedbackReport)
         if let store {   // icons and menu title (docs/99 Phase 0)
             DispatchQueue.main.async {
                 StoreIconCache.shared.register(store: store)

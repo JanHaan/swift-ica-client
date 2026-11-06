@@ -52,6 +52,10 @@ public final class ICASession: @unchecked Sendable {
     /// Webcam engine (`CTXMM  `, ch 18), when the session was created with a webcam config. Set `webcam.source` and
     /// `webcam.onEvent` before `start`; `onEvent` is called on the session queue.
     public let webcam: WebcamEngine?
+    /// Control engine (`CTXCTL `, first free channel ≥ 20), when the session was created with a control config: starts
+    /// further published apps inside this session (docs/55). Set `control.onEvent` before `start`; it is called on the
+    /// session queue.
+    public let control: ControlEngine?
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -74,10 +78,11 @@ public final class ICASession: @unchecked Sendable {
     /// (docs/70 §5.7). `cdm` nil: no CTXCDM module, so no client drive (docs/95 §A). `printing` nil: no
     /// CTXCPM module, so the host creates no PDF printer for this client (docs/97 §6.2). `audio` nil: no CTXCAM
     /// module, so the host plays no sound to this client (docs/98 §1). `webcam` nil: no CTXMM module, so the host
-    /// shows no HDX camera (docs/98b §10.5).
+    /// shows no HDX camera (docs/98b §10.5). `control` nil: no CTXCTL module, so no later app can start inside this
+    /// session (docs/55 §1).
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
                 cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
-                webcam: WebcamEngine.Config? = nil) throws {
+                webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -111,6 +116,9 @@ public final class ICASession: @unchecked Sendable {
         // After CTXCLIP (docs/98 §1.1, §11 step 1); the 55-byte module and the credits come from the engine.
         self.audio = audio.map { AudioEngine(config: $0) }
         if let engine = self.audio { wd.register(engine) }
+        // The first VC without a fixed number, after CTXCAM, as in the reference: channel 20 (docs/55 §4.1).
+        self.control = control.map { ControlEngine(config: $0) }
+        if let engine = self.control { wd.register(engine) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
@@ -160,6 +168,11 @@ public final class ICASession: @unchecked Sendable {
             engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
             engine.backlog = { [weak self] in self?.transport.status.queuedBytes ?? 0 }
         }
+        if let engine = self.control {
+            let queue = self.queue
+            // Launch timeouts (the response and the wait for the capability commit).
+            engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
+        }
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
         thinwire.onInit = { [weak self] info in
             guard let self else { return }
@@ -190,12 +203,14 @@ public final class ICASession: @unchecked Sendable {
             setSuspended(true)
             audio?.suspend()
             webcam?.suspend()
+            control?.suspend()
             onEvent(.suspended(info))
         case .resuming(let attempt): onEvent(.resuming(attempt: attempt))
         case .resumed(let result):
             setSuspended(false)
             audio?.resume()
             webcam?.resume()
+            control?.resume()
             onEvent(.resumed(result))
         case .gaveUp(let info): onEvent(.gaveUp(info))
         case .closed(let reason):
@@ -205,6 +220,7 @@ public final class ICASession: @unchecked Sendable {
             printer?.shutdown()
             audio?.shutdown()
             webcam?.shutdown()
+            control?.shutdown()
             onEvent(.closed(reason))
         }
     }
@@ -268,6 +284,16 @@ public final class ICASession: @unchecked Sendable {
         }
     }
 
+    /// Starts another published app inside this session over CTXCTL (docs/55 §6), any thread. Queued until the channel
+    /// is ready; `completion` runs once, on the session queue. Without a control channel: `.notSent` at once.
+    public func launchInSession(_ launch: ControlLaunch, completion: @escaping (ControlEngine.LaunchResult) -> Void) {
+        perform { [self] in
+            guard let control else { return completion(.notSent("no control channel in this session")) }
+            guard !closed else { return completion(.notSent("the session has ended")) }
+            control.launch(launch, completion: completion)
+        }
+    }
+
     /// Connects and starts the receive loop; returns once the bind request is on the wire.
     public func start() async throws { try await transport.start() }
 
@@ -314,6 +340,60 @@ public final class ICASession: @unchecked Sendable {
 }
 
 // MARK: - CGP transport
+
+/// Time and timers of `CGPTransport`: liveness and keepalive ticker, wake and path checks, resume
+/// attempts, first read, T_sr deadline, close timeouts, test hooks. `SystemCGPClock` is the real
+/// one; tests inject a manual clock and advance it explicitly.
+public protocol CGPClock: AnyObject, Sendable {
+    /// Monotonic, runs during system sleep.
+    func now() -> ContinuousClock.Instant
+    /// Monotonic, stops during system sleep.
+    func uptime() -> SuspendingClock.Instant
+    /// Wall time (UI countdown, relaunch hint).
+    func date() -> Date
+    /// Runs `work` once on `queue` after `delay` s: on the uptime clock (`DispatchTime`) or, with
+    /// `wall`, on the wall clock that runs during sleep (`DispatchWallTime`).
+    @discardableResult
+    func schedule(after delay: TimeInterval, wall: Bool, on queue: DispatchQueue, _ work: @escaping () -> Void) -> CGPTimer
+    /// Runs `work` on `queue` every `interval` s on the uptime clock, first after one interval.
+    func scheduleRepeating(every interval: TimeInterval, on queue: DispatchQueue, _ work: @escaping () -> Void) -> CGPTimer
+}
+
+/// A pending timer of a `CGPClock`; once cancelled it never runs.
+public protocol CGPTimer: AnyObject {
+    func cancel()
+}
+
+extension DispatchWorkItem: CGPTimer {}
+
+/// Dispatch timers on the given queue.
+public final class SystemCGPClock: CGPClock {
+    public init() {}
+    public func now() -> ContinuousClock.Instant { .now }
+    public func uptime() -> SuspendingClock.Instant { .now }
+    public func date() -> Date { Date() }
+
+    @discardableResult
+    public func schedule(after delay: TimeInterval, wall: Bool, on queue: DispatchQueue, _ work: @escaping () -> Void) -> CGPTimer {
+        let item = DispatchWorkItem(block: work)
+        if wall { queue.asyncAfter(wallDeadline: .now() + delay, execute: item) } else { queue.asyncAfter(deadline: .now() + delay, execute: item) }
+        return item
+    }
+
+    public func scheduleRepeating(every interval: TimeInterval, on queue: DispatchQueue, _ work: @escaping () -> Void) -> CGPTimer {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler(handler: work)
+        timer.resume()
+        return SourceTimer(timer)
+    }
+
+    private final class SourceTimer: CGPTimer {
+        let source: DispatchSourceTimer
+        init(_ source: DispatchSourceTimer) { self.source = source }
+        func cancel() { source.cancel() }
+    }
+}
 
 /// The CGP session over one or more TCP/TLS connections: first bind, default channel, ICA detect,
 /// link liveness, client keepalives and the session-reliability resume loop (docs/20 §3.12).
@@ -425,13 +505,14 @@ public final class CGPTransport: @unchecked Sendable {
 
     // Liveness and keepalive (§3.12.2). Silence is measured with a clock that runs during sleep; a
     // tick that sees a sleep gap runs the wake check instead of judging the gap as silence.
-    private var lastReceived = ContinuousClock.now
-    private var lastSent = ContinuousClock.now
-    private var lastLivenessCheck = ContinuousClock.now
-    private var lastTick = (ContinuousClock.now, SuspendingClock.now)
-    private var ticker: DispatchSourceTimer?
-    private var wakeCheck: DispatchWorkItem?
-    private var pathCheck: DispatchWorkItem?
+    private let clock: CGPClock
+    private var lastReceived: ContinuousClock.Instant
+    private var lastSent: ContinuousClock.Instant
+    private var lastLivenessCheck: ContinuousClock.Instant
+    private var lastTick: (ContinuousClock.Instant, SuspendingClock.Instant)
+    private var ticker: CGPTimer?
+    private var wakeCheck: CGPTimer?
+    private var pathCheck: CGPTimer?
     private var online = true
 
     // Resume loop (§3.12.4).
@@ -439,22 +520,27 @@ public final class CGPTransport: @unchecked Sendable {
     private var srTimeoutUsed: TimeInterval = 0
     private var suspendedAt: Date?
     private var onlineDuringSuspension = false
-    private var deadlineTimer: DispatchWorkItem?
-    private var attemptWork: DispatchWorkItem?
+    private var deadlineTimer: CGPTimer?
+    private var attemptWork: CGPTimer?
     private var attemptDue: ContinuousClock.Instant?
-    /// Tests: pretend the next tick follows a system sleep of this length.
-    var injectedSleepForTests: Duration = .zero
     private var attemptToken = 0
     private var attemptInProgress = false
     private var attempt = 0
-    private var firstReadTimer: DispatchWorkItem?
+    private var firstReadTimer: CGPTimer?
 
-    public init(host: String, port: UInt16, tls: Bool = true, ticket: String, queue: DispatchQueue) {
+    public init(host: String, port: UInt16, tls: Bool = true, ticket: String, queue: DispatchQueue,
+                clock: CGPClock = SystemCGPClock()) {
         self.host = host
         self.port = port
         self.tls = tls
         self.ticket = ticket
         self.queue = queue
+        self.clock = clock
+        let now = clock.now()
+        lastReceived = now
+        lastSent = now
+        lastLivenessCheck = now
+        lastTick = (now, clock.uptime())
         queue.setSpecific(key: queueKey, value: true)
         cgp.output = { [weak self] packet in self?.write(packet) }
     }
@@ -538,7 +624,7 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func write(_ data: Data) {
         stream?.enqueue(data)
-        lastSent = .now
+        lastSent = clock.now()
     }
 
     /// ICA bytes from the WD. Queued for retransmit; written while connected (§3.12.7).
@@ -570,7 +656,7 @@ public final class CGPTransport: @unchecked Sendable {
         firstReadTimer = nil
         // Packets parsed before a failure in the same chunk are already counted: deliver them first.
         let (events, failure) = cgp.consume(chunk)
-        if failure == nil || !events.isEmpty { lastReceived = .now }
+        if failure == nil || !events.isEmpty { lastReceived = clock.now() }
         for event in events {
             switch event {
             case .signature:
@@ -674,14 +760,10 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func startTicker() {
         ticker?.cancel()
-        let now = ContinuousClock.now
-        lastTick = (now, SuspendingClock.now)
+        let now = clock.now()
+        lastTick = (now, clock.uptime())
         lastLivenessCheck = now
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + timing.tick, repeating: timing.tick)
-        timer.setEventHandler { [weak self] in self?.tick() }
-        timer.resume()
-        ticker = timer
+        ticker = clock.scheduleRepeating(every: timing.tick, on: queue) { [weak self] in self?.tick() }
     }
 
     private func stopTicker() {
@@ -695,9 +777,8 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func tick() {
         guard !closed else { return }
-        let now = ContinuousClock.now, up = SuspendingClock.now
-        let slept = (now - lastTick.0) + injectedSleepForTests - (up - lastTick.1) > .seconds(2)
-        injectedSleepForTests = .zero
+        let now = clock.now(), up = clock.uptime()
+        let slept = (now - lastTick.0) - (up - lastTick.1) > .seconds(2)
         lastTick = (now, up)
         let livenessDue = now - lastLivenessCheck >= .seconds(timing.livenessInterval)
         if livenessDue { lastLivenessCheck = now }
@@ -751,16 +832,14 @@ public final class CGPTransport: @unchecked Sendable {
         guard cgp.state == .connected, wakeCheck == nil else { return }
         write(cgp.keepalive())
         counters.keepalivesSent += 1
-        let mark = ContinuousClock.now
+        let mark = clock.now()
         let limit = max(timing.wakeCheckMinimum, 1.5 * h2c)
         log("\(why): keepalive sent, expecting data within \(Int(limit)) s")
-        let work = DispatchWorkItem { [weak self] in
+        wakeCheck = clock.schedule(after: limit, wall: false, on: queue) { [weak self] in
             guard let self else { return }
             self.wakeCheck = nil
             if self.cgp.state == .connected, self.lastReceived < mark { self.suspend("nothing received within \(Int(limit)) s after \(why)") }
         }
-        wakeCheck = work
-        queue.asyncAfter(deadline: .now() + limit, execute: work)
     }
 
     /// OS path event. Offline or online while connected: verify after 15 s; online while suspended:
@@ -774,20 +853,18 @@ public final class CGPTransport: @unchecked Sendable {
             switch cgp.state {
             case .connected:
                 guard pathCheck == nil else { return }
-                let mark = ContinuousClock.now
-                let work = DispatchWorkItem { [weak self] in
+                let mark = clock.now()
+                pathCheck = clock.schedule(after: timing.pathVerification, wall: false, on: queue) { [weak self] in
                     guard let self else { return }
                     self.pathCheck = nil
                     if self.cgp.state == .connected, self.lastReceived < mark {
                         self.suspend("nothing received within \(Int(self.timing.pathVerification)) s after a network change")
                     }
                 }
-                pathCheck = work
-                queue.asyncAfter(deadline: .now() + timing.pathVerification, execute: work)
             case .suspended:
                 // Cancel the wait, unless an attempt is due within the start delay anyway (a flapping
                 // path must not keep postponing it).
-                let dueSoon = attemptDue.map { $0 - ContinuousClock.now <= .seconds(timing.startDelay) } ?? false
+                let dueSoon = attemptDue.map { $0 - clock.now() <= .seconds(timing.startDelay) } ?? false
                 if online, !attemptInProgress, !dueSoon { scheduleAttempt(after: timing.startDelay) }
             default:
                 break
@@ -835,9 +912,9 @@ public final class CGPTransport: @unchecked Sendable {
         cgp.suspend()                                   // 1. state 5, nothing on the wire
         stopTicker()
         srTimeoutUsed = srTimeout                       // 2. fix T_sr, show the UI
-        srDeadline = ContinuousClock.now + .seconds(srTimeoutUsed)
-        let deadline = Date().addingTimeInterval(srTimeoutUsed)
-        suspendedAt = Date()
+        srDeadline = clock.now() + .seconds(srTimeoutUsed)
+        let deadline = clock.date().addingTimeInterval(srTimeoutUsed)
+        suspendedAt = clock.date()
         onlineDuringSuspension = online
         attempt = 0
         log("link dead (\(reason)): suspended, resume window \(Int(srTimeoutUsed)) s; queue \(cgp.queueCount) packets, " +
@@ -848,19 +925,17 @@ public final class CGPTransport: @unchecked Sendable {
         scheduleAttempt(after: timing.startDelay)       // 5. first attempt after the start delay
     }
 
-    private var deadlinePassed: Bool { srDeadline.map { ContinuousClock.now >= $0 } ?? false }
+    private var deadlinePassed: Bool { srDeadline.map { clock.now() >= $0 } ?? false }
 
     /// Wall-clock timer at T_sr + 100 ms (runs during sleep, §3.12.4).
     private func armDeadline(after seconds: TimeInterval) {
         deadlineTimer?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.checkDeadline() }
-        deadlineTimer = work
-        queue.asyncAfter(wallDeadline: .now() + seconds + 0.1, execute: work)
+        deadlineTimer = clock.schedule(after: seconds + 0.1, wall: true, on: queue) { [weak self] in self?.checkDeadline() }
     }
 
     private func checkDeadline() {
         guard !closed, cgp.state == .suspended || cgp.state == .resuming, let srDeadline else { return }
-        let left = srDeadline - ContinuousClock.now
+        let left = srDeadline - clock.now()
         if left > .zero {
             // Fired early (the wall clock was stepped): re-arm for what is left on the continuous clock.
             return armDeadline(after: Double(left.components.seconds) + Double(left.components.attoseconds) / 1e18)
@@ -870,10 +945,8 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func scheduleAttempt(after delay: TimeInterval) {
         attemptWork?.cancel()
-        attemptDue = ContinuousClock.now + .seconds(delay)
-        let work = DispatchWorkItem { [weak self] in self?.runAttempt() }
-        attemptWork = work
-        queue.asyncAfter(deadline: .now() + delay, execute: work)
+        attemptDue = clock.now() + .seconds(delay)
+        attemptWork = clock.schedule(after: delay, wall: false, on: queue) { [weak self] in self?.runAttempt() }
     }
 
     private func runAttempt() {
@@ -912,14 +985,12 @@ public final class CGPTransport: @unchecked Sendable {
         write(bind)
         log("→ CGP resume bind (\(bind.count) B): nextSeq \(cgp.receivedSequenced + 1), firstUnacked \(cgp.firstUnacked), " +
             "queue \(cgp.queueCount) packets / \(cgp.queueBytes) B")
-        lastReceived = .now
+        lastReceived = clock.now()
         startTicker()
-        let work = DispatchWorkItem { [weak self] in
+        firstReadTimer = clock.schedule(after: timing.firstReadTimeout, wall: false, on: queue) { [weak self] in
             guard let self, self.cgp.state == .resuming else { return }
             self.attemptFailed("no data within \(Int(self.timing.firstReadTimeout)) s")
         }
-        firstReadTimer = work
-        queue.asyncAfter(deadline: .now() + timing.firstReadTimeout, execute: work)
     }
 
     /// Failure before the resume bind response: back to state 5 and retry while T_sr lasts
@@ -949,7 +1020,7 @@ public final class CGPTransport: @unchecked Sendable {
         log("← CGP resume accepted after \(attempt) attempt(s): sent nextSeq \(result.sentNextSeq), server nextSeq " +
             "\(result.serverNextSeq), queue \(result.queueBefore) → dropped \(result.dropped), retransmitted \(result.retransmitted)")
         onEvent(.resumed(result))
-        lastReceived = .now
+        lastReceived = clock.now()
         startTicker()   // liveness and keepalive restart (§3.12.6 step 8)
     }
 
@@ -961,7 +1032,7 @@ public final class CGPTransport: @unchecked Sendable {
         // Ignore the connection from now on; `finish` closes it after a short grace, so a FINISH_RESPONSE
         // owed in state 6 still leaves.
         generation += 1
-        let info = Self.giveUpInfo(cause, notBefore: (suspendedAt ?? Date()).addingTimeInterval(srTimeoutUsed > 0 ? srTimeoutUsed : srTimeout))
+        let info = Self.giveUpInfo(cause, notBefore: (suspendedAt ?? clock.date()).addingTimeInterval(srTimeoutUsed > 0 ? srTimeoutUsed : srTimeout))
         log("session reliability gave up: \(info.message) (\(cause))")
         onEvent(.gaveUp(info))
         finish("session reliability gave up: \(info.message)")
@@ -1009,7 +1080,7 @@ public final class CGPTransport: @unchecked Sendable {
                 finishing = true
                 cgp.markClosing()
                 write(cgp.finishRequest())
-                queue.asyncAfter(deadline: .now() + timeout) { [weak self] in self?.finish("closed after finish timeout") }
+                clock.schedule(after: timeout, wall: false, on: queue) { [weak self] in self?.finish("closed after finish timeout") }
             } else {
                 let suspended = cgp.state == .suspended || cgp.state == .resuming
                 finish(suspended ? "closed while suspended (no FINISH)" : "closed")
@@ -1035,7 +1106,7 @@ public final class CGPTransport: @unchecked Sendable {
         [deadlineTimer, attemptWork, firstReadTimer].forEach { $0?.cancel() }
         attemptInProgress = false
         // Let queued writes (finish response, logoff) leave before the connection is cancelled.
-        if let stream { queue.asyncAfter(deadline: .now() + 0.5) { stream.close() } }
+        if let stream { clock.schedule(after: 0.5, wall: false, on: queue) { stream.close() } }
         onEvent(.closed(reason))
         let waiters = closeWaiters
         closeWaiters = []
@@ -1047,7 +1118,7 @@ public final class CGPTransport: @unchecked Sendable {
     private func scheduleTestHooks() {
         if let after = testDropAfter {
             testDropAfter = nil
-            queue.asyncAfter(deadline: .now() + after) { [weak self] in
+            clock.schedule(after: after, wall: false, on: queue) { [weak self] in
                 guard let self, !self.closed, self.cgp.state == .connected, let stream = self.stream else { return }
                 self.log("test: dropping the connection abruptly (no FINISH)")
                 stream.abort()
@@ -1056,7 +1127,7 @@ public final class CGPTransport: @unchecked Sendable {
         }
         if let hole = testBlackhole {
             testBlackhole = nil
-            queue.asyncAfter(deadline: .now() + hole.after) { [weak self] in
+            clock.schedule(after: hole.after, wall: false, on: queue) { [weak self] in
                 guard let self, !self.closed, self.cgp.state == .connected, let stream = self.stream else { return }
                 self.log("test: blackhole for \(Int(hole.duration)) s (no reads, no writes)")
                 stream.blackhole(for: hole.duration)

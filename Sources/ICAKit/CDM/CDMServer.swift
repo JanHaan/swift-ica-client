@@ -112,7 +112,7 @@ public final class CDMServer {
         case .close(let ctx):
             if let f = files.removeValue(forKey: ctx) {
                 f.file.close()
-                note("CLOSE ctx \(ctx) \(f.path): read \(f.bytesRead) B, written \(f.bytesWritten) B")
+                note("CLOSE ctx \(ctx) \(f.path.logLabel): read \(f.bytesRead) B, written \(f.bytesWritten) B")
             } else {
                 note("CLOSE ctx \(ctx): unknown handle")
             }
@@ -160,7 +160,7 @@ public final class CDMServer {
                                              date: stamp.date, time: stamp.time))
                 } catch {
                     let st = status(error, missing: CDMStatus.fileNotFound)
-                    if st != CDMStatus.fileNotFound { note("\(name) \(p) → \(CDMStatus.label(st)) (\(error))") }
+                    if st != CDMStatus.fileNotFound { note("\(name) \(p.logLabel) → \(CDMStatus.label(st)) (\(error))") }
                     return reply(.attributes(status: st, size: 0, attributes: 0, date: 0, time: 0))
                 }
             }
@@ -191,7 +191,7 @@ public final class CDMServer {
                 try f.file.setModified(value)
                 return reply(.handleStatus(ctx, status: CDMStatus.success))
             } catch {
-                note("\(name) ctx \(ctx) \(f.path) → \(error)")
+                note("\(name) ctx \(ctx) \(f.path.logLabel) → \(error)")
                 return reply(.handleStatus(ctx, status: status(error)))
             }
 
@@ -208,11 +208,11 @@ public final class CDMServer {
                 do {
                     guard let newName = to.name, CDMNames.isCreatableName(newName) else { throw CDMFSError.pathNotFound }
                     try fileSystem.rename(from, to: to)
-                    note("\(name) \(from) → \(to)")
+                    note("\(name) \(from.logLabel) → \(to.logLabel)")
                     return reply(.rename(status: CDMStatus.success))
                 } catch {
                     let st = status(error, missing: CDMStatus.fileNotFound)
-                    note("\(name) \(from) → \(to): \(CDMStatus.label(st)) (\(error))")
+                    note("\(name) \(from.logLabel) → \(to.logLabel): \(CDMStatus.label(st)) (\(error))")
                     return reply(.rename(status: st))
                 }
             case (.failure(let st), _), (_, .failure(let st)):
@@ -237,10 +237,10 @@ public final class CDMServer {
             guard let f = files[ctx], f.file.writable, !readOnly else { return reply(.handleStatus(ctx, status: denied(name))) }
             do {
                 try f.file.truncate(to: UInt64(size))
-                note("\(name) ctx \(ctx) \(f.path) → \(size) B")
+                note("\(name) ctx \(ctx) \(f.path.logLabel) → \(size) B")
                 return reply(.handleStatus(ctx, status: CDMStatus.success))
             } catch {
-                note("\(name) ctx \(ctx) \(f.path) → \(error)")
+                note("\(name) ctx \(ctx) \(f.path.logLabel) → \(error)")
                 return reply(.handleStatus(ctx, status: status(error)))
             }
 
@@ -318,13 +318,13 @@ public final class CDMServer {
         guard case .success(let p) = path(raw) else { return (CDMWire.noHandle, CDMStatus.pathNotFound) }
         guard !p.isRoot else { return (CDMWire.noHandle, CDMStatus.accessDenied) }
         guard files.count < Self.maxFiles else {
-            note("\(name) \(p): \(Self.maxFiles) handles open")
+            note("\(name) \(p.logLabel): \(Self.maxFiles) handles open")
             return (CDMWire.noHandle, CDMStatus.failure)
         }
         let existing: CDMFileInfo?
         do { existing = try fileSystem.info(p) } catch CDMFSError.notFound { existing = nil } catch {
             let st = status(error)
-            note("\(name) \(p) → \(CDMStatus.label(st)) (\(error))")
+            note("\(name) \(p.logLabel) → \(CDMStatus.label(st)) (\(error))")
             return (CDMWire.noHandle, st)
         }
         let mode: CDMOpenMode
@@ -338,7 +338,7 @@ public final class CDMServer {
             guard createBit else { return (CDMWire.noHandle, CDMStatus.fileNotFoundCreate) }
             if readOnly { return (CDMWire.noHandle, denied(name)) }
             guard CDMNames.isCreatableName(p.name!) else {
-                note("\(name) \(p): a name ending in a dot or space is never created")
+                note("\(name) \(p.logLabel): a name ending in a dot or space is never created")
                 return (CDMWire.noHandle, CDMStatus.pathNotFound)
             }
             mode = .createNew
@@ -351,11 +351,11 @@ public final class CDMServer {
                                               hidden: attributes & CDMAttributes.hidden != 0)
             }
             guard let ctx = allocateFile(file, path: p) else { return (CDMWire.noHandle, CDMStatus.failure) }
-            note(String(format: "%@ %@ access %d disposition %d → ctx %d %@", name, p.description, access, disposition, ctx, action))
+            note(String(format: "%@ %@ access %d disposition %d → ctx %d %@", name, p.logLabel, access, disposition, ctx, action))
             return (ctx, CDMStatus.success)
         } catch {
             let st = status(error, missing: CDMStatus.fileNotFoundCreate, other: CDMStatus.failure)
-            note("\(name) \(p) → \(CDMStatus.label(st)) (\(error))")
+            note("\(name) \(p.logLabel) → \(CDMStatus.label(st)) (\(error))")
             return (CDMWire.noHandle, st)
         }
     }
@@ -367,17 +367,17 @@ public final class CDMServer {
         guard case .success(let p) = path(raw) else { return (CDMWire.noHandle, CDMStatus.pathNotFound) }
         guard !p.isRoot else { return (CDMWire.noHandle, CDMStatus.accessDenied) }
         guard files.count < Self.maxFiles else {
-            note("\(name) \(p): \(Self.maxFiles) handles open")
+            note("\(name) \(p.logLabel): \(Self.maxFiles) handles open")
             return (CDMWire.noHandle, CDMStatus.failure)
         }
         do {
             let file = try fileSystem.open(p, .existing(write: write, truncate: false))
             guard let ctx = allocateFile(file, path: p) else { return (CDMWire.noHandle, CDMStatus.failure) }
-            note(String(format: "%@ %@ mode 0x%02X → ctx %d", name, p.description, mode, ctx))
+            note(String(format: "%@ %@ mode 0x%02X → ctx %d", name, p.logLabel, mode, ctx))
             return (ctx, CDMStatus.success)
         } catch {
             let st = status(error, missing: CDMStatus.fileNotFound, other: CDMStatus.failure)
-            if st != CDMStatus.fileNotFound { note("\(name) \(p) → \(CDMStatus.label(st)) (\(error))") }
+            if st != CDMStatus.fileNotFound { note("\(name) \(p.logLabel) → \(CDMStatus.label(st)) (\(error))") }
             return (CDMWire.noHandle, st)
         }
     }
@@ -389,7 +389,7 @@ public final class CDMServer {
             f.bytesRead += data.count
             return (data, CDMStatus.success)
         } catch {
-            note("READ ctx \(ctx) \(f.path) at \(offset) → \(error)")
+            note("READ ctx \(ctx) \(f.path.logLabel) at \(offset) → \(error)")
             return (Data(), status(error, other: CDMStatus.failure))
         }
     }
@@ -401,7 +401,7 @@ public final class CDMServer {
             f.bytesWritten += n
             return (UInt16(clamping: n), CDMStatus.success)
         } catch {
-            note("WRITE ctx \(ctx) \(f.path) \(data.count) B at \(offset) → \(error)")
+            note("WRITE ctx \(ctx) \(f.path.logLabel) \(data.count) B at \(offset) → \(error)")
             return (0, status(error, other: CDMStatus.failure))
         }
     }
@@ -417,11 +417,11 @@ public final class CDMServer {
         case .success(let p):
             do {
                 try body(p)
-                note("\(name) \(p)")
+                note("\(name) \(p.logLabel)")
                 return CDMStatus.success
             } catch {
                 let st = status(error, missing: missing, other: other)
-                note("\(name) \(p) → \(CDMStatus.label(st)) (\(error))")
+                note("\(name) \(p.logLabel) → \(CDMStatus.label(st)) (\(error))")
                 return st
             }
         }
@@ -452,11 +452,11 @@ public final class CDMServer {
         do { infos = try fileSystem.list(directory) } catch {
             let st = (error as? CDMFSError) == .notDirectory ? CDMStatus.pathNotFound
                 : status(error, missing: CDMStatus.pathNotFoundSearch, path: CDMStatus.pathNotFoundSearch)
-            note("\(name) \(parsed) → \(CDMStatus.label(st)) (\(error))")
+            note("\(name) \(parsed.logLabel) → \(CDMStatus.label(st)) (\(error))")
             return (CDMWire.noHandle, st, 0, Data())
         }
         let valid = infos.filter { CDMNames.isValidName($0.name) }
-        if valid.count < infos.count { note("\(name) \(directory): \(infos.count - valid.count) names not valid on Windows left out") }
+        if valid.count < infos.count { note("\(name) \(directory.logLabel): \(infos.count - valid.count) names not valid on Windows left out") }
         let keyed = valid.map { (key: CDMNames.fold($0.name), info: $0) }.sorted { $0.key < $1.key }
         let sorted = keyed.map(\.info)
         let names = Set(keyed.map(\.key))
@@ -470,7 +470,7 @@ public final class CDMServer {
             let entry = CDMFindEntry(stamp: stamp, size: Self.clamp(info.size), attributes: attributes(info),
                                      shortName: short, longName: long).encode(utf8: utf8)
             if size + entry.count > maxRetainedFindBytes {
-                note("\(name) \(parsed): listing cut at \(entries.count) entries (\(maxRetainedFindBytes >> 20) MiB)")
+                note("\(name) \(parsed.logLabel): listing cut at \(entries.count) entries (\(maxRetainedFindBytes >> 20) MiB)")
                 break
             }
             size += entry.count
@@ -479,11 +479,11 @@ public final class CDMServer {
         var search = Search(entries: entries, size: size, next: min(max(0, start), entries.count), path: parsed, used: 0)
         let (count, bytes) = batch(&search, bufferSize: bufferSize, maxEntries: maxEntries)
         guard search.next < search.entries.count else {
-            note("\(name) \(parsed) → \(count) of \(entries.count), complete")
+            note("\(name) \(parsed.logLabel) → \(count) of \(entries.count), complete")
             return (CDMWire.noHandle, CDMStatus.noMoreFiles, count, bytes)
         }
         let ctx = allocateSearch(search)
-        note("\(name) \(parsed) → \(count) of \(entries.count), find ctx \(ctx)")
+        note("\(name) \(parsed.logLabel) → \(count) of \(entries.count), find ctx \(ctx)")
         return (ctx, CDMStatus.success, count, bytes)
     }
 
