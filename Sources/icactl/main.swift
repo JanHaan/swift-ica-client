@@ -256,15 +256,30 @@ case "audiotest":
     // itself it makes Notepad play the "cannot find" sound with keys only (Ctrl+F, "zzqxj", Enter, then Esc,
     // Esc) and writes the decoded audio to .session/audiotest.wav. Plays nothing aloud unless
     // ICA_AUDIOTEST_PLAY=1. Never saves the document; logs off only its own fresh session.
+    // "Sound ABC" / "Sound XYZ" (the Windows Sound control panel): screenshot of its window to
+    // .session/audiotest-sound-0.png; only with ICA_AUDIOTEST_KEYS (e.g. "ctrl+tab,tab,alt+t") exactly those keys,
+    // 1.5 s apart, a screenshot after each (-<n>.png). No other input; Enter/Space only if written in the sequence.
     let name = args.first ?? "Notepad"
-    guard name == "Notepad" else { fail("audiotest is limited to \"Notepad\"") }
+    let soundApps = ["Sound ABC", "Sound XYZ"]
+    guard name == "Notepad" || soundApps.contains(name) else {
+        fail("audiotest is limited to \"Notepad\", \"Sound ABC\" and \"Sound XYZ\"")
+    }
+    let keysText = soundApps.contains(name) ? ProcessInfo.processInfo.environment["ICA_AUDIOTEST_KEYS"] : nil
+    if !soundApps.contains(name), ProcessInfo.processInfo.environment["ICA_AUDIOTEST_KEYS"] != nil {
+        fail("ICA_AUDIOTEST_KEYS applies only to the Sound apps")
+    }
     let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
     do {
+        // Validate the sequence before anything is launched (layout-independent check; the real parse uses the
+        // session's layout below).
+        if let keysText { _ = try AudioTestKeys.parse(keysText, keyboardLayout: 0x0409) }
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
         guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runAudioTest(ica: ica, play: ProcessInfo.processInfo.environment["ICA_AUDIOTEST_PLAY"] == "1")
+        let keys = try keysText.map { try AudioTestKeys.parse($0, keyboardLayout: WDLogon(ica: ica).keyboardLayout) }
+        try await runAudioTest(ica: ica, play: ProcessInfo.processInfo.environment["ICA_AUDIOTEST_PLAY"] == "1",
+                               soundApp: soundApps.contains(name) ? name : nil, keys: keys)
     } catch {
         fail("\(error)")
     }
@@ -303,9 +318,11 @@ default:
       icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
                                          .session/printtest-dialog.png, then Esc; ICA_PRINTTEST_CONFIRM=1: Enter only once
                                          .session/printtest-confirm-<runid> appears (120 s), job to .session/printtest.pdf
-      icactl audiotest                   audio test in "Notepad": CTXCAM log (INIT, credits, formats), Notepad's
+      icactl audiotest [resource]        audio test in "Notepad": CTXCAM log (INIT, credits, formats), Notepad's
                                          "cannot find" sound via keys, decoded audio to .session/audiotest.wav; never
                                          opens the microphone; ICA_AUDIOTEST_PLAY=1 also plays it aloud
+                                         "Sound ABC"/"Sound XYZ": window screenshot .session/audiotest-sound-0.png; keys
+                                         only from ICA_AUDIOTEST_KEYS="ctrl+tab,tab,alt+t" (1.5 s apart, screenshot each)
       icactl sessions list [--names]     store sessions (Sessions/List + ListAvailable), read-only; ids as fingerprints
       icactl sessions probe              read-only live checks of docs/90 §11 items 1, 2, 4–7 (keys, counts, states)
       icactl sessions disconnect <id>    Sessions/DisconnectSessions; only sessions whose apps are all test resources
@@ -1451,12 +1468,17 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
 
 // MARK: - Audio test (docs/98 §14)
 
-func runAudioTest(ica: ICAFile, play: Bool) async throws {
+func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [AudioTestKeyStep]? = nil) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
     let wavURL = sessionDir.appendingPathComponent("audiotest.wav")
     if let old = try? FileManager.default.contentsOfDirectory(at: sessionDir, includingPropertiesForKeys: nil) {
-        for url in old where url.lastPathComponent.hasPrefix("audiotest") && url.pathExtension == "wav" { try? FileManager.default.removeItem(at: url) }
+        for url in old where url.lastPathComponent.hasPrefix("audiotest") && ["wav", "png"].contains(url.pathExtension) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+    if let soundApp {
+        say("resource \(soundApp): " + (keys.map { "keys \($0.map(\.description).joined(separator: ", "))" } ?? "no ICA_AUDIOTEST_KEYS: screenshot only, no input"))
     }
     let observe = env["ICA_AUDIOTEST_OBSERVE"].flatMap(Double.init) ?? 60
     var audioConfig = AudioEngine.Config()
@@ -1572,11 +1594,22 @@ func runAudioTest(ica: ICAFile, play: Bool) async throws {
             return key.contains("notepad") || key == "app:editor ekm"
         }
     }
+    // The Sound app's window: by published app key, executable, or title.
+    let soundWindow: () -> UInt32? = {
+        appWindows.first { id in
+            let key = windowsSeen.appKey(id)?.lowercased() ?? ""
+            if let soundApp, key == "app:" + soundApp.lowercased() { return true }
+            if let exe = windowsSeen.single(id, seamless.model),
+               ["rundll32.exe", "control.exe", "systemsettings.exe"].contains(GuardedLogoff.basename(exe).lowercased()) { return true }
+            return seamless.model.windows[id]?.title.lowercased().contains("sound") == true
+        }
+    }
+    let appWindow: () -> UInt32? = soundApp == nil ? notepad : soundWindow
     // L1/L2: what the host sends on ch 19 without any sound (INIT, CAPINFO at session start).
-    let found = await waitFor(session, 150) { logon.isFresh && notepad() != nil }
+    let found = await waitFor(session, 150) { logon.isFresh && appWindow() != nil }
     try await Task.sleep(nanoseconds: 5_000_000_000)
     let fresh = await onSession(session) { logon.isFresh }
-    let target = await onSession(session) { notepad() }
+    let target = await onSession(session) { appWindow() }
     let before = await onSession(session) { audio.diagnostics }
     say("before any sound: \(before.hostBytes) B on ch 19, INIT \(before.initVersion.map(String.init) ?? "none"), "
         + "CAPINFO \(before.hostCapInfo.isEmpty ? "none" : "dev \(before.hostCapInfo.keys.sorted())"), OPEN \(before.openCount)")
@@ -1585,7 +1618,10 @@ func runAudioTest(ica: ICAFile, play: Bool) async throws {
     if !fresh {
         say("not a fresh logon by this run: no input is sent (this may be an existing session)")
     } else if !found || target == nil {
-        say("no Notepad window: no input is sent")
+        say("no \(soundApp ?? "Notepad") window: no input is sent")
+    } else if soundApp != nil, let target {
+        steps += try await soundAppSteps(session: session, target: target, keys: keys, observe: observe)
+        soundTriggered = keys != nil
     } else if let target {
         // L3: Notepad's "cannot find" message plays the system sound. Keys only, into Notepad only.
         let scratch = NotepadScratch(session: session, target: target)
@@ -1774,4 +1810,77 @@ final class NotepadScratch {
         try await Task.sleep(nanoseconds: 1_000_000_000)
         return "cleanup: Ctrl+A, Delete in this run's tab (nothing saved)"
     }
+}
+
+// MARK: - Audio test with the Sound control panel
+
+/// Framebuffer crop (0600) of `target` (plus the foreground window if another one is in front, e.g. a dialog
+/// it opened), after a full redraw request.
+func audioTestScreenshot(_ session: ICASession, target: UInt32, index: Int) async -> String {
+    let url = sessionDir.appendingPathComponent("audiotest-sound-\(index).png")
+    session.send { wd, _ in wd.redraw() }
+    try? await Task.sleep(nanoseconds: 700_000_000)
+    return await onSession(session) {
+        let model = session.seamless.model
+        guard let fb = session.thinwire.framebuffer, let w = model.windows[target] else { return "screenshot \(index): no framebuffer or window" }
+        var r = w.windowRect
+        var titles = ["\"\(w.title)\""]
+        if let front = model.foregroundWindow, front != target, let f = model.windows[front], f.kind == .appWindow {
+            r = TWIRect(left: min(r.left, f.windowRect.left), top: min(r.top, f.windowRect.top),
+                        right: max(r.right, f.windowRect.right), bottom: max(r.bottom, f.windowRect.bottom))
+            titles.append("foreground \(front) \"\(f.title)\"")
+        }
+        let rect = CGRect(x: Int(r.left), y: Int(r.top), width: Int(r.right - r.left), height: Int(r.bottom - r.top))
+        guard fb.writePNG(to: url, rect: rect) else { return "screenshot \(index): FAILED (empty crop \(rect))" }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return "screenshot \(index): \(url.path) (\(Int(rect.width))x\(Int(rect.height)), \(titles.joined(separator: ", ")))"
+    }
+}
+
+/// The Sound app part of `audiotest`: window title and screenshot 0; then, only if a sequence was given, exactly
+/// those keys, 1.5 s apart, a screenshot after each, and the ch 19 activity per step. Returns the step lines.
+func soundAppSteps(session: ICASession, target: UInt32, keys: [AudioTestKeyStep]?, observe: Double) async throws -> [String] {
+    guard let audio = session.audio else { return ["no audio engine"] }
+    var steps: [String] = []
+    let title = await onSession(session) { session.seamless.model.windows[target]?.title ?? "?" }
+    say("sound app window \(target) \"\(title)\"")
+    steps.append("window \(target) \"\(title)\"")
+    session.send { _, twi in twi.activate(windowId: target) }
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+    steps.append(await audioTestScreenshot(session, target: target, index: 0))
+    say(steps.last!)
+    guard let keys else {
+        steps.append("ICA_AUDIOTEST_KEYS not set: no input sent")
+        say(steps.last!)
+        return steps
+    }
+    for (n, step) in keys.enumerated() {
+        guard !session.isClosed else {
+            steps.append("session closed before step \(n + 1)")
+            break
+        }
+        let before = await onSession(session) { (audio.diagnostics.openCount, audio.diagnostics.writes) }
+        say("key \(n + 1)/\(keys.count): \(step)")
+        session.sendInput { wd in
+            for m in step.modifiers { wd.keyScancode(m, up: false) }
+            if step.extended {
+                wd.keyScancodes([0xE0, step.scancode], up: false)
+                wd.keyScancodes([0xE0, step.scancode], up: true)
+            } else {
+                wd.keyScancode(step.scancode, up: false)
+                wd.keyScancode(step.scancode, up: true)
+            }
+            for m in step.modifiers.reversed() { wd.keyScancode(m, up: true) }
+        }
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let shot = await audioTestScreenshot(session, target: target, index: n + 1)
+        let after = await onSession(session) { (audio.diagnostics.openCount, audio.diagnostics.writes) }
+        steps.append("step \(n + 1) \(step.text): ch 19 +\(after.0 - before.0) OPEN, +\(after.1 - before.1) WRITEs; \(shot)")
+        say(steps.last!)
+    }
+    // A test sound may start late or last a few seconds; L4: when does the host CLOSE?
+    say("observing ch 19 for \(Int(observe)) s (L4: CLOSE timing)")
+    let deadline = Date().addingTimeInterval(observe)
+    while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 500_000_000) }
+    return steps
 }
