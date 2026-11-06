@@ -720,6 +720,12 @@ public enum SessionDirectory {
         return here ? .connectedHere : .connectedElsewhere(clientName: s.clientName, deviceType: s.deviceType)
     }
 
+    /// Sessions that may be offered as a plain Reconnect (§9.5, §8.5): listed by id, disconnected in
+    /// `Sessions/List`, joined one-to-one with a ListAvailable entry. Never one open elsewhere.
+    public static func reconnectable(_ rows: [StoreSession]) -> [StoreSession] {
+        rows.filter { $0.id != nil && $0.state == .disconnected && !$0.joinAmbiguous && $0.reconnect != nil && $0.takeOver == nil }
+    }
+
     /// Joins `Sessions/List` with the two `ListAvailable` answers (§7.2).
     /// - `available`: without `excludeActive` (disconnected and connected-elsewhere sessions).
     /// - `excludingActive`: with `excludeActive=true`; nil if that call failed.

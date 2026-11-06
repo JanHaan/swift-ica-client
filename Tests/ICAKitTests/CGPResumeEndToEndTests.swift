@@ -6,7 +6,8 @@ import Network
 /// In-process CGP server on loopback TCP (no TLS), written from docs/20 §3.3–3.12 on the server
 /// side: counts the client's sequenced packets, acks them, keeps its own retransmit queue, and
 /// answers a resume bind with nextSeq = received + 1 followed by its unacknowledged packets.
-/// All state lives on `queue`.
+/// All state lives on `queue`. Nothing runs on a timer: keepalives go out when the test calls
+/// `sendKeepalive`, so their timing is explicit relative to the client's manual clock.
 final class FakeCGPServer: @unchecked Sendable {
     struct Bind {
         var reconnect: UInt8
@@ -64,7 +65,7 @@ final class FakeCGPServer: @unchecked Sendable {
     private var cookie: [UInt8] = Array(repeating: 0xa1, count: 16)
     private var ticket: [UInt8] = Array(repeating: 0x54, count: 87)
     private var ticketType: UInt8 = 0x02
-    private var keepaliveTimer: DispatchSourceTimer?
+    private(set) var keepalivesSent = 0
 
     func start() async throws {
         let parameters = NWParameters.tcp
@@ -85,16 +86,16 @@ final class FakeCGPServer: @unchecked Sendable {
             listener.start(queue: queue)
         }
         port = listener.port?.rawValue ?? 0
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + .milliseconds(Int(keepaliveMs)), repeating: .milliseconds(Int(keepaliveMs)))
-        timer.setEventHandler { [weak self] in self?.write(Data([0x03, 0x05, 0x08, 0x00])) }
-        timer.resume()
-        keepaliveTimer = timer
+    }
+
+    /// One server keepalive (what a keepalive timer with `keepaliveMs` would send). Call on `queue`.
+    func sendKeepalive() {
+        keepalivesSent += 1
+        write(Data([0x03, 0x05, 0x08, 0x00]))
     }
 
     func stop() {
         queue.sync {
-            keepaliveTimer?.cancel()
             connection?.cancel()
             listener?.cancel()
         }
@@ -115,11 +116,13 @@ final class FakeCGPServer: @unchecked Sendable {
         let current = generation
         c.start(queue: queue)
         receive(c, current)
+        TestSignal.shared.notify()
     }
 
     private func receive(_ c: NWConnection, _ current: Int) {
         c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
             guard let self, current == self.generation else { return }
+            defer { TestSignal.shared.notify() }
             if let data, !data.isEmpty, !self.stalled { self.consume(data) }
             if complete || error != nil {
                 if current == self.generation { self.connection = nil }
@@ -139,6 +142,7 @@ final class FakeCGPServer: @unchecked Sendable {
         generation += 1
         connection?.cancel()
         connection = nil
+        TestSignal.shared.notify()
     }
 
     // MARK: Server → client
@@ -328,9 +332,12 @@ final class U32Stream: @unchecked Sendable {
     }
 }
 
-/// The client side: a `CGPTransport` with short timings, collecting ICA bytes and events.
+
+/// The client side: a `CGPTransport` on a manual clock with short timings, collecting ICA bytes and
+/// events. Its timers only run when the test advances `clock`; the network is real (loopback).
 final class ResumeClient: @unchecked Sendable {
     let queue = DispatchQueue(label: "test.cgp.client")
+    let clock = ManualCGPClock()
     let transport: CGPTransport
     let stream = U32Stream()
     /// Mark the transport established at the detect string (the real session waits for Thinwire INIT).
@@ -338,17 +345,22 @@ final class ResumeClient: @unchecked Sendable {
     private let lock = NSLock()
     private var _ica = Data()
     private var _events: [String] = []
+    private var _logs: [String] = []
+    private var _keepalives = 0
+    private var _closedAt: TimeInterval?
     private var _giveUp: CGPTransport.GiveUp?
     private var _resumes: [CGPSession.ResumeResult] = []
     private var _detect = false
     private var _closed = false
 
     init(port: UInt16, configure: (inout CGPTransport.Timing) -> Void = { _ in }) {
-        transport = CGPTransport(host: "127.0.0.1", port: port, tls: false, ticket: "STA-TICKET", queue: queue)
+        _ = TestCPULoad.started
+        transport = CGPTransport(host: "127.0.0.1", port: port, tls: false, ticket: "STA-TICKET", queue: queue, clock: clock)
         var timing = CGPTransport.Timing()
         timing.startDelay = 0.05
         timing.retryDelay = 0.05
-        timing.connectTimeout = 2
+        // TLSStream's connect timeout runs on real time: only a hang guard here.
+        timing.connectTimeout = 30
         timing.firstReadTimeout = 2
         timing.tick = 0.05
         timing.livenessInterval = 0.1
@@ -359,7 +371,6 @@ final class ResumeClient: @unchecked Sendable {
 
     private func record(_ event: CGPTransport.Event) {
         lock.lock()
-        defer { lock.unlock() }
         switch event {
         case .data(let d): _ica.append(d)
         case .detect:
@@ -369,32 +380,52 @@ final class ResumeClient: @unchecked Sendable {
         case .resuming(let n): _events.append("resuming \(n)")
         case .resumed(let r): _resumes.append(r); _events.append("resumed")
         case .gaveUp(let g): _giveUp = g; _events.append("gave up")
-        case .closed(let reason): _closed = true; _events.append("closed: \(reason)")
-        case .log, .bound, .channelOpened, .keepalive: break
+        case .closed(let reason): _closed = true; _closedAt = clock.elapsed; _events.append("closed: \(reason)")
+        case .keepalive: _keepalives += 1
+        case .log(let text): _logs.append(text)
+        case .bound, .channelOpened: break
         }
+        lock.unlock()
+        TestSignal.shared.notify()
     }
 
     private func read<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
     var ica: Data { read { _ica } }
     var events: [String] { read { _events } }
+    var logs: [String] { read { _logs } }
+    /// Server keepalives received.
+    var keepalives: Int { read { _keepalives } }
+    /// Clock time of the close.
+    var closedAt: TimeInterval? { read { _closedAt } }
     var giveUp: CGPTransport.GiveUp? { read { _giveUp } }
     var resumes: [CGPSession.ResumeResult] { read { _resumes } }
     var sawDetect: Bool { read { _detect } }
     var closed: Bool { read { _closed } }
+    var suspensions: Int { read { _events.filter { $0.hasPrefix("suspended") }.count } }
+    var attemptsStarted: Int { read { _events.filter { $0.hasPrefix("resuming") }.count } }
 
     func sendChunk(_ count: Int) {
         let data = stream.next(count)
         transport.send(data, piggybackAck: true)
     }
-}
 
-private func waitUntil(_ timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
-    let end = Date().addingTimeInterval(timeout)
-    while Date() < end {
-        if condition() { return true }
-        try? await Task.sleep(nanoseconds: 10_000_000)
+    /// Time passes on the client (system awake).
+    func advance(_ seconds: TimeInterval) { clock.advance(by: seconds) }
+
+    /// Advances in `step`s until `condition` holds (checked between steps; timers record their
+    /// events synchronously), at most `limit` s.
+    @discardableResult
+    func advance(step: TimeInterval = 0.05, limit: TimeInterval, until condition: () -> Bool) -> Bool {
+        var elapsed = 0.0
+        while !condition(), elapsed < limit {
+            clock.advance(by: step)
+            elapsed += step
+        }
+        return condition()
     }
-    return condition()
+
+    /// Everything handed to the transport queue so far (`perform` from outside is async) has run.
+    func barrier() { queue.sync {} }
 }
 
 /// Starts server and client and waits for the detect exchange.
@@ -405,12 +436,13 @@ private func connectPair(configureServer: (FakeCGPServer) -> Void = { _ in },
     try await server.start()
     let client = ResumeClient(port: server.port, configure: timing)
     try await client.transport.start()
-    let ready = await waitUntil { client.sawDetect && server.sync { server.detectReplies == 1 } }
+    let ready = await eventually { client.sawDetect && server.sync { server.detectReplies == 1 } }
     #expect(ready, "detect exchange")
     return (server, client)
 }
 
-/// Sends `rounds` chunks each way, alternating, with a short pause.
+/// Sends `rounds` chunks each way, alternating, with a short pause (interleaving only; no time
+/// passes on the client's clock).
 private func exchange(_ server: FakeCGPServer, _ client: ResumeClient, rounds: Int) async {
     for i in 0..<rounds {
         client.sendChunk(1 + i % 7)
@@ -419,11 +451,61 @@ private func exchange(_ server: FakeCGPServer, _ client: ResumeClient, rounds: I
     }
 }
 
+/// `seconds` pass on the client in steps of the server's keepalive interval. Each step starts with
+/// a server keepalive (what the server's keepalive timer sends); with `delivered`, the client has
+/// received it before its clock moves on. Stops early once `until` holds; returns `until()`.
+@discardableResult
+private func pump(_ server: FakeCGPServer, _ client: ResumeClient, _ seconds: TimeInterval, delivered: Bool = true,
+                  until: () -> Bool = { false }, sourceLocation: SourceLocation = #_sourceLocation) async -> Bool {
+    let step = Double(server.sync { server.keepaliveMs }) / 1000
+    var elapsed = 0.0
+    while elapsed < seconds - 1e-9, !until() {
+        let before = client.keepalives
+        server.sync { server.sendKeepalive() }
+        if delivered {
+            #expect(await eventually { client.keepalives > before }, "server keepalive delivered", sourceLocation: sourceLocation)
+        }
+        let d = min(step, seconds - elapsed)
+        client.advance(d)
+        elapsed += d
+    }
+    return until()
+}
+
+/// The start or retry delay passes until resume attempt `n` begins.
+private func startAttempt(_ client: ResumeClient, _ n: Int, sourceLocation: SourceLocation = #_sourceLocation) {
+    client.barrier()
+    #expect(client.advance(limit: 5) { client.attemptsStarted >= n }, "attempt \(n) started: \(client.events)", sourceLocation: sourceLocation)
+}
+
+/// Resume attempt `n` has failed (the retry is scheduled).
+private func expectAttemptFailed(_ client: ResumeClient, _ n: Int, sourceLocation: SourceLocation = #_sourceLocation) async {
+    #expect(await eventually { client.logs.contains { $0.hasPrefix("resume attempt \(n) failed") } },
+            "attempt \(n) failed: \(client.events)", sourceLocation: sourceLocation)
+    client.barrier()
+}
+
+/// Suspension `n` happens, the start delay passes and resume `n` completes.
+private func expectResume(_ client: ResumeClient, _ n: Int, _ comment: String = "", sourceLocation: SourceLocation = #_sourceLocation) async {
+    #expect(await eventually { client.suspensions >= n }, "suspension \(n) \(comment): \(client.events)", sourceLocation: sourceLocation)
+    startAttempt(client, client.attemptsStarted + 1, sourceLocation: sourceLocation)
+    #expect(await eventually { client.resumes.count >= n }, "resume \(n) \(comment): \(client.events)", sourceLocation: sourceLocation)
+}
+
+/// `close(timeout:)` from CONNECTED: FINISH goes out; the fake server never answers it, so the close
+/// timeout passes on the client's clock.
+private func closeConnected(_ client: ResumeClient, _ server: FakeCGPServer, timeout: TimeInterval) async {
+    let closing = Task { await client.transport.close(timeout: timeout) }
+    #expect(await eventually { server.sync { server.finishRequests } >= 1 }, "FINISH request on the wire")
+    client.advance(timeout)
+    await closing.value
+}
+
 /// Both streams complete, without gap or duplicate.
 private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClient, sourceLocation: SourceLocation = #_sourceLocation) async {
     let clientTotal = client.stream.produced
     let serverTotal = server.sync { server.stream.produced }
-    let done = await waitUntil {
+    let done = await eventually {
         client.ica.count == Int(serverTotal) * 4 && server.sync { server.clientICA.count } == Int(clientTotal) * 4
     }
     #expect(done, "streams complete: client got \(client.ica.count / 4)/\(serverTotal), server got \(server.sync { server.clientICA.count } / 4)/\(clientTotal)", sourceLocation: sourceLocation)
@@ -431,6 +513,10 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let toServer = server.sync { server.clientICA }
     #expect(U32Stream.verify(toServer, count: clientTotal) == nil, "client → server: \(U32Stream.verify(toServer, count: clientTotal) ?? "")", sourceLocation: sourceLocation)
 }
+
+/// Session reliability against the fake server (docs/20 §3.12, D27, D50). Every client timer runs
+/// on the client's manual clock, so load can delay these tests but not change their outcome.
+@Suite struct CGPResumeEndToEndTests {
 
 @Test func resumeAfterServerDropKeepsBothStreamsIntact() async throws {
     let (server, client) = try await connectPair()
@@ -442,14 +528,14 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
         server.loseOnDrop = 3
     }
     await exchange(server, client, rounds: 30)   // continues while suspended: queued on both sides
-    #expect(await waitUntil { client.resumes.count == 1 }, "first resume: \(client.events)")
+    await expectResume(client, 1, "first resume")
     await exchange(server, client, rounds: 20)
     await expectStreamsComplete(server, client)
 
     // A second drop: the resume bind must carry the cookie and ticket of the last resume response.
     server.queue.async { server.drop() }
     await exchange(server, client, rounds: 10)
-    #expect(await waitUntil { client.resumes.count == 2 }, "second resume: \(client.events)")
+    await expectResume(client, 2, "second resume")
     await expectStreamsComplete(server, client)
 
     let binds = server.sync { server.binds }
@@ -468,7 +554,8 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     #expect(first.dropped + first.retransmitted == first.queueBefore)
     let status = client.transport.status
     #expect(status.state == .connected && status.ackOverrun == 0)
-    await client.transport.close(timeout: 1)
+    await closeConnected(client, server, timeout: 1)
+    #expect(client.events.last == "closed: closed after finish timeout", "\(client.events)")
     #expect(server.sync { server.finishRequests } == 1)   // FINISH only from CONNECTED
 }
 
@@ -482,9 +569,15 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let client = ResumeClient(port: server.port)
     client.transport.testDropAfter = 0.4
     try await client.transport.start()
-    #expect(await waitUntil { client.sawDetect })
-    await exchange(server, client, rounds: 30)
-    #expect(await waitUntil { client.resumes.count == 1 }, "\(client.events)")
+    #expect(await eventually { client.sawDetect })
+    await exchange(server, client, rounds: 15)
+    client.advance(0.4)                          // the drop hook fires
+    #expect(client.suspensions == 1, "\(client.events)")
+    await exchange(server, client, rounds: 15)   // queued while suspended
+    startAttempt(client, 1)
+    await expectAttemptFailed(client, 1)
+    startAttempt(client, 2)
+    #expect(await eventually { client.resumes.count == 1 }, "\(client.events)")
     await exchange(server, client, rounds: 10)
     await expectStreamsComplete(server, client)
     #expect(client.events.filter { $0.hasPrefix("resuming") }.count == 2)
@@ -498,7 +591,9 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     defer { server.stop() }
     await exchange(server, client, rounds: 5)
     server.queue.async { server.drop() }
-    #expect(await waitUntil { client.closed }, "\(client.events)")
+    #expect(await eventually { client.suspensions == 1 }, "\(client.events)")
+    startAttempt(client, 1)
+    #expect(await eventually { client.closed }, "\(client.events)")
     guard let g = client.giveUp else { Issue.record("no give-up"); return }
     if case .refused(.refused) = g.cause {} else { Issue.record("cause \(g.cause)") }
     #expect(g.message == "The session could not be resumed." && g.offerRelaunch)
@@ -510,9 +605,12 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let (server, client) = try await connectPair { $0.finishResumeReason = 0x11 }
     defer { server.stop() }
     server.queue.async { server.drop() }
-    #expect(await waitUntil { client.closed }, "\(client.events)")
+    #expect(await eventually { client.suspensions == 1 }, "\(client.events)")
+    startAttempt(client, 1)
+    #expect(await eventually { client.closed }, "\(client.events)")
     #expect(client.giveUp?.message == "The gateway rejected the reconnect ticket.")
-    try? await Task.sleep(nanoseconds: 200_000_000)
+    // The FINISH_RESPONSE is on the wire before the give-up; wait for the server to read it.
+    #expect(await eventually { server.sync { server.finishResponses } >= 1 })
     #expect(server.sync { (server.finishRequests, server.finishResponses) } == (0, 1))
 }
 
@@ -520,13 +618,19 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     // Cap 9 timeout 1 s is T_sr; every new connection is rejected.
     let (server, client) = try await connectPair { $0.srTimeout = 1 }
     defer { server.stop() }
-    let started = Date()
-    server.queue.async {
+    let started = client.clock.elapsed
+    server.sync {
         server.rejectConnections = true
         server.drop()
     }
-    #expect(await waitUntil(5) { client.closed }, "\(client.events)")
-    let elapsed = Date().timeIntervalSince(started)
+    #expect(await eventually { client.suspensions == 1 }, "\(client.events)")
+    for n in 1...2 {
+        startAttempt(client, n)
+        await expectAttemptFailed(client, n)
+    }
+    // Retries go on until the T_sr timer (a wall timer) ends SR.
+    #expect(client.advance(limit: 5) { client.closed }, "\(client.events)")
+    let elapsed = (client.closedAt ?? .infinity) - started
     #expect(elapsed >= 1 && elapsed < 3, "gave up after \(elapsed) s")
     if case .deadline = client.giveUp?.cause {} else { Issue.record("cause \(String(describing: client.giveUp?.cause))") }
     #expect(client.transport.status.attempts >= 2)
@@ -537,11 +641,13 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let (server, client) = try await connectPair(configureServer: { $0.keepaliveMs = 100 }) { $0.livenessMinimum = 0.5 }
     defer { server.stop() }
     await exchange(server, client, rounds: 10)
-    try? await Task.sleep(nanoseconds: 800_000_000)
+    await pump(server, client, 0.8)
     #expect(client.events.isEmpty, "keepalives keep the link alive: \(client.events)")
-    server.queue.async { server.stalled = true }
+    server.sync { server.stalled = true }
     await exchange(server, client, rounds: 10)
-    #expect(await waitUntil(5) { client.resumes.count == 1 }, "\(client.events)")
+    // Stalled: the keepalives are not written, nothing arrives, liveness suspends.
+    #expect(await pump(server, client, 2, delivered: false) { client.suspensions == 1 }, "\(client.events)")
+    await expectResume(client, 1)
     #expect(client.events.first?.contains("nothing received") == true, "\(client.events)")
     await exchange(server, client, rounds: 10)
     await expectStreamsComplete(server, client)
@@ -554,7 +660,7 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
         server.rejectConnections = true
         server.drop()
     }
-    #expect(await waitUntil { client.events.contains { $0.hasPrefix("suspended") } })
+    #expect(await eventually { client.events.contains { $0.hasPrefix("suspended") } })
     await client.transport.close(timeout: 1)
     #expect(client.closed && client.giveUp == nil)
     #expect(client.events.last == "closed: closed while suspended (no FINISH)")
@@ -562,17 +668,22 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
 }
 
 @Test func blackholeHookStallsTheSocketUntilLivenessSuspends() async throws {
-    // ICA_TEST_BLACKHOLE_AFTER=0.3:3 equivalent: no reads or writes for 3 s → liveness (0.5 s) suspends.
+    // ICA_TEST_BLACKHOLE_AFTER=0.3:60 equivalent: no reads or writes for 60 s (real) while the
+    // server keeps sending keepalives → liveness (0.5 s) suspends.
     let server = FakeCGPServer()
     server.keepaliveMs = 100
     try await server.start()
     defer { server.stop() }
     let client = ResumeClient(port: server.port) { $0.livenessMinimum = 0.5 }
-    client.transport.configureTestHooks(from: ["ICA_TEST_BLACKHOLE_AFTER": "0.3:3"])
+    client.transport.configureTestHooks(from: ["ICA_TEST_BLACKHOLE_AFTER": "0.3:60"])
     try await client.transport.start()
-    #expect(await waitUntil { client.sawDetect })
+    #expect(await eventually { client.sawDetect })
     await exchange(server, client, rounds: 10)
-    #expect(await waitUntil(5) { client.resumes.count == 1 }, "\(client.events)")
+    await pump(server, client, 0.3)              // healthy until the hook fires at 0.3 s
+    #expect(client.events.isEmpty, "\(client.events)")
+    #expect(client.logs.contains { $0.hasPrefix("test: blackhole") }, "hook fired")
+    #expect(await pump(server, client, 2, delivered: false) { client.suspensions == 1 }, "\(client.events)")
+    await expectResume(client, 1)
     #expect(client.events.first?.contains("nothing received") == true, "\(client.events)")
     await exchange(server, client, rounds: 10)
     await expectStreamsComplete(server, client)
@@ -581,13 +692,17 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
 @Test func wakeCheckSuspendsWhenNothingArrives() async throws {
     let (server, client) = try await connectPair(configureServer: { $0.keepaliveMs = 100 }) { $0.wakeCheckMinimum = 0.3 }
     defer { server.stop() }
-    client.transport.systemDidWake()   // link alive: the keepalive is answered by data, no suspend
-    try? await Task.sleep(nanoseconds: 500_000_000)
+    client.advance(0.05)               // a quiet moment: data after the wake is distinguishable
+    client.transport.systemDidWake()   // link alive: the server's data arrives in time, no suspend
+    client.barrier()
+    await pump(server, client, 0.5)
     #expect(client.events.isEmpty, "\(client.events)")
-    server.queue.async { server.stalled = true }
-    try? await Task.sleep(nanoseconds: 50_000_000)
+    server.sync { server.stalled = true }
+    client.advance(0.05)
     client.transport.systemDidWake()
-    #expect(await waitUntil(3) { client.resumes.count == 1 }, "\(client.events)")
+    client.barrier()
+    #expect(client.advance(limit: 1) { client.suspensions == 1 }, "\(client.events)")
+    await expectResume(client, 1)
     #expect(client.events.first?.contains("after wake") == true, "\(client.events)")
     await exchange(server, client, rounds: 5)
     await expectStreamsComplete(server, client)
@@ -596,14 +711,16 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
 @Test func offlineEventSuspendsAfterVerificationAndOnlineResumes() async throws {
     let (server, client) = try await connectPair(configureServer: { $0.keepaliveMs = 100 }) { $0.pathVerification = 0.3 }
     defer { server.stop() }
-    server.queue.async { server.stalled = true }
+    server.sync { server.stalled = true }
+    client.advance(0.05)
     client.transport.networkChanged(online: false)
-    #expect(await waitUntil(3) { client.events.contains { $0.hasPrefix("suspended") } }, "\(client.events)")
-    try? await Task.sleep(nanoseconds: 300_000_000)
+    client.barrier()
+    #expect(client.advance(limit: 1) { client.events.contains { $0.hasPrefix("suspended") } }, "\(client.events)")
+    client.advance(0.3)   // attempts come due but wait for the network
     #expect(client.transport.status.attempts == 0, "no attempt while offline")
     client.sendChunk(3)   // built while offline: queued
     client.transport.networkChanged(online: true)
-    #expect(await waitUntil(3) { client.resumes.count == 1 }, "\(client.events)")
+    await expectResume(client, 1)
     await expectStreamsComplete(server, client)
 }
 
@@ -611,9 +728,9 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let (server, client) = try await connectPair()
     defer { server.stop() }
     await exchange(server, client, rounds: 20)
-    #expect(await waitUntil { client.ica.count == Int(server.sync { server.stream.produced }) * 4 })
+    #expect(await eventually { client.ica.count == Int(server.sync { server.stream.produced }) * 4 })
     server.queue.async { server.dropMidPacket() }
-    #expect(await waitUntil { client.resumes.count == 1 }, "\(client.events)")
+    await expectResume(client, 1)
     await exchange(server, client, rounds: 10)
     await expectStreamsComplete(server, client)
     #expect(server.sync { server.resumeProblems }.isEmpty)
@@ -622,9 +739,11 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
 @Test func networkEventOnAHealthyLinkDoesNotSuspend() async throws {
     let (server, client) = try await connectPair(configureServer: { $0.keepaliveMs = 100 }) { $0.pathVerification = 0.3 }
     defer { server.stop() }
+    client.advance(0.05)
     client.transport.networkChanged(online: true)    // path change while connected
     client.transport.networkChanged(online: false)
-    try? await Task.sleep(nanoseconds: 700_000_000)
+    client.barrier()
+    await pump(server, client, 0.7)
     #expect(client.events.isEmpty, "\(client.events)")
     #expect(client.transport.status.state == .connected)
 }
@@ -633,13 +752,16 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let (server, client) = try await connectPair(configureServer: { $0.keepaliveMs = 100 }) { $0.wakeCheckMinimum = 0.3 }
     defer { server.stop() }
     // Healthy link: a sleep gap only triggers a keepalive and a check that passes.
-    client.transport.perform { client.transport.injectedSleepForTests = .seconds(60) }
-    try? await Task.sleep(nanoseconds: 600_000_000)
+    client.clock.sleep(for: 60)   // system sleep: the continuous clock runs on, the uptime clock stops
+    client.advance(0.05)          // the next tick sees the gap
+    #expect(client.logs.contains { $0.hasPrefix("sleep gap seen by the timer") }, "\(client.logs.suffix(3))")
+    await pump(server, client, 0.6)
     #expect(client.events.isEmpty, "\(client.events)")
     // Dead link after the "sleep": suspended by the wake check, not by the 25 s liveness rule.
-    server.queue.async { server.stalled = true }
-    client.transport.perform { client.transport.injectedSleepForTests = .seconds(60) }
-    #expect(await waitUntil(3) { client.resumes.count == 1 }, "\(client.events)")
+    server.sync { server.stalled = true }
+    client.clock.sleep(for: 60)
+    #expect(client.advance(limit: 1) { client.suspensions == 1 }, "\(client.events)")
+    await expectResume(client, 1)
     #expect(client.events.first?.contains("sleep gap") == true, "\(client.events)")
     await expectStreamsComplete(server, client)
 }
@@ -650,12 +772,12 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     client.transport.perform { client.transport.cgp.queueLimit = 64 }
     server.queue.async { server.stalled = true }   // no acks: the queue grows
     for _ in 0..<10 { client.sendChunk(8) }
-    #expect(await waitUntil { client.transport.cgp.reliabilityAbandoned })
+    #expect(await eventually { client.transport.cgp.reliabilityAbandoned })
     server.queue.async { server.stalled = false }
     #expect(client.transport.status.state == .connected && client.transport.status.queued == 0)
     // A later dead link gives up at once: no resume attempt.
     server.queue.async { server.drop() }
-    #expect(await waitUntil { client.closed }, "\(client.events)")
+    #expect(await eventually { client.closed }, "\(client.events)")
     if case .queueOverflow = client.giveUp?.cause {} else { Issue.record("\(String(describing: client.giveUp?.cause))") }
     #expect(client.transport.status.attempts == 0)
 }
@@ -666,9 +788,9 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     defer { server.stop() }
     await exchange(server, client, rounds: 5)
     client.transport.expectServerClose("WD TERMINATE 1")
-    try? await Task.sleep(nanoseconds: 50_000_000)
+    client.barrier()
     server.queue.async { server.drop() }
-    #expect(await waitUntil { client.closed }, "\(client.events)")
+    #expect(await eventually { client.closed }, "\(client.events)")
     #expect(!client.events.contains { $0.hasPrefix("suspended") || $0.hasPrefix("resuming") }, "\(client.events)")
     #expect(client.events.last?.hasPrefix("closed: ended by server: connection closed after WD TERMINATE 1") == true, "\(client.events)")
     #expect(client.giveUp == nil && client.transport.status.attempts == 0)
@@ -685,9 +807,11 @@ private func expectStreamsComplete(_ server: FakeCGPServer, _ client: ResumeClie
     let client = ResumeClient(port: server.port)
     client.establishOnDetect = false
     try await client.transport.start()
-    #expect(await waitUntil(3) { client.closed }, "\(client.events)")
+    #expect(await eventually { client.closed }, "\(client.events)")
     #expect(!client.events.contains { $0.hasPrefix("suspended") || $0.hasPrefix("resuming") }, "\(client.events)")
     #expect(client.events.last?.hasPrefix("closed: early drop: link closed before the session was established") == true, "\(client.events)")
     #expect(client.giveUp == nil && client.transport.status.attempts == 0 && !client.transport.isEstablished)
     #expect(server.sync { (server.connections, server.finishRequests) } == (1, 0))
+}
+
 }

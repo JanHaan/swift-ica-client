@@ -1,0 +1,53 @@
+name: Bug report
+description: Something does not work as expected. ICAViewer can fill this in for you (Help → Report a Problem…).
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is **public**. Do not post passwords, one-time codes, host names, user names or
+        screenshots that show private data. Reports made with Help → Report a Problem… are scrubbed,
+        but please read them before you submit.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What you did, what you saw, and when it started.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Sign in
+        2. Start an app
+        3. …
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: ICAViewer and macOS version, Mac model, displays.
+      placeholder: |
+        - ICAViewer 0.1 (1), arm64
+        - macOS 15.1 (24B83)
+        - Mac: Mac15,8, Apple M3 Pro, 36 GB
+    validations:
+      required: false
+  - type: textarea
+    id: report
+    attributes:
+      label: Report file
+      description: |
+        Drag the file ICAViewer-report-….md (or .zip) that Report a Problem… saved on your Desktop into this field.
+        It holds the scrubbed session log.
+    validations:
+      required: false

@@ -12,6 +12,8 @@ import ICAKit
 /// - Opening, starting and stopping the device run on `captureQueue`, never on the session queue: `start` and `stop`
 ///   only enqueue work there. A failure while opening, a runtime error, an interruption or the camera disappearing
 ///   is reported once through `failed` (the engine then tells the host the device failed, docs/98b §5.4).
+/// - The device is the one chosen in Settings (by unique id); if it is not connected at PLAY, the system default is
+///   used and the fallback is logged.
 /// - Frames are limited to the format's frame rate by timestamp, then centre-cropped to 11:9 and scaled to 352×288
 ///   NV12 (`WebcamFrameScaler`).
 final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -44,6 +46,17 @@ final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleB
     private let lock = NSLock()
     private var current: Run?
     private var name = ""
+    /// The chosen camera (nil = system default), and its name for the log.
+    let deviceID: String?
+    let deviceName: String?
+    /// Log lines (device choice and fallback; called on the capture queue).
+    let log: (String) -> Void
+
+    init(deviceID: String? = nil, deviceName: String? = nil, log: @escaping (String) -> Void = { _ in }) {
+        self.deviceID = deviceID
+        self.deviceName = deviceName
+        self.log = log
+    }
 
     var sourceDescription: String {
         lock.lock()
@@ -84,7 +97,13 @@ final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleB
     /// Capture queue. Opens the device unless the run was stopped meanwhile.
     private func open(_ run: Run) {
         guard isCurrent(run) else { return }
-        guard let device = AVCaptureDevice.default(for: .video) else { return fail(run, "no camera") }
+        var chosen: AVCaptureDevice?
+        if let deviceID {
+            chosen = CameraDevices.device(id: deviceID)
+            if chosen == nil { log("the chosen camera \"\(deviceName ?? deviceID)\" is not connected; using the system default") }
+        }
+        guard let device = chosen ?? AVCaptureDevice.default(for: .video) else { return fail(run, "no camera") }
+        log("opening \"\(device.localizedName)\"" + (chosen == nil ? " (system default)" : " (chosen in Settings)"))
         let s = AVCaptureSession()
         do {
             let input = try AVCaptureDeviceInput(device: device)

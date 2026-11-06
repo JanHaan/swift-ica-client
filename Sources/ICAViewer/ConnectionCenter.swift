@@ -21,11 +21,44 @@ enum QuitAction: String, CaseIterable {
     }
 }
 
+/// The reconnect offer after sign-in (docs/90 §9.5): `ask` (default) or `never`. There is no
+/// `always`: nothing is reconnected without a click.
+enum ReconnectAtStart: String {
+    case ask, never
+
+    static let key = "reconnectAtStart"
+
+    static var stored: ReconnectAtStart {
+        get { UserDefaults.standard.string(forKey: key).flatMap(ReconnectAtStart.init(rawValue:)) ?? .ask }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+}
+
+/// Read-only listing for the reconnect offer: only sessions `SessionDirectory.reconnectable` allows.
+enum ReconnectOffer {
+    static func eligible(_ store: StoreClient, clientNames: Set<String>) async -> [StoreSession] {
+        let api = store.sessions
+        api.log = { vlog($0) }
+        do {
+            let list = try await api.list()
+            let all = try await api.available(excludeActive: false)
+            let safe = try? await api.available(excludeActive: true)
+            let rows = SessionDirectory.merge(list: list, available: all, excludingActive: safe, clientNames: clientNames)
+            return SessionDirectory.reconnectable(rows)
+        } catch {
+            vlog("reconnect offer: listing failed: \(error)")
+            return []
+        }
+    }
+}
+
 /// One of our own open connections, as the app delegate reports it.
 struct LocalConnection {
     var key: ObjectIdentifier
     /// Resource name the connection was launched for.
     var name: String
+    /// Every resource running in it: `name` first, then apps started inside it (session sharing, docs/55).
+    var apps: [String]
     /// The ICA ClientName the WD reports (WDLogon), to match `Sessions/List` (docs/90 §8.1).
     var clientName: String
     var parked: Bool
@@ -61,11 +94,13 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
     private var busy = false
     private var timer: Timer?
     /// Our connections the user just disconnected, kept 30 s so they do not flicker away (§9.3).
-    private var recentlyDisconnected: [(name: String, at: Date)] = []
+    private var recentlyDisconnected: [(apps: [String], at: Date)] = []
 
     private let stack = NSStackView()
     private let status = NSTextField(labelWithString: "")
     private let quitPopup = NSPopUpButton()
+    private let offerBox = NSButton(checkboxWithTitle: loc("Offer reconnect at start", "Beim Start Verbinden anbieten"),
+                                    target: nil, action: nil)
     private var actions: [Int: () -> Void] = [:]
     private var demoRows: [Row]?
 
@@ -104,6 +139,9 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         let reconnectAll = NSButton(title: loc("Reconnect All", "Alle wiederverbinden"), target: self, action: #selector(reconnectAll))
         let refresh = NSButton(title: loc("Refresh", "Aktualisieren"), target: self, action: #selector(refreshClicked))
         for b in [reconnectAll, refresh] { b.bezelStyle = .rounded }
+        offerBox.state = ReconnectAtStart.stored == .ask ? .on : .off
+        offerBox.target = self
+        offerBox.action = #selector(offerChanged)
         let quitLabel = NSTextField(labelWithString: loc("When quitting:", "Beim Beenden:"))
         quitPopup.addItems(withTitles: QuitAction.allCases.map(\.title))
         quitPopup.selectItem(at: QuitAction.allCases.firstIndex(of: QuitAction.stored) ?? 0)
@@ -112,7 +150,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [reconnectAll, refresh, status, NSView(), quitLabel, quitPopup])
+        let bar = NSStackView(views: [reconnectAll, refresh, status, NSView(), offerBox, quitLabel, quitPopup])
         bar.orientation = .horizontal
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 10, right: 12)
@@ -231,7 +269,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             switch s.state {
             case .connectedHere:
                 let appNames = names(s)
-                let i = locals.firstIndex { appNames.contains($0.name) }
+                let i = locals.firstIndex { !Set($0.apps).isDisjoint(with: appNames) }
                 let local = i.map { locals.remove(at: $0) }
                 result.append(Row(group: .here, title: title(appNames.isEmpty ? s.appNames : appNames),
                                   detail: detail(s, state: local.map { stateText($0) } ?? loc("Connected (not in this app)",
@@ -250,10 +288,10 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             }
         }
         for local in locals {
-            result.append(Row(group: .here, title: title([local.name]), detail: stateText(local), local: local))
+            result.append(Row(group: .here, title: title(local.apps), detail: stateText(local), local: local))
         }
-        for gone in recentlyDisconnected where !result.contains(where: { $0.group == .disconnected && $0.title == title([gone.name]) }) {
-            result.append(Row(group: .disconnected, title: title([gone.name]), detail: loc("Disconnected", "Getrennt")))
+        for gone in recentlyDisconnected where !result.contains(where: { $0.group == .disconnected && $0.title == title(gone.apps) }) {
+            result.append(Row(group: .disconnected, title: title(gone.apps), detail: loc("Disconnected", "Getrennt")))
         }
         return result
     }
@@ -347,14 +385,14 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             if local.parked { list.append((loc("Show", "Zeigen"), local.show)) }
             list.append((loc("Disconnect", "Trennen"), { [weak self] in
                 guard !isDemo else { return }
-                vlog("connection center: disconnect our connection \(local.name)")
-                self?.recentlyDisconnected.append((local.name, Date()))
+                vlog("connection center: disconnect our connection \(logName(local.name))")
+                self?.recentlyDisconnected.append((local.apps, Date()))
                 local.disconnect()
             }))
             list.append((loc("Log Off", "Abmelden"), { [weak self] in
                 guard !isDemo else { return }
                 self?.confirmLogoff(row.title) {
-                    vlog("connection center: log off our connection \(local.name)")
+                    vlog("connection center: log off our connection \(logName(local.name))")
                     local.logoff()
                 }
             }))
@@ -384,7 +422,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 // §7.3 way 2: launching one of its apps reconnects the disconnected session.
                 list.append((loc("Reconnect", "Verbinden"), { [weak self] in
                     guard !isDemo else { return }
-                    vlog("connection center: reconnect via resource \(resource.name)")
+                    vlog("connection center: reconnect via resource \(logName(resource.name))")
                     self?.launch([resource])
                     self?.refreshSoon()
                 }))
@@ -448,6 +486,12 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
 
     private func refreshSoon() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.refresh() }
+    }
+
+    @objc private func offerChanged() {
+        guard demoRows == nil else { return }
+        ReconnectAtStart.stored = offerBox.state == .on ? .ask : .never
+        vlog("reconnect at start: \(ReconnectAtStart.stored.rawValue)")
     }
 
     @objc private func quitActionChanged() {
@@ -571,9 +615,9 @@ extension ConnectionCenterController {
                                 machine: "VDA-01", apps: apps.map { .init(id: nil, name: $0) }, initialApp: apps.first,
                                 reconnect: reconnect ? entry : nil, takeOver: takeOver ? entry : nil)
         }
-        let local = LocalConnection(key: ObjectIdentifier(NSObject.self), name: "Calculator", clientName: "MAC-ICA",
+        let local = LocalConnection(key: ObjectIdentifier(NSObject.self), name: "Calculator", apps: ["Calculator"], clientName: "MAC-ICA",
                                     parked: false, running: true, show: {}, disconnect: {}, logoff: {})
-        let parked = LocalConnection(key: ObjectIdentifier(NSView.self), name: "Notepad", clientName: "MAC-ICA",
+        let parked = LocalConnection(key: ObjectIdentifier(NSView.self), name: "Notepad", apps: ["Notepad"], clientName: "MAC-ICA",
                                      parked: true, running: true, show: {}, disconnect: {}, logoff: {})
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .full

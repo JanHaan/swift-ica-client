@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// A validated path below the drive root (docs/95 §A.2, §A.7): real name components, never empty, ".",
@@ -13,11 +14,39 @@ public struct CDMPath: Hashable, Sendable, CustomStringConvertible {
     public var parent: CDMPath { CDMPath(Array(components.dropLast())) }
     public func appending(_ name: String) -> CDMPath { CDMPath(components + [name]) }
 
-    /// For logs: relative to the shared folder, `/`-separated; the root is "/".
+    /// Relative to the shared folder, `/`-separated; the root is "/". Not for logs: see `logLabel`.
     public var description: String { isRoot ? "/" : components.joined(separator: "/") }
+
+    /// For logs: file and folder names are the user's, so only the length and a keyed hash
+    /// (`path[24 chars #1a2b3c4d]`; the root is "/"). Equal paths get equal labels under one key.
+    public var logLabel: String { isRoot ? "/" : Self.logLabel(description) }
+
+    /// `path[<n> chars #<8 hex>]`: HMAC-SHA256 of the case-folded path under `logKey`, truncated. Without
+    /// the key a label cannot be brute-forced back to a name.
+    public static func logLabel(_ path: String) -> String { logLabel(path, key: logKey.key) }
+
+    static func logLabel(_ path: String, key: SymmetricKey) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(path.lowercased().utf8), using: key)
+        return "path[\(path.count) chars #\(mac.prefix(4).map { String(format: "%02x", $0) }.joined())]"
+    }
+
+    /// The per-install secret for `logLabel` (the viewer keeps it next to its log files and sets it
+    /// at start); until then a random key for this process. Never written into a log or a report.
+    public static func setLogKey(_ secret: Data) { logKey.key = SymmetricKey(data: secret) }
+
+    private static let logKey = LogKeyBox()
 
     /// Case-folded form, as a key for per-directory tables (Windows lookups are case-insensitive).
     public var key: String { components.map(CDMNames.fold).joined(separator: "/") }
+}
+
+private final class LogKeyBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = SymmetricKey(size: .bits256)
+    var key: SymmetricKey {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
 }
 
 /// Wire strings, path parsing, name rules, wildcards and 8.3 names.

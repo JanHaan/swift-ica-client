@@ -141,6 +141,17 @@ func webcamCreate(major: UInt32 = 1, minor: UInt32 = 1, devicePath: String? = ""
         #expect(WebcamSettings.load(defaults: defaults, env: ["ICA_WEBCAM": "off"]).engineConfig == nil)
         #expect(WebcamSettings.load(defaults: defaults, env: ["ICA_WEBCAM_SOURCE": "synthetic"]).source == .synthetic)
         #expect(WebcamSettings.load(defaults: defaults, env: [:]).source == .camera)
+        // The camera choice: stored by unique id with its name; automatic (nil) removes both.
+        #expect(WebcamSettings.load(defaults: defaults, env: [:]).deviceID == nil)
+        on.deviceID = "0x1420000005ac8600"
+        on.deviceName = "FaceTime HD Camera"
+        on.save(to: defaults)
+        let chosen = WebcamSettings.load(defaults: defaults, env: [:])
+        #expect(chosen.deviceID == "0x1420000005ac8600" && chosen.deviceName == "FaceTime HD Camera")
+        on.deviceID = nil
+        on.save(to: defaults)
+        let automatic = WebcamSettings.load(defaults: defaults, env: [:])
+        #expect(automatic.deviceID == nil && automatic.deviceName == nil && automatic.enabled)
     }
 
     @Test func sessionWithoutWebcamConfigHasNoCTXMM() throws {

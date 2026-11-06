@@ -73,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var resourceList: [StoreClient.Resource] = []
     /// ICA ClientName per connection (docs/90 §8.1 "connected here").
     private var clientNames: [ObjectIdentifier: String] = [:]
+    /// Resources whose shared launch failed because the target session ended, relaunched once with a new connection
+    /// (docs/55 §10 step 6); a second failure shows the error instead of looping.
+    private var sharedFallbacks: Set<String> = []
     /// Connections the user disconnected in the Connection Center: their end does not quit the app.
     private var userDisconnected: Set<ObjectIdentifier> = []
     /// Resources to launch one after another (Connection Center "Reconnect all").
@@ -131,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 vlog("resource list: \(list.count) resources")
                 if let name = autoLaunch {
                     guard let r = list.first(where: { $0.name == name }) else {
-                        vlog("no resource named \(name)")
+                        vlog("no resource named \(logName(name))")
                         AppQuit.request("no resource named \(name)")
                         return
                     }
@@ -139,6 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else if StoreService.autofill {
                     vlog("autofill: resource list loaded; quitting (no session)")
                     AppQuit.request("autofill done")
+                } else {
+                    offerReconnectAtStart()
                 }
             } catch is LoginCancelled {
                 vlog("sign-in cancelled")
@@ -176,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let automated = !interactive || LaunchPolicy.envAutomated()
         if !LaunchPolicy.allows(resource.name, automated: automated) {
             launcher?.setStatus("Automated runs may only launch the test resources (ICA_TEST_RESOURCES; ICA_ALLOW_ANY_RESOURCE=1 lifts this)")
-            vlog("automated launch of \"\(resource.name)\" refused (not in ICA_TEST_RESOURCES)")
+            vlog("automated launch of \(logName(resource.name)) refused (not in ICA_TEST_RESOURCES)")
             if autoLaunch != nil { AppQuit.request("automated launch refused") }
             launcher?.launchEnded()
             return
@@ -200,12 +205,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await store.logon()
                     ica = try await store.launch(resource)
                 }
+                // Session sharing (docs/55 §10 steps 4–5): never a second connection into a session we hold already.
+                // Keys are compared, never logged.
+                let shareKey = SessionShareKey(ica: ica)
+                let open = sessions.filter { !$0.ended }
+                switch SessionSharingDecision.decide(shareKey, among: open.map { ($0, $0.shareKey, $0.hasControl) }) {
+                case .share(let target):
+                    vlog("launch: \(logName(resource.name)): same endpoint, TWIMode and SessionsharingKey as the running session of "
+                         + "\(target.appNames.map(logName).joined(separator: ", ")): starting it there over CTXCTL; no second connection")
+                    retries[resource.name] = nil
+                    shareLaunch(resource, ica: ica, into: target)
+                    return
+                case .refuse(let target, let reason):
+                    vlog("launch: \(logName(resource.name)): SessionsharingKey equals that of the running session \(logName(target.name)), "
+                         + "but \(reason); no second connection, no retry")
+                    retries[resource.name] = nil
+                    sharedFallbacks.remove(resource.name)
+                    refuseSharedLaunch(resource.name, running: target.name)
+                    return
+                case .connect:
+                    vlog("launch: \(logName(resource.name)): " + (shareKey.canShare ? "no running session to share" : "not shareable ("
+                         + (shareKey.sharingKey == nil ? "no SessionsharingKey" : "TWIMode \(shareKey.twiMode)") + ")") + "; new connection")
+                    sharedFallbacks.remove(resource.name)
+                }
                 let omitAudio = audioFallback.takeOmission(resource.name)
-                if omitAudio { vlog("audio: CTXCAM omitted for this relaunch of \(resource.name) (the previous session with it dropped before it was established)") }
+                if omitAudio { vlog("audio: CTXCAM omitted for this relaunch of \(logName(resource.name)) (the previous session with it dropped before it was established)") }
                 let controller = try SessionController(name: resource.name, ica: ica, omitAudio: omitAudio)
                 clientNames[ObjectIdentifier(controller)] = WDLogon(ica: ica).clientName
                 controller.onEnded = { [weak self] c in
                     guard let self else { return }
+                    // A drop of a connection whose key matches another running session is the host's
+                    // session sharing, not an early drop: no relaunch.
+                    if !c.reachedSeamless, let running = self.runningSession(sharing: c.shareKey.sharingKey, except: c) {
+                        vlog("launch: \(logName(resource.name)) dropped; its SessionsharingKey equals that of \(logName(running.name)): not an early drop, no relaunch")
+                        self.retries[resource.name] = nil
+                        self.audioFallback.clear(resource.name)
+                        self.sessionEnded(c)
+                        self.refuseSharedLaunch(resource.name, running: running.name)
+                        return
+                    }
                     // Live: the VDA once closed the connection ~20 ms after INIT_CONNECT_RESPONSE, before
                     // logon, and the gateway sometimes drops the link ~0.9 s after the bind, twice in a
                     // row. A fresh launch (new ICA file and ticket) works. Early drops get up to three
@@ -285,6 +323,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Our open (or reconnecting) connection with this SessionsharingKey, if any.
+    private func runningSession(sharing key: String?, except: SessionController? = nil) -> SessionController? {
+        guard let key else { return nil }
+        return sessions.first { $0 !== except && !$0.ended && $0.shareKey.sharingKey == key }
+    }
+
+    /// docs/55 §10 steps 5–7: starts the app inside `target` over CTXCTL. Only `InitialProgram` and the command line of
+    /// the new ICA file are used; its tickets are never redeemed and the file is dropped (single-use, they expire).
+    /// Status 0: the app's windows arrive over the running session's TWI channel. Any failure while the session still
+    /// runs shows the error: a new connection would be refused by the host (D51), so there is no relaunch and no
+    /// LaunchRetry. Only if the target session has ended meanwhile is the resource launched once more, with a fresh
+    /// ICA file (the held one may have expired, §9.2).
+    private func shareLaunch(_ resource: StoreClient.Resource, ica: ICAFile, into target: SessionController) {
+        let app = resource.name, running = target.appNames
+        launcher?.setStatus(String(format: loc("Opening %@ in the session of %@…", "%@ wird in der Sitzung von %@ geöffnet…"),
+                                   displayName(app), running.map(displayName).joined(separator: ", ")))
+        target.launchInSession(app, launch: ControlLaunch(ica: ica)) { [weak self, weak target] result in
+            guard let self else { return }
+            self.refreshSessionRows()
+            if result == .started {
+                self.sharedFallbacks.remove(app)
+                self.launcher?.setStatus(String(format: loc("%@ opened in the running session.", "%@ in der laufenden Sitzung geöffnet."),
+                                                displayName(app)))
+                if self.autoLaunch == nil, self.connectionCenter?.isVisible != true { self.launcher?.window?.orderOut(nil) }
+                return
+            }
+            guard let target, !target.ended else {
+                if self.sharedFallbacks.insert(app).inserted, !self.terminating {
+                    vlog("session sharing: \(logName(app)): the target session ended (\(result)); launching it once with a new connection")
+                    self.enqueueLaunches([resource])
+                } else {
+                    vlog("session sharing: \(logName(app)): \(result) again after the fallback; giving up")
+                    self.sharedFallbacks.remove(app)
+                    self.sharedLaunchFailed(app, running: running.first ?? app, result)
+                }
+                return
+            }
+            vlog("session sharing: \(logName(app)) could not be started in the running session (\(result)); no second connection")
+            self.sharedLaunchFailed(app, running: target.name, result)
+        }
+    }
+
+    /// Status and a sheet on the launcher for a failed shared launch.
+    private func sharedLaunchFailed(_ app: String, running: String, _ result: ControlEngine.LaunchResult) {
+        let a = displayName(app), r = displayName(running)
+        let why: String
+        switch result {
+        case .failed(let status):
+            why = String(format: loc("The server did not start it (%@).", "Der Server hat sie nicht gestartet (%@)."), ControlWire.statusName(status))
+        case .timedOut:
+            why = loc("The session did not answer.", "Die Sitzung hat nicht geantwortet.")
+        case .notSent, .sessionEnded:
+            why = loc("The session was not ready.", "Die Sitzung war nicht bereit.")
+        case .started:
+            return
+        }
+        showLaunchAlert(String(format: loc("%@ could not be opened", "%@ konnte nicht geöffnet werden"), a),
+                        why + " " + String(format: loc("Try again, or quit %@ first and then open %@.",
+                                                       "Erneut versuchen oder zuerst %@ beenden und dann %@ öffnen."), r, a),
+                        status: String(format: loc("%@ could not be opened in the running session.",
+                                                   "%@ konnte in der laufenden Sitzung nicht geöffnet werden."), a))
+    }
+
+    /// A session started without CTXCTL (e.g. by an older build) cannot take the app: status and a sheet on the
+    /// launcher; nothing is launched (D51 safeguard).
+    private func refuseSharedLaunch(_ app: String, running: String) {
+        let a = displayName(app), r = displayName(running)
+        showLaunchAlert(String(format: loc("%@ runs in the same session as %@", "%@ läuft in derselben Sitzung wie %@"), a, r),
+                        String(format: loc(
+                            "The running session cannot open further apps (it was started without support for that, e.g. by an older version). Quit %@ first, or open %@ from inside the running session.",
+                            "Die laufende Sitzung kann keine weiteren Apps öffnen (sie wurde ohne diese Unterstützung gestartet, z. B. von einer älteren Version). Zuerst %@ beenden oder %@ aus der laufenden Sitzung heraus öffnen."),
+                            r, a),
+                        status: String(format: loc("%@ runs in the same session as %@.", "%@ läuft in derselben Sitzung wie %@."), a, r))
+    }
+
+    private func showLaunchAlert(_ message: String, _ info: String, status: String) {
+        launcher?.setStatus(status)
+        guard let launcher, let window = launcher.window else { return }
+        launcher.showWindow(nil)
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = info
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
+    }
+
     private static func isLaunchStatusError(_ error: Error) -> Bool {
         if case StoreClient.Failure.launch = error { return true }
         return false
@@ -293,17 +417,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshSessionRows() {
         launcher?.setSessions(sessions.filter { !$0.ended }.map { c in
             LauncherWindowController.SessionRow(
-                title: displayName(c.name), detail: c.isParked ? "no visible windows" : "running", canShow: c.isParked,
+                title: c.appNames.map(displayName).joined(separator: ", "), detail: c.isParked ? "no visible windows" : "running", canShow: c.isParked,
                 show: { [weak c] in c?.showParkedWindows() },
                 disconnect: { [weak self, weak c] in if let c { self?.disconnect(c) } },
-                logoff: { [weak c] in vlog("launcher: log off \(c?.name ?? "")"); c?.logoff() })
+                logoff: { [weak c] in vlog("launcher: log off \(logName(c?.name ?? ""))"); c?.logoff() })
         })
         connectionCenter?.localChanged()
     }
 
     /// Disconnect (docs/90 §9.2): CGP FINISH and close; the session keeps running on the VDA.
     private func disconnect(_ c: SessionController) {
-        vlog("disconnect \(c.name) (CGP FINISH)")
+        vlog("disconnect \(logName(c.name)) (CGP FINISH)")
         userDisconnected.insert(ObjectIdentifier(c))
         let session = c.session
         Task { await session.close() }
@@ -312,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Our open connections for the Connection Center.
     private func localConnections() -> [LocalConnection] {
         sessions.filter { !$0.ended }.map { c in
-            LocalConnection(key: ObjectIdentifier(c), name: c.name,
+            LocalConnection(key: ObjectIdentifier(c), name: c.name, apps: c.appNames,
                             clientName: clientNames[ObjectIdentifier(c)] ?? SessionDirectory.defaultClientName,
                             parked: c.isParked, running: c.reachedSeamless,
                             show: { [weak c] in c?.showParkedWindows() },
@@ -331,6 +455,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connectionCenter = center
         }
         connectionCenter?.show()
+    }
+
+    private var reconnectOffered = false
+
+    /// docs/90 §9.5: once per run, after the first sign-in, in interactive runs only: offer the
+    /// disconnected sessions the safety rules allow (`SessionDirectory.reconnectable`). Nothing is
+    /// launched without the click; at the click the list is read again and only sessions still
+    /// eligible are reconnected (one may have been reconnected elsewhere meanwhile).
+    private func offerReconnectAtStart() {
+        guard !reconnectOffered, autoLaunch == nil, !LaunchPolicy.envAutomated(), !StoreService.autofill, !Demo.enabled
+        else { return }
+        reconnectOffered = true
+        guard ReconnectAtStart.stored == .ask else { return vlog("reconnect offer: off (reconnectAtStart=never)") }
+        guard let client = store?.store else { return }
+        let names: () -> Set<String> = { [weak self] in
+            Set((self?.localConnections() ?? []).map(\.clientName) + [SessionDirectory.defaultClientName])
+        }
+        Task { @MainActor in
+            let offered = await ReconnectOffer.eligible(client, clientNames: names())
+            vlog("reconnect offer: \(offered.count) disconnected session(s) can be reconnected")
+            guard !offered.isEmpty, let launcher else { return }
+            let apps = offered.map { $0.appNames.map(displayName).joined(separator: ", ") }
+            launcher.offerReconnect(apps: apps) { [weak self] choice, dontAsk in
+                if dontAsk {
+                    ReconnectAtStart.stored = .never
+                    vlog("reconnect at start: never (don't ask again)")
+                }
+                guard choice == .reconnect else { return vlog("reconnect offer: not now") }
+                Task { @MainActor in
+                    let ids = Set(offered.compactMap(\.id))
+                    let still = await ReconnectOffer.eligible(client, clientNames: names()).filter { $0.id.map(ids.contains) == true }
+                    vlog("reconnect offer: reconnecting \(still.count) of \(offered.count) (rechecked)")
+                    if still.isEmpty {
+                        self?.launcher?.setStatus(loc("The sessions are no longer disconnected.", "Die Sitzungen sind nicht mehr getrennt."))
+                        return
+                    }
+                    self?.enqueueLaunches(still.compactMap(\.reconnect).map(\.resource))
+                }
+            }
+        }
     }
 
     /// Launches one after another; each opens its own connection (docs/90 §8.3). The user chose them.
@@ -392,7 +556,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let centerWasVisible = connectionCenter?.isVisible == true
         connectionCenter?.close()
         if action == .ask {
-            guard let choice = QuitPrompt.ask(count: open.count, apps: open.map(\.name)) else {
+            // Every app of every session: a session may hold several (docs/55).
+            guard let choice = QuitPrompt.ask(count: open.count, apps: open.flatMap(\.appNames)) else {
                 vlog("quit cancelled")
                 if centerWasVisible { connectionCenter?.show() }
                 return .terminateCancel

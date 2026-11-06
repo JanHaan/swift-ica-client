@@ -440,6 +440,17 @@ private let mixedList = StoreSessionList(deviceId: "D1", sessions: [
     #expect(r.first { $0.id == "h" }?.reconnect == nil && r.count == 2)
 }
 
+@Test func reconnectOfferOnlyListsSafeSessions() {
+    let disc = entry("1", "Notepad"), away = entry("2", "Outlook"), lone = entry("3", "Paint")
+    // Ambiguous pair, an elsewhere session, an unjoined entry and one plain disconnected session.
+    let list = StoreSessionList(deviceId: "D1", sessions: mixedList.sessions + [
+        session("c1", .disconnected, apps: ["Calculator"]), session("c2", .disconnected, apps: ["Calculator"])])
+    let rows = SessionDirectory.merge(list: list, available: [disc, away, lone, entry("4", "Calculator")],
+                                      excludingActive: [disc, lone], clientNames: [])
+    #expect(SessionDirectory.reconnectable(rows).map(\.id) == ["disc"])
+    #expect(SessionDirectory.reconnectable(SessionDirectory.merge(list: nil, available: [disc], excludingActive: [disc], clientNames: [])).isEmpty)
+}
+
 // MARK: - Device identity
 
 final class MemoryIdentity: DeviceIdentityStore {

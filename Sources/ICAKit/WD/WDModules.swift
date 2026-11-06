@@ -73,6 +73,9 @@ public struct WDModuleIdentity: Sendable {
     /// CTXMM: min 3 / max 0, as the reference sends them (docs/98b §1.1; 3/3 is only the W6 diagnostic).
     public static let webcam = WDModuleIdentity(moduleClass: .vd, versionLow: WebcamWire.versionLow, versionHigh: WebcamWire.versionHigh,
                                                 name: "", hostName: "ICA")
+    /// CTXCTL: versions 1…2, host name "ICA" (docs/55 §4.1).
+    public static let control = WDModuleIdentity(moduleClass: .vd, versionLow: ControlWire.versionLow, versionHigh: ControlWire.versionHigh,
+                                                 name: "", hostName: "ICA")
     public static let ui = WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "UIModule.class", hostName: "")
 }
 
@@ -337,6 +340,13 @@ public enum WDModules {
         var w = vdHeader(identity, channel: channel, date: date)
         w.u16(WebcamWire.maxChannelWrite)
         return w.bytes()
+    }
+
+    /// CTXCTL module, 48 bytes (docs/55 §4.1): the common VD header with versions 1/2, no quota, flow type 0 and no VD
+    /// data. No fixed channel: the WD gives it the first free one ≥ 20 (20 after CTXCAM), and the bind entry
+    /// `CTXCTL \0 <ch> 00` comes from the WD module's table.
+    public static func control(channel: UInt8 = 20, date: Date = Date()) -> [UInt8] {
+        vdHeader(.control, channel: channel, date: date).bytes()
     }
 
     /// Thinwire `LargeCacheSize(w,h)` (docs/40-thinwire.md §2.2).

@@ -307,6 +307,29 @@ case "camtest":
         fail("\(error)")
     }
 
+case "sharetest":
+    // icactl sharetest — session sharing test (docs/55 §11 items 1–3): "Notepad" with CTXCTL announced, in a session
+    // this run logs on itself; then, if both ICA files share endpoint, TWIMode and SessionsharingKey (equality logged,
+    // never the key), "Calculator" is started inside that session over CTXCTL 0x03. The second ICA file is only read,
+    // never connected (its tickets just expire). Logs the handshake, the request bytes, the status and the new app's
+    // window. No input. Logs off only its own fresh session; a reconnect is only disconnected and nothing is launched.
+    guard args.isEmpty else { fail("sharetest takes no arguments (Notepad, then Calculator)") }
+    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    do {
+        let resources = try await store.resources()
+        guard let first = resources.first(where: { $0.name == "Notepad" }) else { fail("no resource named Notepad") }
+        guard let second = resources.first(where: { $0.name == "Calculator" }) else { fail("no resource named Calculator") }
+        guard let ica = ICAFile(text: try await store.launchICA(first)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runShareTest(ica: ica) {
+            let text = try await store.launchICA(second)
+            try? http.saveCookies(to: cookiePath)
+            return ICAFile(text: text)
+        }
+    } catch {
+        fail("\(error)")
+    }
+
 case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)
@@ -351,6 +374,9 @@ default:
                                          contexts on ch 18 (ICA_CAMTEST_OBSERVE s after connect, default 90); no input;
                                          synthetic test pattern only (never the camera), H.264 to .session/camtest.h264
                                          ICA_CAMTEST_VERSIONS=3/3: the §13 W6 module-version variant
+      icactl sharetest                   session sharing: "Notepad" with CTXCTL (fresh logon), then "Calculator"
+                                         started in that session over CTXCTL if the keys match; no input; logs the
+                                         handshake, request bytes, status and the new window; logs off only its session
       icactl sessions list [--names]     store sessions (Sessions/List + ListAvailable), read-only; ids as fingerprints
       icactl sessions probe              read-only live checks of docs/90 §11 items 1, 2, 4–7 (keys, counts, states)
       icactl sessions disconnect <id>    Sessions/DisconnectSessions; only sessions whose apps are all test resources
@@ -1960,6 +1986,177 @@ func runCamTest(ica: ICAFile, resource: String) async throws {
     say("synthetic H.264 (offline check + any live samples): \(streamURL.path)")
     say("verdict: " + d.verdict())
     say("fresh logon: \(fresh)")
+    say("end: \(ending)")
+}
+
+// MARK: - Session sharing test (docs/55 §11)
+
+func runShareTest(ica: ICAFile, secondICA: () async throws -> ICAFile?) async throws {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    var config = WinstationDriver.Configuration()
+    config.logon = WDLogon(ica: ica)
+    config.display = WDDisplay(width: 1920, height: 1080)
+    var controlConfig = ControlEngine.Config()
+    controlConfig.own = ControlLaunch(ica: ica)
+    let session = try ICASession(ica: ica, configuration: config, control: controlConfig)
+    guard let control = session.control else { fail("no control engine") }
+    let seamless = session.seamless
+
+    var logon = FreshLogonDetector()
+    var appWindows: [UInt32: String] = [:]   // id → app key
+    var newWindows: [String] = []
+    var knownKeys: Set<String>?
+    var terminateReason: UInt8?
+    var connectedAt: Date?
+    var modulesSent: [String] = []
+    var controlLines: [String] = []
+    let started = Date()
+
+    control.onEvent = { event in
+        say("ctl: \(event)")
+        controlLines.append("\(event)")
+    }
+    seamless.onEvent = { event in
+        switch event {
+        case .channelReady:
+            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+        case .windowAdded(let w):
+            logon.windowAdded(appKey: w.appKey)
+            // Only the test apps' titles are printed; others by length.
+            let title = w.title.hasPrefix("Rechner") ? "\"\(w.title)\"" : "(\(w.title.count) chars)"
+            say("TWI window \(String(w.id, radix: 16)) \(w.kind) \(title) app \(w.appKey)")
+            if w.kind == .appWindow {
+                appWindows[w.id] = w.appKey
+                if let known = knownKeys, !known.contains(w.appKey) {
+                    newWindows.append("\(String(w.id, radix: 16)) \(title) app \(w.appKey)")
+                }
+            }
+        case .windowRemoved(let w):
+            appWindows[w.id] = nil
+        case .appAdded(let app):
+            say("TWI app added: \(app.key) \"\(app.name)\"" + (app.publishedName.map { " published \"\($0)\"" } ?? ""))
+        default: break
+        }
+    }
+    session.onThinwireInit = { _ in
+        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+    }
+    session.onEvent = { event in
+        switch event {
+        case .log(let text): say(text)
+        case .closed(let reason): say("session closed: \(reason)")
+        case .wd(let e):
+            switch e {
+            case .initResponseSent(let modules, _):
+                modulesSent = modules
+                say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+            case .connected:
+                connectedAt = Date()
+                say("WD connected (host accepted the module list)")
+            case .packet(let p) where p.channel != nil && p.channel == session.wd.channelNumber(ControlWire.channelName):
+                if control.diagnostics.hostWrites == 0 {
+                    say(String(format: "first host write on CTXCTL after %.1f s (%@)", Date().timeIntervalSince(started),
+                               logon.isFresh ? "after the fresh-logon marker" : "before any logon marker"))
+                }
+            case .droppedChannelData(let channel, let bytes): say("dropped \(bytes) B on unregistered ch \(channel)")
+            case .terminate(let reason):
+                terminateReason = reason
+                say("← TERMINATE reason \(reason)")
+            case .failure(let text): say("WD failure: \(text)")
+            default: break
+            }
+        default: break
+        }
+    }
+
+    try await session.start()
+    let channel = session.wd.channelNumber(ControlWire.channelName)
+    say("CTXCTL registered on ch \(channel.map(String.init) ?? "?")")
+    _ = await waitFor(session, 150) { connectedAt != nil && logon.isFresh && !appWindows.isEmpty && control.state == .ready }
+    let (fresh, ready) = await onSession(session) { (logon.isFresh, control.state == .ready) }
+
+    var outcome = "not attempted"
+    if session.isClosed {
+        outcome = "the first session ended before the test"
+    } else if !fresh {
+        outcome = "not a fresh logon (reconnect?): nothing launched into it"
+    } else if !ready {
+        // Give a late channel a little longer (open question 1: when the host opens CTXCTL).
+        _ = await waitFor(session, 30) { control.state == .ready }
+        if await onSession(session, { control.state != .ready }) { outcome = "CTXCTL never became ready (no capability commit)" }
+    }
+    if outcome == "not attempted", !session.isClosed, await onSession(session, { control.state == .ready }) {
+        guard let second = try await secondICA() else { fail("Calculator: not an ICA file") }
+        let a = SessionShareKey(ica: ica), b = SessionShareKey(ica: second)
+        let diff = b.differences(to: a)
+        say("share keys: Editor key \(a.sharingKey == nil ? "absent" : "present"), Rechner key \(b.sharingKey == nil ? "absent" : "present"); "
+            + "SSL \(a.sslEnabled == b.sslEnabled ? "equal" : "differs"), endpoint \(a.connectHost == b.connectHost && a.connectPort == b.connectPort ? "equal" : "differs"), "
+            + "TWIMode \(a.twiMode == b.twiMode ? "equal" : "differs"), SessionsharingKey \(a.sharingKey == b.sharingKey ? "equal" : "differs")")
+        if !b.shares(with: a) {
+            outcome = "keys do not match (\(diff.isEmpty ? "not shareable" : diff.joined(separator: ", "))): Calculator not launched; its ICA file is dropped"
+        } else {
+            let launch = ControlLaunch(ica: second)
+            say("launch: InitialProgram \"\(launch.initialProgram)\", command line \(launch.commandLine.isEmpty ? "empty" : "\(launch.commandLine.count) chars")")
+            await onSession(session) { knownKeys = Set(appWindows.values) }
+            let t0 = Date()
+            let result: ControlEngine.LaunchResult = await withCheckedContinuation { c in
+                session.launchInSession(launch) { c.resume(returning: $0) }
+            }
+            say(String(format: "launch result after %.1f s: %@", Date().timeIntervalSince(t0), "\(result)"))
+            if result == .started {
+                let appeared = await waitFor(session, 20) { !newWindows.isEmpty }
+                let windows = await onSession(session) { newWindows }
+                outcome = "status 0; " + (appeared ? "new app window(s): " + windows.joined(separator: "; ")
+                                                   : "no window of a new app within 20 s")
+            } else {
+                outcome = "\(result); no fallback connection (the host refuses a second session, D51)"
+            }
+            // The second ICA file is never connected; its tickets expire unused (docs/55 §9.2).
+        }
+    }
+
+    var ending: String
+    let isFresh = await onSession(session) { logon.isFresh }
+    if session.isClosed {
+        ending = "session ended by the server" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+    } else if !isFresh {
+        await session.close()
+        ending = "disconnected (CGP FINISH), not logged off"
+    } else {
+        let sent: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        if sent {
+            say("→ TWI LOGOFF (the whole session, both apps)")
+            let end = Date().addingTimeInterval(25)
+            while Date() < end, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+        }
+        if session.isClosed {
+            ending = "logged off" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+        } else {
+            await session.close()
+            ending = sent ? "logoff sent but the session did not end in 25 s; disconnected" : "TWI not ready; disconnected"
+        }
+    }
+    let d = await onSession(session) { control.diagnostics }
+    let sentNames = await onSession(session) { modulesSent }
+
+    say("\n=== sharetest summary ===")
+    say("module: \(d.moduleBytes.count) B " + hexLine(d.moduleBytes, limit: 64) + "; in INIT_RESPONSE: \(sentNames.contains(ControlWire.channelName)); "
+        + "ch \(channel.map(String.init) ?? "?")")
+    say("CTXCTL host writes \(d.hostWrites); first " + (d.firstHostBytes.map { String(format: "after %.1f s", $0.timeIntervalSince(started)) } ?? "never")
+        + "; ready " + (d.readyAt.map { String(format: "after %.1f s", $0.timeIntervalSince(started)) } ?? "never"))
+    say("0x00 payload: " + (d.capabilityRequest.map { hexLine($0, limit: 96) } ?? "none"))
+    say("  caps [\(d.hostCapabilities.map(\.description).joined(separator: ", "))]")
+    say("0x01 sent: " + (d.capabilityResponse.map { hexLine($0, limit: 96) } ?? "none"))
+    say("0x02 payload: " + (d.capabilityCommit.map { hexLine($0, limit: 96) } ?? "none"))
+    say("  caps [\(d.commitCapabilities.map(\.description).joined(separator: ", "))]; own launch sent (cap 5): \(d.ownLaunchSent)")
+    for (i, r) in d.launchRequests.enumerated() { say("0x03 #\(i + 1): \(r.count) B " + hexLine(r, limit: 96)) }
+    for (i, r) in d.launchResponses.enumerated() {
+        say("0x04 #\(i + 1): " + hexLine(r, limit: 32) + (ControlWire.launchStatus(r).map { " → " + ControlWire.statusName($0) } ?? ""))
+    }
+    if !d.skippedCommands.isEmpty { say("skipped: " + d.skippedCommands.map { String(format: "0x%02X×%d", $0.key, $0.value) }.joined(separator: ", ")) }
+    if let guid = d.sessionGuid { say("session GUID received (\(guid.count) chars, not shown)") }
+    say("outcome: \(outcome)")
+    say("fresh logon: \(isFresh)")
     say("end: \(ending)")
 }
 
