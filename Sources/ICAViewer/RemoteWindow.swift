@@ -698,10 +698,12 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         controller?.windowBecameKey(self)
+        DockIcon.shared.scheduleRefresh()
     }
 
     func windowDidResignKey(_ notification: Notification) {
         controller?.keyboard.releaseAll()
+        DockIcon.shared.scheduleRefresh()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

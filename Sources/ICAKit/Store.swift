@@ -10,6 +10,8 @@ public struct StoreClient {
         public let launchstatusurl: String?
         public let clienttypes: [String]?
         public let disabled: Bool?
+        /// Relative to the store base (docs/10 §D); used for the Dock icon (docs/99 Phase 0).
+        public let iconurl: String?
 
         /// A `Sessions/ListAvailable` entry as a launchable resource (docs/90 §4.2).
         init(session: AvailableSession) {
@@ -20,6 +22,7 @@ public struct StoreClient {
             launchstatusurl = session.launchstatusurl
             clienttypes = nil
             disabled = nil
+            iconurl = nil
         }
 
         /// True for a session entry (reconnect): its launch status request carries no desktop title.

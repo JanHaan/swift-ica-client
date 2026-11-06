@@ -49,6 +49,8 @@ final class SessionController: NSObject {
     /// Latest host state of every window (including hidden ones), mirrored on main.
     private var infos: [UInt32: TWIWindow] = [:]
     private var foreground: UInt32?
+    /// Remote apps by key, for the Dock icon (names match store resources).
+    private var apps: [String: TWIApp] = [:]
     private(set) var ended = false
     private(set) var endReason = ""
     private var pendingLogoff: DispatchWorkItem?
@@ -497,6 +499,7 @@ final class SessionController: NSObject {
         case .windowChanged(let w, let changes):
             infos[w.id] = w
             noteActivity()
+            if changes.contains(.icon) || changes.contains(.app) { DockIcon.shared.scheduleRefresh() }
             if changes.contains(.windowRect) || changes.contains(.kind) || changes.contains(.style) || changes.contains(.title) {
                 vlog("TWI window \(String(w.id, radix: 16)) changed \(changes.rawValue): \(w.kind) rect \(w.windowRect.left),\(w.windowRect.top) \(w.windowRect.width)x\(w.windowRect.height) min \(w.isMinimized)")
             }
@@ -531,6 +534,7 @@ final class SessionController: NSObject {
             infos[w.id] = nil
             vlog("TWI window \(String(w.id, radix: 16)) removed")
             remove(w.id)
+            DockIcon.shared.scheduleRefresh()
         case .windowActivated(let id):
             vlog("TWI host foreground: \(id.map { String($0, radix: 16) } ?? "none")")
             foreground = id
@@ -539,6 +543,13 @@ final class SessionController: NSObject {
             }
         case .appAdded(let app):
             vlog("TWI app added: \(app.key) \"\(app.name)\"")
+            apps[app.key] = app
+            DockIcon.shared.scheduleRefresh()
+        case .appChanged(let app):
+            apps[app.key] = app
+            DockIcon.shared.scheduleRefresh()
+        case .appRemoved(let app):
+            apps[app.key] = nil
         case .processEnded(let pid):
             endedProcesses.insert(pid)
             vlog("TWI process \(String(pid, radix: 16)) ended")
@@ -644,6 +655,21 @@ final class SessionController: NSObject {
     }
 
     func currentInfo(_ id: UInt32) -> TWIWindow? { infos[id] }
+
+    /// The app behind an app window, for the Dock icon (docs/99 Phase 0): its largest TWI icon over all
+    /// its windows and the names to match against store resources.
+    func dockSource(for w: RemoteWindow) -> DockIcon.Source? {
+        guard w.isApp else { return nil }
+        let key = w.info.appKey
+        var best: TWIIcon?
+        for info in infos.values where info.appKey == key && info.kind == .appWindow {
+            for icon in info.icons.values where icon.image != nil && icon.width > (best?.width ?? 0) { best = icon }
+        }
+        let app = apps[key]
+        var names = [app?.publishedName, app?.name].compactMap { $0 }.filter { !$0.isEmpty }
+        if apps.count <= 1 { names.append(name) }   // a single-app session: the launched resource is that app
+        return DockIcon.Source(key: key, names: names, twi: best?.image)
+    }
 
     // MARK: Local gestures
 
