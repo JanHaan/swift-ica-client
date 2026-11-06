@@ -7,7 +7,8 @@ import ICAKit
 /// while sessions run offers to reconnect them. The shared folder (client drive M, docs/95 §A, D32)
 /// applies at the next connect, as does printing (docs/97 §6, PDF mode: receive jobs from the host's Citrix PDF
 /// Printer; which action the job window offers first) and session audio (docs/98 §10.4: play session sounds,
-/// default on; the volume follows macOS; the microphone, default off per §10.4, opens only while the host records).
+/// default on; the volume follows macOS; the microphone, default off per §10.4, opens only while the host records) and
+/// the camera (docs/98b §10.5: default off; opens only between the host's PLAY and STOP).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -36,6 +37,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let audioHint = Text(en: "The volume follows the Mac.", de: "Die Lautstärke folgt dem Mac.")
     static let micTitle = Text(en: "Pass the microphone to the session", de: "Mikrofon an die Sitzung weitergeben")
     static let micHint = Text(en: "Only while a session app records.", de: "Nur während eine Sitzungs-App aufnimmt.")
+    static let cameraTitle = Text(en: "Pass the camera to the session", de: "Kamera an die Sitzung weitergeben")
+    static let cameraHint = Text(en: "Only while a session app uses it; 32-bit apps only.",
+                                 de: "Nur während eine Sitzungs-App sie nutzt; nur 32-Bit-Apps.")
     /// Row labels (column 0), in grid order.
     static let rowLabels: [String: Text] = [
         "gateway": Text(en: "Gateway:", de: "Gateway:"), "user": Text(en: "User name:", de: "Benutzername:"),
@@ -43,7 +47,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         "secret": Text(en: "TOTP secret:", de: "TOTP-Geheimnis:"), "code": Text(en: "Code:", de: "Code:"),
         "windows": Text(en: "Windows scaling:", de: "Windows-Skalierung:"), "client": Text(en: "Client scaling:", de: "Client-Skalierung:"),
         "share": Text(en: "Shared folder:", de: "Freigabe:"), "print": Text(en: "Printing:", de: "Drucken:"),
-        "audio": Text(en: "Audio:", de: "Audio:"),
+        "audio": Text(en: "Audio:", de: "Audio:"), "camera": Text(en: "Camera:", de: "Kamera:"),
     ]
 
     private let protectBox = NSButton(checkboxWithTitle: T.protectTitle.shown, target: nil, action: nil)
@@ -72,6 +76,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let printActionPopup = NSPopUpButton()
     private let audioBox = NSButton(checkboxWithTitle: T.audioTitle.shown, target: nil, action: nil)
     private let micBox = NSButton(checkboxWithTitle: T.micTitle.shown, target: nil, action: nil)
+    private let cameraBox = NSButton(checkboxWithTitle: T.cameraTitle.shown, target: nil, action: nil)
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -223,6 +228,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, hint(T.audioHint)],
             [NSGridCell.emptyContentView, micBox],
             [NSGridCell.emptyContentView, hint(T.micHint)],
+            [label("camera"), cameraBox],
+            [NSGridCell.emptyContentView, hint(T.cameraHint)],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -240,6 +247,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 18).topPadding = 12
         grid.row(at: 19).topPadding = 0
         grid.row(at: 21).topPadding = 0
+        grid.row(at: 22).topPadding = 12
+        grid.row(at: 23).topPadding = 0
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
                               target: self, action: #selector(forgetAll))
@@ -272,7 +281,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// popup (at least 360 pt), each measured in English and German. Logged in demo mode.
     static func columnWidths(popups: [NSPopUpButton]) -> (column0: CGFloat, column1: CGFloat) {
         let labels = rowLabels.values.flatMap(\.both).map { ($0, NSTextField(labelWithString: $0).fittingSize.width) }
-        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle].flatMap(\.both)
+        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle].flatMap(\.both)
             .map { ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil).fittingSize.width) }
         let radios = [promptTitle, totpTitle].flatMap(\.both)
             .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
@@ -315,6 +324,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         audioBox.state = AudioSettings.defaultEnabled ? .on : .off
         micBox.state = AudioSettings.defaultMicrophone ? .on : .off
         audioChanged()
+        cameraBox.state = WebcamSettings.defaultEnabled ? .on : .off
         modeChanged()
     }
 
@@ -400,6 +410,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         guard settings != AudioSettings.load(env: [:]) else { return }
         settings.save()
         vlog("audio: saved (\(settings.enabled ? "on" : "off"), microphone \(settings.microphone ? "on" : "off")); applies at the next connect")
+    }
+
+    private func saveCamera() {
+        var settings = WebcamSettings.load(env: [:])
+        settings.enabled = cameraBox.state == .on
+        guard settings != WebcamSettings.load(env: [:]) else { return }
+        settings.save()
+        vlog("webcam: saved (\(settings.enabled ? "on" : "off")); applies at the next connect")
     }
 
     /// The microphone goes through the same channel: without session audio there is none.
@@ -498,6 +516,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         audioBox.state = audio.enabled ? .on : .off
         micBox.state = audio.microphone ? .on : .off
         audioChanged()
+        cameraBox.state = WebcamSettings.load(env: [:]).enabled ? .on : .off
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",
@@ -627,6 +646,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                 saveDriveMapping()
                 savePrinting()
                 saveAudio()
+                saveCamera()
                 saveScaling()
             } catch CredentialError.invalidTOTPSecret {
                 status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",
