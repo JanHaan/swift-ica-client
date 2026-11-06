@@ -342,6 +342,32 @@ public enum AudioReply {
         return [UInt8](w.data)
     }
 
+    /// READ_DATA (V1) with one encoded frame: `83 <dev> 06 00 <u16 L+2> <u16 L> <packet>` (§3.2, §7.1); an
+    /// empty packet is the silent frame, a header with length 0.
+    public static func readData(device: UInt8, packet: Data) -> [UInt8] {
+        var w = ByteWriter()
+        w.u8(0x83); w.u8(device); w.u16(6)
+        appendFrame(&w, packet)
+        return [UInt8](w.data)
+    }
+
+    /// READ_DATA_V2 (RW V2 active): `88 <dev> 0C 00 <u16 L+2> <u16 seq> 00 00 00 00 <u16 L> <packet>`.
+    public static func readDataV2(device: UInt8, sequence: UInt16, packet: Data) -> [UInt8] {
+        var w = ByteWriter()
+        w.u8(0x88); w.u8(device); w.u16(12)
+        if packet.isEmpty { w.u16(0); w.u16(sequence); w.u32(0); return [UInt8](w.data) }
+        w.u16(UInt16(packet.count + 2)); w.u16(sequence); w.u32(0)
+        w.u16(UInt16(packet.count)); w.raw(packet)
+        return [UInt8](w.data)
+    }
+
+    private static func appendFrame(_ w: inout ByteWriter, _ packet: Data) {
+        guard !packet.isEmpty else { w.u16(0); return }
+        w.u16(UInt16(packet.count + 2))
+        w.u16(UInt16(packet.count))
+        w.raw(packet)
+    }
+
     /// `84 <dev> <u16 bytesPer20ms> <u16 64> <status>`; status 0 ok, 0xFF failed (§3.2, §7.1).
     public static func openResponse(device: UInt8, status: UInt8, bytesPer20ms: UInt16 = AudioWire.openResponseBytesPer20ms,
                                     buffers: UInt16 = AudioWire.openResponseBuffers) -> [UInt8] {

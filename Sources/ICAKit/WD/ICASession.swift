@@ -139,6 +139,10 @@ public final class ICASession: @unchecked Sendable {
             let queue = self.queue
             // The idle flush of WRITE credits (docs/98 §6.3).
             engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
+            // Microphone: permission answers and encoded frames come back to the session queue; encoding runs
+            // on its own queue (docs/98 §7).
+            engine.schedule = { [weak self] block in self?.perform(block) }
+            engine.captureQueue = DispatchQueue(label: "ica.audio.capture")
         }
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
         thinwire.onInit = { [weak self] info in
@@ -235,6 +239,8 @@ public final class ICASession: @unchecked Sendable {
     /// The server answers with WD TERMINATE 1 a few seconds later and the session closes.
     public func logoff(completion: @escaping (Bool) -> Void = { _ in }) {
         perform { [self] in
+            // The microphone stops the moment the session starts ending, not when the logoff completes.
+            audio?.disableMicrophone(notifyHost: false, reason: "logoff")
             guard !closed, !isSuspended, seamless.canSend else { return completion(false) }
             seamless.logoff()
             transport.expectServerClose("TWI logoff")
@@ -247,7 +253,17 @@ public final class ICASession: @unchecked Sendable {
 
     /// Ends the CGP session politely (FINISH_REQUEST), then closes after `timeout` at the latest.
     /// While suspended: closes at once, without FINISH.
-    public func close(timeout: TimeInterval = 5) async { await transport.close(timeout: timeout) }
+    public func close(timeout: TimeInterval = 5) async {
+        // The microphone stops before FINISH goes out (disconnect, quit, reconnect to apply settings).
+        perform { [self] in audio?.disableMicrophone(notifyHost: false, reason: "disconnect") }
+        await transport.close(timeout: timeout)
+    }
+
+    /// "Disable microphone" for this session (any thread): capture stops at once, the host is told the
+    /// device failed, and later capture OPENs are answered "failed" (docs/98 §10.3).
+    public func disableMicrophone() {
+        perform { [self] in audio?.disableMicrophone(notifyHost: !closed, reason: "disabled by the user") }
+    }
 
     /// Suspends until the session has ended.
     public func waitUntilClosed() async { await transport.waitUntilClosed() }

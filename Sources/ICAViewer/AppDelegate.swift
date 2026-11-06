@@ -9,13 +9,29 @@ import Network
 /// run and the app hangs. Hence: `terminate:` and the reply timeouts only from run-loop timers
 /// (common and modal panel modes), which fire inside the nested loop as well.
 enum AppQuit {
+    /// Who asked to quit. Only test timers use the automated policy; a quit nobody tagged (Cmd-Q, the
+    /// menu, the Dock, logout) is the user's and always gets the prompt or the remembered choice.
+    enum Initiator: String {
+        case user, selftest, hold
+        /// The app itself, e.g. after the last session ended (no session left to ask about).
+        case app
+    }
+
     private static var pending = false
+    private static var tagged: Initiator?
 
     /// Asks the app to quit, from a run-loop timer (never directly from a Task or a dispatch block).
-    static func request(_ reason: String) {
-        vlog("quit: requested (\(reason))")
-        onRunLoop(after: 0) { NSApp.terminate(nil) }
+    static func request(_ reason: String, by initiator: Initiator = .app) {
+        vlog("quit: \(reason)")
+        onRunLoop(after: 0) {
+            tagged = initiator
+            NSApp.terminate(nil)
+            tagged = nil   // reached only if the quit was cancelled or is still waiting
+        }
     }
+
+    /// The initiator of the `terminate:` being handled; `.user` unless `request` tagged it.
+    static var current: Initiator { tagged ?? .user }
 
     /// `applicationShouldTerminate` returns `.terminateLater`: reply after `timeout` at the latest.
     static func beginLater(timeout: TimeInterval, _ reason: String) {
@@ -342,14 +358,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// unless remembered (`quitAction`). Automated runs keep the hold rule: only a fresh logon by this
     /// run is logged off, a reconnected session (maybe the user's) is only disconnected.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let initiator = AppQuit.current
+        vlog("quit: requested by \(initiator.rawValue)")
         let open = sessions.filter { !$0.ended }
-        guard !open.isEmpty else { return .terminateNow }
+        guard !open.isEmpty else {
+            connectionCenter?.close()
+            return .terminateNow
+        }
         if terminating {
             // A second terminate while the first waits for its reply: let the first finish.
             vlog("quit: already waiting for the sessions to end")
             return .terminateCancel
         }
-        if LaunchPolicy.envAutomated() || StoreService.autofill {
+        // The launch environment (ICAVIEWER_LAUNCH, …) does not matter here, only who asked.
+        if initiator == .selftest || initiator == .hold {
+            connectionCenter?.close()
             terminating = true
             vlog("quit (automated): fresh logons are logged off, reconnects disconnected (\(open.count) session(s))")
             for c in open {
@@ -359,13 +382,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateLater
         }
         var action = QuitAction.stored
+        // The Connection Center goes with the app; while the prompt is up it is hidden, so the prompt
+        // is the only window that can take the keyboard.
+        let centerWasVisible = connectionCenter?.isVisible == true
+        connectionCenter?.close()
         if action == .ask {
             guard let choice = QuitPrompt.ask(count: open.count, apps: open.map(\.name)) else {
                 vlog("quit cancelled")
+                if centerWasVisible { connectionCenter?.show() }
                 return .terminateCancel
             }
             action = choice
         }
+        vlog("quit: \(action.rawValue) (\(QuitAction.stored == .ask ? "chosen" : "remembered"))")
         terminating = true
         if action == .disconnect {
             vlog("quit: disconnecting \(open.count) session(s)")

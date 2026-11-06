@@ -70,6 +70,11 @@ public struct AudioDiagnostics: Sendable {
     /// The last `recentLimit` SET_CONTROL commands, as sent.
     public var recentSetControls: [[UInt8]] = []
     public var readWriteV2 = false
+    /// Uplink: READ_DATA frames sent, their packet bytes, encode errors, and the OPEN answers.
+    public var captureFramesSent = 0
+    public var captureBytesSent = 0
+    public var captureEncodeErrors = 0
+    public var captureOpenResults: [String] = []
 
     mutating func noteOpen(_ device: UInt8, _ code: AudioFormatCode, decoder: Bool) {
         openCount += 1
@@ -113,8 +118,8 @@ public struct AudioDiagnostics: Sendable {
     }
 }
 
-/// Virtual channel engine for client audio mapping, `CTXCAM ` (channel 19, docs/98-audio.md), playback only
-/// (caps 0x10, versions 1/2; no microphone).
+/// Virtual channel engine for client audio mapping, `CTXCAM ` (channel 19, docs/98-audio.md): playback, and the
+/// microphone when `Config.microphone` is set (caps 0x11 instead of 0x10; versions 1/2).
 ///
 /// - The module (§1.4) is 55 bytes: the common VD header (no flow control) and the VD data `D8 FF 01` +
 ///   caps u32 at the odd offset 51.
@@ -124,8 +129,13 @@ public struct AudioDiagnostics: Sendable {
 ///   (`80 01 00 n`, `80 02 00 n`), CAPINFO with `80 01 00 01 00` + `80 02 00 01 00` after the reply, every
 ///   other command (also failures, unknown ids and unknown bytes) with `80 01 00 01 00`. INIT gets none.
 /// - CAPINFO for the playback device: every offered PCM pair and every Opus pair AudioToolbox decodes, in the
-///   host's order (§5.2); the capture device gets m = 0. OPEN of the capture device answers OPEN_RESPONSE
-///   "failed". Recording commands for the playback device answer RESET_DEVICE `81 dev 03` (§3.1).
+///   host's order (§5.2). The capture device gets the Opus pairs AudioToolbox encodes, or m = 0 without the
+///   microphone. Recording commands for the playback device answer RESET_DEVICE `81 dev 03` (§3.1).
+/// - Capture (§7): OPEN of the capture device asks the source for permission (the app's first OPEN prompts),
+///   then answers `84 02 80 02 40 00 00` (or `… FF`: denied, no source, no encoder) with one command credit.
+///   START_RECORD starts the source; every 10 ms Opus packet goes out as READ_DATA (READ_DATA_V2 with RW V2)
+///   followed by `80 01 00 01 00`. STOP_RECORD, CLOSE, suspend and the session end stop the source at once. A
+///   source that fails sends `81 02 FF`; the device then ignores commands until RESET_ACK.
 /// - SET_CONTROL (volume) is logged and ignored (§9): the session's mixer already applied it, and the Mac's
 ///   volume applies on output.
 ///
@@ -139,8 +149,15 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         public var capabilities: UInt32 = AudioWire.Caps.playback
         public var creditBatch = AudioWire.creditBatch
         public var creditIdleFlush = AudioWire.creditIdleFlush
+        /// Announce and serve the capture device (caps bit 0x01). Needs `captureSource` at OPEN time.
+        public var microphone = false
+        /// The Opus subformats AudioToolbox encodes (capture CAPINFO reply).
+        public var opusEncodeSubformats: Set<UInt16> = OpusSupport.encodableSubformats
 
         public init() {}
+
+        /// The module's capability bits.
+        public var announcedCapabilities: UInt32 { capabilities | (microphone ? AudioWire.Caps.audioInput : 0) }
     }
 
     public enum Event: CustomStringConvertible {
@@ -148,12 +165,18 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         case module([UInt8])
         /// One handled host command (WRITEs are summarised at CLOSE and every 500th).
         case command(String)
+        /// The capture source started (true) or stopped (false).
+        case recording(Bool)
+        /// The microphone permission was denied at a capture OPEN (the app shows a one-time note).
+        case microphoneDenied
         case stopped
 
         public var description: String {
             switch self {
             case .module(let bytes): return "module \(bytes.count) B: " + bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
             case .command(let text): return text
+            case .recording(let on): return on ? "capture started" : "capture stopped"
+            case .microphoneDenied: return "microphone permission denied"
             case .stopped: return "stopped"
             }
         }
@@ -170,6 +193,37 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     public let config: Config
     public private(set) var diagnostics = AudioDiagnostics()
 
+    /// The capture device's state (§7.1).
+    public enum CaptureState: Equatable, Sendable {
+        case closed
+        /// OPEN received; waiting for the permission answer.
+        case awaitingPermission(AudioFormatCode)
+        case open(AudioFormatCode)
+        case recording(AudioFormatCode)
+        /// After `81 02 FF`: commands are ignored until RESET_ACK.
+        case reset
+    }
+
+    /// Uplink audio: the microphone (app) or a tone (icactl, tests). Nil: capture OPENs fail.
+    public var captureSource: AudioCaptureSource?
+    /// Brings work back onto the session queue (permission answers, encoded frames). Nil: inline (tests).
+    public var schedule: ((@escaping () -> Void) -> Void)?
+    /// Where captured samples are encoded. Nil: inline in the source's callback (tests).
+    public var captureQueue: DispatchQueue?
+    /// The uplink encoder for an OPEN's format (tests inject their own).
+    public var makeEncoder: (AudioFormatCode) -> AudioPacketEncoder? = { OpusEncoder($0) }
+    public private(set) var captureState = CaptureState.closed
+    private var captureGeneration = 0
+    private var uplink: AudioUplink?
+    private var startAfterOpen = false
+    private var captureSequence: UInt16 = 0
+    /// The CGP link is down (between suspend and resume): the source never runs, whatever the state.
+    private var linkDown = false
+    private var sourceRunning = false
+    /// The user disabled the microphone for this session, or the session is ending: no source starts again and
+    /// capture OPENs fail.
+    public private(set) var microphoneDisabled = false
+
     private var parser = AudioStreamParser()
     private var decoders: [UInt8: AudioDecoder] = [:]
     /// Per open playback device: WRITEs, bytes and frames since OPEN, and the last WRITE_V2 sequence.
@@ -184,7 +238,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
 
     /// The 55-byte module (§1.4).
     public func module(channel: UInt8, date: Date) -> [UInt8] {
-        let bytes = WDModules.audio(capabilities: config.capabilities, channel: channel, date: date)
+        let bytes = WDModules.audio(capabilities: config.announcedCapabilities, channel: channel, date: date)
         diagnostics.moduleBytes = bytes
         onEvent?(.module(bytes))
         return bytes
@@ -205,11 +259,46 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     public func suspend() {
         guard !ended else { return }
         sink?.audioSuspend()
+        linkDown = true
+        if sourceRunning {
+            stopSource()
+            log("capture paused (link down)")
+        }
     }
 
     public func resume() {
         guard !ended else { return }
         sink?.audioResume()
+        linkDown = false
+        if case .recording(let code) = captureState, !sourceRunning, !microphoneDisabled {
+            startSource(code)
+            log("capture resumed (link back)")
+        }
+    }
+
+    /// Stops the microphone now and keeps it off for the rest of this session: the session is closing or
+    /// logging off, or the user chose "Disable microphone". With `notifyHost`, a running capture is ended with
+    /// `81 02 FF` (the host then RESET_ACKs; later OPENs are answered "failed").
+    public func disableMicrophone(notifyHost: Bool, reason: String) {
+        guard !microphoneDisabled else { return }
+        microphoneDisabled = true
+        var note = ""
+        switch captureState {
+        case .awaitingPermission:
+            if notifyHost, !ended { answerOpen(ok: false, "microphone disabled"); note = " → pending OPEN answered failed" }
+            stopCapture(to: .closed)
+        case .open, .recording:
+            if notifyHost, !ended {
+                stopCapture(to: .reset)
+                send(AudioReply.resetDevice(AudioWire.captureDevice, reason: AudioWire.ResetReason.streamError))
+                note = " → RESET_DEVICE 0xFF"
+            } else {
+                stopCapture(to: .closed)
+            }
+        case .closed, .reset:
+            break
+        }
+        log("microphone disabled for this session (\(reason))" + note)
     }
 
     /// Session end: nothing is sent any more, the sink stops.
@@ -219,6 +308,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         for device in decoders.keys.sorted() { logClose(device, reason: "session ended") }
         decoders.removeAll()
         parser.reset()
+        stopCapture(to: .closed)
         sink?.audioStop()
         onEvent?(.stopped)
     }
@@ -251,6 +341,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
                 sink?.audioClose(device: device)
             }
             decoders.removeAll()
+            stopCapture(to: .closed)
             uncreditedWrites = 0
             flushGeneration += 1
             diagnostics.readWriteV2 = version >= 3 && (caps ?? 0) & AudioWire.Caps.readWriteV2 != 0
@@ -266,9 +357,14 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
 
         case let .requestCapInfo(device, listOffset, formats):
             diagnostics.hostCapInfo[device] = formats
-            let accepted = device == AudioWire.playbackDevice
-                ? formats.filter { AudioDecoders.understands($0, codecs: config.codecs, opusSubformats: config.opusSubformats) }
-                : []
+            let accepted: [AudioFormatCode]
+            if device == AudioWire.playbackDevice {
+                accepted = formats.filter { AudioDecoders.understands($0, codecs: config.codecs, opusSubformats: config.opusSubformats) }
+            } else if device == AudioWire.captureDevice {
+                accepted = formats.filter(canCapture)
+            } else {
+                accepted = []
+            }
             diagnostics.replyCapInfo[device] = accepted
             send(AudioReply.capInfo(device: device, formats: accepted))
             send(AudioReply.credit(.command, count: 1))
@@ -297,14 +393,16 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
                 creditCommand()
             } else if device == AudioWire.captureDevice {
                 diagnostics.noteOpen(device, code, decoder: false)
-                send(AudioReply.openResponse(device: device, status: 0xFF))
-                creditCommand()
-                log("OPEN capture dev \(device) \(code) → OPEN_RESPONSE failed (no microphone in this client)")
+                openCapture(code)
             } else {
                 diagnostics.noteOpen(device, code, decoder: false)
                 creditCommand()
                 log("OPEN unknown dev \(device) \(code) → ignored")
             }
+
+        case .close(let device) where device == AudioWire.captureDevice:
+            closeCapture()
+            creditCommand()
 
         case .close(let device):
             if decoders[device] != nil {
@@ -327,13 +425,20 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             if device == AudioWire.playbackDevice {
                 send(AudioReply.resetDevice(device, reason: AudioWire.ResetReason.wrongDeviceType))
                 log("\(command.name) for playback dev \(device) → RESET_DEVICE 3")
+            } else if device == AudioWire.captureDevice {
+                recordingCommand(command)
             } else {
-                log("\(command.name) dev \(device) → ignored (no microphone)")
+                log("\(command.name) dev \(device) → ignored (unknown device)")
             }
             creditCommand()
 
         case .resetAck(let device):
-            log("RESET_ACK dev \(device)")
+            if device == AudioWire.captureDevice, captureState == .reset {
+                captureState = .closed
+                log("RESET_ACK dev \(device): capture device usable again")
+            } else {
+                log("RESET_ACK dev \(device)")
+            }
             creditCommand()
 
         case let .setControl(a, b, c, value):
@@ -401,6 +506,192 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         uncreditedWrites = 0
         send(AudioReply.credit(.command, count: n))
         send(AudioReply.credit(.buffer, count: n))
+    }
+
+    // MARK: Capture (§7)
+
+    private func canCapture(_ code: AudioFormatCode) -> Bool {
+        config.microphone && config.codecs.contains(.opus) && code.opus != nil && config.opusEncodeSubformats.contains(code.subformat)
+    }
+
+    private func onSession(_ block: @escaping () -> Void) {
+        if let schedule { schedule(block) } else { block() }
+    }
+
+    private func answerOpen(ok: Bool, _ why: String) {
+        send(AudioReply.openResponse(device: AudioWire.captureDevice, status: ok ? 0 : 0xFF))
+        creditCommand()
+        diagnostics.captureOpenResults.append(ok ? "ok" : why)
+        if diagnostics.captureOpenResults.count > AudioDiagnostics.recentLimit { diagnostics.captureOpenResults.removeFirst() }
+    }
+
+    private func openCapture(_ code: AudioFormatCode) {
+        if captureState == .reset {
+            creditCommand()
+            log("OPEN capture \(code) → ignored (device in reset state until RESET_ACK)")
+            return
+        }
+        // A re-OPEN replaces the previous one; a still unanswered OPEN is answered "failed" first.
+        if case .awaitingPermission = captureState { answerOpen(ok: false, "replaced by another OPEN") }
+        stopCapture(to: .closed)
+        guard !microphoneDisabled else {
+            answerOpen(ok: false, "microphone disabled")
+            log("OPEN capture \(code) → OPEN_RESPONSE failed (microphone disabled for this session)")
+            return
+        }
+        guard canCapture(code) else {
+            answerOpen(ok: false, config.microphone ? "format not encodable" : "microphone off")
+            log("OPEN capture \(code) → OPEN_RESPONSE failed (\(config.microphone ? "format not encodable here" : "microphone off"))")
+            return
+        }
+        guard let source = captureSource, let encoder = makeEncoder(code) else {
+            answerOpen(ok: false, captureSource == nil ? "no capture source" : "no encoder")
+            log("OPEN capture \(code) → OPEN_RESPONSE failed (\(captureSource == nil ? "no capture source" : "encoder not available"))")
+            return
+        }
+        captureGeneration += 1
+        let generation = captureGeneration
+        captureState = .awaitingPermission(code)
+        startAfterOpen = false
+        log("OPEN capture \(code) → asking for microphone permission")
+        source.requestPermission { [weak self] granted in
+            self?.onSession {
+                guard let self, !self.ended, self.captureGeneration == generation,
+                      self.captureState == .awaitingPermission(code) else { return }
+                guard granted, !self.microphoneDisabled else {
+                    self.captureState = .closed
+                    self.answerOpen(ok: false, "permission denied")
+                    self.log("OPEN capture \(code) → OPEN_RESPONSE failed (microphone permission denied)")
+                    self.onEvent?(.microphoneDenied)
+                    return
+                }
+                self.uplink = AudioUplink(encoder: encoder)
+                self.captureSequence = 0
+                self.captureState = .open(code)
+                self.answerOpen(ok: true, "")
+                self.log("OPEN capture \(code) → OPEN_RESPONSE ok (640/64), \(encoder.frameCount)-frame packets")
+                if self.startAfterOpen { self.startRecording(code) }
+            }
+        }
+    }
+
+    private func closeCapture() {
+        switch captureState {
+        case .reset:
+            log("CLOSE capture → ignored (device in reset state until RESET_ACK)")
+        case .awaitingPermission:
+            answerOpen(ok: false, "closed before the permission answer")
+            stopCapture(to: .closed)
+            log("CLOSE capture before the permission answer → OPEN answered failed")
+        case .closed:
+            log("CLOSE capture (not open)")
+        default:
+            stopCapture(to: .closed)
+            log("CLOSE capture: \(diagnostics.captureFramesSent) frames sent so far")
+        }
+    }
+
+    private func recordingCommand(_ command: AudioHostCommand) {
+        switch (command, captureState) {
+        case (_, .reset):
+            log("\(command.name) capture → ignored (device in reset state until RESET_ACK)")
+        case (.startRecord, .open(let code)):
+            startRecording(code)
+        case (.startRecord, .awaitingPermission):
+            startAfterOpen = true
+            log("START_RECORD while the permission is pending → starts once granted")
+        case (.startRecord, .recording):
+            log("START_RECORD (already recording)")
+        case (.stopRecord, .recording(let code)):
+            stopCapture(to: .open(code))
+            log("STOP_RECORD: \(diagnostics.captureFramesSent) frames sent so far")
+        case (.stopRecord, .awaitingPermission):
+            startAfterOpen = false
+            log("STOP_RECORD while the permission is pending")
+        default:
+            // READ_REQUEST is ignored (push-based recorder), RESET_RECORD is a no-op, others do not apply.
+            log("\(command.name) capture → no-op")
+        }
+    }
+
+    private func startRecording(_ code: AudioFormatCode) {
+        captureState = .recording(code)
+        startAfterOpen = false
+        if linkDown {
+            log("START_RECORD while the link is down → capture starts after the resume")
+        } else if !microphoneDisabled {
+            startSource(code)
+        }
+    }
+
+    /// Starts the source with a fresh frame buffer and encoder: nothing captured before a STOP, a pause or a
+    /// re-OPEN is ever sent (§7.1).
+    private func startSource(_ code: AudioFormatCode) {
+        guard !linkDown, !microphoneDisabled, !sourceRunning else { return }
+        if uplink == nil { uplink = makeEncoder(code).map { AudioUplink(encoder: $0) } }
+        guard let source = captureSource, let uplink, let stream = code.opus else { return streamError("no source or encoder") }
+        let generation = captureGeneration
+        let queue = captureQueue
+        let deliver: ([Float]) -> Void = { [weak self] samples in
+            let work = {
+                let packets = uplink.push(samples)
+                let errors = uplink.errors
+                guard !packets.isEmpty || errors > 0 else { return }
+                self?.onSession { self?.sendFrames(packets, encodeErrors: errors, generation: generation) }
+            }
+            if let queue { queue.async(execute: work) } else { work() }
+        }
+        do {
+            try source.start(format: stream, deliver: deliver)
+            sourceRunning = true
+            onEvent?(.recording(true))
+            log("START_RECORD → capture started (\(stream), 10 ms Opus packets)")
+        } catch {
+            streamError("\(error)")
+        }
+    }
+
+    private func sendFrames(_ packets: [Data], encodeErrors: Int, generation: Int) {
+        guard !ended, generation == captureGeneration, case .recording = captureState, sourceRunning, !linkDown else { return }
+        diagnostics.captureEncodeErrors = encodeErrors
+        for packet in packets {
+            if diagnostics.readWriteV2 {
+                send(AudioReply.readDataV2(device: AudioWire.captureDevice, sequence: captureSequence, packet: packet))
+                captureSequence &+= 1
+            } else {
+                send(AudioReply.readData(device: AudioWire.captureDevice, packet: packet))
+            }
+            creditCommand()
+            diagnostics.captureFramesSent += 1
+            diagnostics.captureBytesSent += packet.count
+            if diagnostics.captureFramesSent == 1 { log("first capture frame: \(packet.count) B packet") }
+        }
+    }
+
+    /// The source failed: `81 02 FF`, stop, ignore commands until RESET_ACK (§7.1).
+    private func streamError(_ why: String) {
+        stopCapture(to: .reset)
+        send(AudioReply.resetDevice(AudioWire.captureDevice, reason: AudioWire.ResetReason.streamError))
+        log("capture error (\(why)) → RESET_DEVICE 0xFF; waiting for RESET_ACK")
+    }
+
+    /// Stops the source and drops its frame buffer, and frames still on their way (generation).
+    private func stopSource() {
+        guard sourceRunning else { return }
+        sourceRunning = false
+        captureSource?.stop()
+        captureGeneration += 1
+        uplink = nil
+        onEvent?(.recording(false))
+    }
+
+    /// Stops the source (if it runs), drops frames still on their way, and sets the state.
+    private func stopCapture(to state: CaptureState) {
+        stopSource()
+        captureGeneration += 1
+        startAfterOpen = false
+        uplink = nil
+        captureState = state
     }
 
     private func logClose(_ device: UInt8, reason: String) {

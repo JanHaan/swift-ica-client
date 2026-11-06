@@ -114,6 +114,7 @@ final class SessionController: NSObject {
             self?.screensChanged()
         }
         Self.registry.append(Weak(self))
+        Self.lastLayout = layout
     }
 
     deinit { screenObserver.map(NotificationCenter.default.removeObserver) }
@@ -132,6 +133,8 @@ final class SessionController: NSObject {
         init(_ value: SessionController) { self.value = value }
     }
     private static var registry: [Weak] = []
+    /// The layout of the most recent session (Settings explains a fallback after it ended).
+    private(set) static var lastLayout: ScalingLayout?
 
     /// Sessions that have not ended (main thread).
     static var running: [SessionController] {
@@ -318,7 +321,7 @@ final class SessionController: NSObject {
         }
         let display = session.wd.configuration.display
         layout.logLines.forEach(vlog)
-        if let note = layout.note { vlog("scaling: \(scalingNoteText(note, layout: layout))") }
+        if let note = layout.note { vlog("scaling: \(scalingNoteText(note, context: .current, english: true))") }
         vlog("session \(name): \(layout.monitors.count) screen(s), display \(display.width)x\(display.height), cap 0x20 \(display.monitors.isEmpty ? [display.scalePercent] : display.monitors.map(\.scalePercent)) %, monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264)")
         try await session.start()
     }
@@ -838,8 +841,20 @@ final class SessionController: NSObject {
         onEnded?(self)
     }
 
+    /// Indicator and "Disable Microphone" while this session records (docs/98 §10.3). Main thread.
+    private func microphoneRecording(_ on: Bool) {
+        let session = self.session, title = displayName(name), recording = on && !ended
+        MainActor.assumeIsolated {
+            MicrophoneIndicator.shared.update(self, name: title, recording: recording) {
+                vlog("audio: microphone disabled by the user for this session")
+                session.disableMicrophone()
+            }
+        }
+    }
+
     private func tearDown() {
         hud.hide()
+        microphoneRecording(false)
         for id in Array(windows.keys) { remove(id) }
     }
 
@@ -905,7 +920,8 @@ final class SessionController: NSObject {
             return nil
         }
         let opus = config.codecs.contains(.opus) ? "\(config.opusSubformats.count) Opus subformat(s) decodable" : "Opus not offered"
-        vlog("audio: on (\(config.codecs.map(\.rawValue).sorted().joined(separator: ", ")); \(opus))")
+        let mic = config.microphone ? "microphone on request (\(config.opusEncodeSubformats.count) Opus subformat(s) encodable)" : "no microphone"
+        vlog("audio: on (\(config.codecs.map(\.rawValue).sorted().joined(separator: ", ")); \(opus); \(mic))")
         return config
     }
 
@@ -916,10 +932,17 @@ final class SessionController: NSObject {
         let player = AudioPlayer()
         player.log = { vlog("audio out: \($0)") }
         engine.sink = player
+        // The Mac microphone, opened only while the host records; permission is asked at the first capture OPEN.
+        if engine.config.microphone { engine.captureSource = Microphone() }
         // Session queue. Commands, formats, counts and the module bytes (no audio data).
         engine.onEvent = { [weak self] event in
             vlog("audio: \(event)")
-            if case .module = event { DispatchQueue.main.async { self?.announcedAudio = true } }
+            switch event {
+            case .module: DispatchQueue.main.async { self?.announcedAudio = true }
+            case .microphoneDenied: DispatchQueue.main.async { MicrophoneNote.show() }
+            case .recording(let on): DispatchQueue.main.async { self?.microphoneRecording(on) }
+            default: break
+            }
         }
     }
 

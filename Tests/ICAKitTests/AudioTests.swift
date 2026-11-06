@@ -771,6 +771,13 @@ private func code3Packet(_ frames: [Data]) -> Data {
         let limited = AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO": "1", "ICA_AUDIO_CODECS": "PCM, speex"])
         #expect(limited.codecs == [.pcm])
         #expect(limited.engineConfig?.codecs == [.pcm])
+        #expect(!AudioSettings.defaultMicrophone && !AudioSettings.load(defaults: defaults, env: [:]).microphone)
+        #expect(AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO": "1", "ICA_AUDIO_MIC": "1"]).engineConfig?.microphone == true)
+        var mic = AudioSettings()
+        mic.microphone = true
+        mic.save(to: defaults)
+        #expect(AudioSettings.load(defaults: defaults, env: [:]).microphone)
+        #expect(!AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO_MIC": "off"]).microphone)
     }
 }
 
