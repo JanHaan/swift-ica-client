@@ -323,6 +323,7 @@ default:
                                          opens the microphone; ICA_AUDIOTEST_PLAY=1 also plays it aloud
                                          "Sound ABC"/"Sound XYZ": window screenshot .session/audiotest-sound-0.png; keys
                                          only from ICA_AUDIOTEST_KEYS="ctrl+tab,tab,alt+t" (1.5 s apart, screenshot each)
+                                         ICA_AUDIOTEST_MIC=tone: also announce the capture device, fed by a 440 Hz sine
       icactl sessions list [--names]     store sessions (Sessions/List + ListAvailable), read-only; ids as fingerprints
       icactl sessions probe              read-only live checks of docs/90 §11 items 1, 2, 4–7 (keys, counts, states)
       icactl sessions disconnect <id>    Sessions/DisconnectSessions; only sessions whose apps are all test resources
@@ -1483,10 +1484,17 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
     let observe = env["ICA_AUDIOTEST_OBSERVE"].flatMap(Double.init) ?? 60
     var audioConfig = AudioEngine.Config()
     audioConfig.codecs = AudioSettings.load(env: env).codecs   // ICA_AUDIO_CODECS=pcm limits the CAPINFO reply
-    audioConfig.capabilities = AudioWire.Caps.playback   // never the microphone bit
+    audioConfig.capabilities = AudioWire.Caps.playback
+    // The capture device only with a synthetic source: icactl never opens the real microphone (docs/98 §10.3).
+    let micMode = env["ICA_AUDIOTEST_MIC"]?.lowercased()
+    if let micMode, !["tone", "synthetic"].contains(micMode) { fail("ICA_AUDIOTEST_MIC must be \"tone\" (a 440 Hz sine; there is no real microphone path)") }
+    audioConfig.microphone = micMode != nil
     say("audio: codecs \(audioConfig.codecs.map(\.rawValue).sorted().joined(separator: ",")); Opus decoder listed \(OpusSupport.systemDecoderListed), "
         + "decodable subformats [\(audioConfig.opusSubformats.sorted().map { String(format: "0x%02x", $0) }.joined(separator: " "))]; "
-        + "caps 0x\(String(audioConfig.capabilities, radix: 16)) (no microphone); playback \(play ? "aloud + WAV" : "WAV only")")
+        + "caps 0x\(String(audioConfig.announcedCapabilities, radix: 16)) "
+        + (audioConfig.microphone ? "(capture: 440 Hz tone, encodable [\(audioConfig.opusEncodeSubformats.sorted().map { String(format: "0x%02x", $0) }.joined(separator: " "))])"
+                                  : "(no capture device)")
+        + "; playback \(play ? "aloud + WAV" : "WAV only")")
     var config = WinstationDriver.Configuration()
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
@@ -1496,6 +1504,7 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
     let player: AudioPlayer? = play ? AudioPlayer() : nil
     player?.log = { say("audio out: \($0)") }
     audio.sink = player.map { AudioSinkGroup([writer, $0]) } ?? writer
+    if audioConfig.microphone { audio.captureSource = AudioToneSource() }
     let seamless = session.seamless
 
     // Session-queue state.
@@ -1713,6 +1722,11 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
     say("OPEN: \(d.openCount) (\(d.decodableOpenCount) decodable)" + (d.openCount > d.recentOpens.count ? "; the last \(d.recentOpens.count):" : ""))
     for o in d.recentOpens { say("  OPEN dev \(o.device) \(o.code) → \(o.decoder ? "decoded" : "not decodable")") }
     say("WRITEs \(d.writes), \(d.writeBytes) B; decoded \(d.decodedFrames) frames; decode errors \(d.decodeErrors); V2 sequence gaps \(d.sequenceGaps)")
+    if audioConfig.microphone {
+        say("capture (tone): OPEN answers [\(d.captureOpenResults.joined(separator: ", "))]; \(d.captureFramesSent) READ_DATA frames, "
+            + "\(d.captureBytesSent) B of Opus; encode errors \(d.captureEncodeErrors); "
+            + String(format: "%.1f s of audio", Double(d.captureFramesSent) / 100))
+    }
     if d.setControlCount > 0 {
         say("SET_CONTROL (ignored): \(d.setControlCount); last: " + d.recentSetControls.map { hexLine($0) }.joined(separator: " | "))
     }

@@ -47,6 +47,7 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSSupportsSuddenTermination</key><false/>
+    <key>NSMicrophoneUsageDescription</key><string>ICA Viewer passes your microphone to the remote session when an application there records audio.</string>
 </dict>
 </plist>
 EOF
@@ -89,6 +90,7 @@ developer_id_sign() {
     <key>com.apple.application-identifier</key><string>$team.$bundle_id</string>
     <key>com.apple.developer.team-identifier</key><string>$team</string>
     <key>keychain-access-groups</key><array><string>$team.$bundle_id</string></array>
+    <key>com.apple.security.device.audio-input</key><true/>
 </dict>
 </plist>
 ENT
@@ -137,6 +139,7 @@ else
     <key>com.apple.application-identifier</key><string>$team.$bundle_id</string>
     <key>com.apple.developer.team-identifier</key><string>$team</string>
     <key>keychain-access-groups</key><array><string>$team.$bundle_id</string></array>
+    <key>com.apple.security.device.audio-input</key><true/>
 </dict>
 </plist>
 ENT

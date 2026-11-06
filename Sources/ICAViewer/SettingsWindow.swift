@@ -7,7 +7,7 @@ import ICAKit
 /// while sessions run offers to reconnect them. The shared folder (client drive M, docs/95 §A, D32)
 /// applies at the next connect, as does printing (docs/97 §6, PDF mode: receive jobs from the host's Citrix PDF
 /// Printer; which action the job window offers first) and session audio (docs/98 §10.4: play session sounds,
-/// default on; the volume follows macOS).
+/// default on; the volume follows macOS; the microphone, default off per §10.4, opens only while the host records).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -36,8 +36,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let status = NSTextField(wrappingLabelWithString: "")
     private let windowsScalingPopup = NSPopUpButton()
     private let clientScalingPopup = NSPopUpButton()
-    /// One line: the session this Mac's screens get with the chosen scaling, or why it falls back.
-    private let scalingNote = NSTextField(labelWithString: "")
+    /// Up to two lines: why the current (or last) session uses 1x, and what this Mac's screens get with
+    /// the chosen scaling (or why that falls back).
+    private let scalingNote = NSTextField(wrappingLabelWithString: " ")
+    private var contentStack: NSStackView?
     private let shareBox = NSButton(checkboxWithTitle: loc("Share a folder with sessions as drive M",
                                                            "Einen Ordner als Laufwerk M für Sitzungen freigeben"),
                                     target: nil, action: nil)
@@ -55,6 +57,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let audioBox = NSButton(checkboxWithTitle: loc("Play session sounds (volume follows the Mac)",
                                                            "Sitzungstöne abspielen (Lautstärke wie am Mac)"),
                                     target: nil, action: nil)
+    private let micBox = NSButton(checkboxWithTitle: loc("Microphone: pass it when a session app records",
+                                                         "Mikrofon: weitergeben, wenn eine Sitzungs-App aufnimmt"),
+                                  target: nil, action: nil)
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -138,7 +143,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         }
         scalingNote.textColor = .secondaryLabelColor
         scalingNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        scalingNote.lineBreakMode = .byTruncatingTail
+        scalingNote.preferredMaxLayoutWidth = 360
+        scalingNote.maximumNumberOfLines = 4
+        scalingNote.setContentCompressionResistancePriority(.required, for: .vertical)
         scalingNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
         shareBox.target = self
         shareBox.action = #selector(shareChanged)
@@ -152,6 +159,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         }
         printBox.target = self
         printBox.action = #selector(printChanged)
+        audioBox.target = self
+        audioBox.action = #selector(audioChanged)
         printActionPopup.addItems(withTitles: [loc("Show the print dialog first", "Zuerst den Druckdialog zeigen"),
                                                loc("Open in Preview first", "Zuerst in Vorschau öffnen")])
         folderPath.lineBreakMode = .byTruncatingMiddle
@@ -190,6 +199,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [label(loc("Printing:", "Drucken:")), printBox],
             [NSGridCell.emptyContentView, printActionPopup],
             [label(loc("Audio:", "Audio:")), audioBox],
+            [NSGridCell.emptyContentView, micBox],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -227,7 +237,20 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         }
         window?.contentView = stack
+        contentStack = stack
+        updateScalingNote()
         window?.setContentSize(stack.fittingSize)
+    }
+
+    /// Fits the window to its content (the scaling note changes height), keeping the top edge.
+    private func fitWindow() {
+        guard let window, let stack = contentStack else { return }
+        stack.layoutSubtreeIfNeeded()
+        let size = stack.fittingSize
+        let content = window.contentRect(forFrameRect: window.frame)
+        guard abs(content.height - size.height) > 0.5 || abs(content.width - size.width) > 0.5 else { return }
+        let frame = window.frameRect(forContentRect: NSRect(x: content.minX, y: content.maxY - size.height, width: size.width, height: size.height))
+        window.setFrame(frame, display: window.isVisible)
     }
 
     private func loadDemo() {
@@ -247,6 +270,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         selectDriveMapping(CDMSettings())
         selectPrinting(PrintSettings())
         audioBox.state = AudioSettings.defaultEnabled ? .on : .off
+        micBox.state = AudioSettings.defaultMicrophone ? .on : .off
+        audioChanged()
         modeChanged()
     }
 
@@ -328,9 +353,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private func saveAudio() {
         var settings = AudioSettings.load(env: [:])
         settings.enabled = audioBox.state == .on
+        settings.microphone = micBox.state == .on
         guard settings != AudioSettings.load(env: [:]) else { return }
         settings.save()
-        vlog("audio: saved (\(settings.enabled ? "on" : "off")); applies at the next connect")
+        vlog("audio: saved (\(settings.enabled ? "on" : "off"), microphone \(settings.microphone ? "on" : "off")); applies at the next connect")
+    }
+
+    /// The microphone goes through the same channel: without session audio there is none.
+    @objc private func audioChanged() { micBox.isEnabled = audioBox.state == .on
     }
 
     // MARK: Scaling
@@ -355,13 +385,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
 
     @objc private func scalingChanged() { updateScalingNote() }
 
-    /// What the current screens would get; the full text is in the tooltip.
+    /// The scaling note: first why the running (else the last) session uses 1x, if it fell back; then
+    /// what the current screens get with the chosen settings, also when no session is connected.
     private func updateScalingNote() {
+        var lines: [String] = []
+        if let running = SessionController.running.last {
+            if let note = running.layout.note { lines.append(scalingNoteText(note, context: .current)) }
+        } else if let last = SessionController.lastLayout, let note = last.note {
+            lines.append(scalingNoteText(note, context: .last))
+        }
         let layout = ScalingLayout.resolve(screens: SessionController.currentScreens(), settings: selectedScaling,
                                            limit: ScalingLimits.sessionLimit())
-        let text = layout.note.map { scalingNoteText($0, layout: layout) } ?? scalingSummary(layout)
+        let screens = layout.note.map { scalingNoteText($0, context: .screens) } ?? scalingSummary(layout)
+        if !lines.contains(where: { $0 == screens }) { lines.append(screens) }
+        let text = lines.joined(separator: "\n")
         scalingNote.stringValue = text
         scalingNote.toolTip = text
+        fitWindow()
     }
 
     /// Saves the scaling choice; if running sessions connected with other settings, offers to reconnect
@@ -406,7 +446,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         selectScaling(ScalingSettings.load(env: [:]))
         selectDriveMapping(CDMSettings.load(env: [:]))
         selectPrinting(PrintSettings.load(env: [:]))
-        audioBox.state = AudioSettings.load(env: [:]).enabled ? .on : .off
+        let audio = AudioSettings.load(env: [:])
+        audioBox.state = audio.enabled ? .on : .off
+        micBox.state = audio.microphone ? .on : .off
+        audioChanged()
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",
@@ -549,24 +592,38 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 }
 
-/// The one-line explanation when a session does not get the scaling asked for (Settings and the log).
-func scalingNoteText(_ note: ScalingLayout.Note, layout: ScalingLayout) -> String {
+/// Whose scaling a note explains.
+enum ScalingNoteContext { case screens, current, last }
+
+/// The explanation when a session does not get the scaling asked for. Settings shows it in the UI
+/// language like its other labels (`loc`); the log passes `english` (log lines are English).
+func scalingNoteText(_ note: ScalingLayout.Note, context: ScalingNoteContext, english: Bool = false) -> String {
+    func tr(_ en: String, _ de: String) -> String { english ? en : loc(en, de) }
+    func head(manual: Bool) -> String {
+        switch context {
+        case .screens: return manual ? tr("With these screens, 2x is refused and 1x is used because ",
+                                          "Mit diesen Bildschirmen wird 2x abgelehnt und 1x genutzt, weil ")
+                                     : tr("With these screens, Auto uses 1x because ", "Mit diesen Bildschirmen nutzt Automatisch 1x, weil ")
+        case .current: return tr("This session uses 1x because ", "Diese Sitzung nutzt 1x, weil ")
+        case .last: return tr("The last session used 1x because ", "Die letzte Sitzung nutzte 1x, weil ")
+        }
+    }
     switch note {
     case let .tooLarge(w, h, lw, lh, manual):
-        return manual
-            ? loc("2x refused: the session would be \(w)×\(h) px, above the \(lw)×\(lh) limit; using 1x.",
-                  "2x abgelehnt: Die Sitzung wäre \(w)×\(h) px, über der Grenze \(lw)×\(lh); es gilt 1x.")
-            : loc("Auto uses 1x: 2x would need \(w)×\(h) px, above the \(lw)×\(lh) limit.",
-                  "Automatisch nutzt 1x: 2x bräuchte \(w)×\(h) px, über der Grenze \(lw)×\(lh).")
+        return head(manual: manual) + tr("2x would need \(w)×\(h) px (limit \(lw)×\(lh)).",
+                                         "2x \(w)×\(h) px bräuchte (Grenze \(lw)×\(lh)).")
     case let .overlapping(manual):
-        return manual
-            ? loc("Per-screen scaling does not fit this screen arrangement; using 1x.",
-                  "Skalierung pro Bildschirm passt nicht zu dieser Anordnung; es gilt 1x.")
-            : loc("Auto uses 1x: per-screen scaling does not fit this screen arrangement.",
-                  "Automatisch nutzt 1x: Skalierung pro Bildschirm passt nicht zu dieser Anordnung.")
+        return head(manual: manual) + tr("2x per screen does not fit this screen arrangement.",
+                                         "2x pro Bildschirm nicht zu dieser Anordnung passt.")
     case let .exceedsAtOneX(w, h, lw, lh):
-        return loc("The session (\(w)×\(h) px) is above the \(lw)×\(lh) limit even at 1x.",
-                   "Die Sitzung (\(w)×\(h) px) liegt selbst bei 1x über der Grenze \(lw)×\(lh).")
+        switch context {
+        case .screens: return tr("With these screens, the session (\(w)×\(h) px) is above the \(lw)×\(lh) limit even at 1x.",
+                                 "Mit diesen Bildschirmen liegt die Sitzung (\(w)×\(h) px) selbst bei 1x über der Grenze \(lw)×\(lh).")
+        case .current: return tr("This session (\(w)×\(h) px) is above the \(lw)×\(lh) limit even at 1x.",
+                                 "Diese Sitzung (\(w)×\(h) px) liegt selbst bei 1x über der Grenze \(lw)×\(lh).")
+        case .last: return tr("The last session (\(w)×\(h) px) was above the \(lw)×\(lh) limit even at 1x.",
+                              "Die letzte Sitzung (\(w)×\(h) px) lag selbst bei 1x über der Grenze \(lw)×\(lh).")
+        }
     }
 }
 
