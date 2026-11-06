@@ -273,6 +273,19 @@ case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)
 
+case "resources":
+    // icactl resources [filter] — read-only store resource list (names, optionally filtered, case-insensitive).
+    let filter = args.first?.lowercased()
+    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    do {
+        let resources = try await store.resources()
+        let names = resources.map(\.name).filter { filter == nil || $0.lowercased().contains(filter!) }.sorted()
+        print("\(names.count) of \(resources.count) resources")
+        names.forEach { print("  \($0)") }
+    } catch {
+        fail("\(error)")
+    }
+
 case "cookies":
     print(http.cookieNames.joined(separator: "\n"))
 
