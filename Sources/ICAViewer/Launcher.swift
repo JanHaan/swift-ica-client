@@ -39,7 +39,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         table.dataSource = self
         table.delegate = self
         table.target = self
-        table.doubleAction = #selector(launchSelected)
+        table.doubleAction = #selector(launchClicked)
         table.usesAlternatingRowBackgroundColors = true
         scroll.documentView = table
         scroll.hasVerticalScroller = true
@@ -48,9 +48,11 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         table.rowHeight = 24
 
         search.placeholderString = "Search"
+        // Typing only filters. NSSearchField sends its action on every change, so it has none; Return
+        // (insertNewline, below) launches the first match.
         search.delegate = self
-        search.target = self
-        search.action = #selector(launchSelected)   // Return in the search field launches the first match
+        search.sendsWholeSearchString = true
+        search.sendsSearchStringImmediately = false
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
 
@@ -160,11 +162,36 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
 
     func controlTextDidChange(_ obj: Notification) { applyFilter() }
 
-    @objc private func launchSelected() {
-        let row = table.selectedRow >= 0 ? table.selectedRow : (shown.isEmpty ? -1 : 0)
-        guard row >= 0, row < shown.count else { return }
-        onLaunch?(shown[row])
+    /// Return in the search field launches the first visible match; other keys keep their meaning.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === search, selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        if let first = shown.first { start(first) }
+        return true
     }
+
+    /// Double-click: the clicked row.
+    @objc private func launchClicked() {
+        let row = table.clickedRow
+        guard row >= 0, row < shown.count else { return }
+        start(shown[row])
+    }
+
+    /// Resource being started; a second launch of it is ignored until `launchEnded()`.
+    private var starting: String?
+
+    private func start(_ resource: StoreClient.Resource) {
+        if let starting {
+            vlog("launcher: \(resource.name) not launched; \(starting) is still starting")
+            setStatus("Starting \(displayName(starting))…")
+            return
+        }
+        starting = resource.name
+        setStatus("Starting \(displayName(resource.name))…")
+        onLaunch?(resource)
+    }
+
+    /// The app delegate's launch finished (connected or failed).
+    func launchEnded() { starting = nil }
 
     /// The store sends no icons we use; every resource gets the system's generic application icon.
     private static let genericIcon = NSWorkspace.shared.icon(for: .applicationBundle)

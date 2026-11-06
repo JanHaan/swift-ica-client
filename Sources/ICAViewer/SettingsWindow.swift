@@ -18,15 +18,37 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let gatewayField = NSTextField()
     private let usernameField = NSTextField()
     private let passwordField = NSSecureTextField()
-    private let protectBox = NSButton(checkboxWithTitle: loc("Require Touch ID or the Mac password to use it",
-                                                             "Nur mit Touch ID oder Mac-Kennwort verwenden"),
-                                      target: nil, action: nil)
-    private let promptRadio = NSButton(radioButtonWithTitle: loc("Enter the passcode at each sign-in",
-                                                                 "Passcode bei jeder Anmeldung eingeben"),
-                                       target: nil, action: nil)
-    private let totpRadio = NSButton(radioButtonWithTitle: loc("Save the TOTP secret (codes are generated)",
-                                                               "TOTP-Geheimnis speichern (Codes werden erzeugt)"),
-                                     target: nil, action: nil)
+    /// A UI text in both languages: shown with `loc`, measured in both so no language truncates.
+    struct Text {
+        let en: String, de: String
+        var shown: String { loc(en, de) }
+        var both: [String] { [en, de] }
+    }
+    typealias T = SettingsWindowController
+    static let protectTitle = Text(en: "Require Touch ID or the Mac password to use it", de: "Nur mit Touch ID oder Mac-Kennwort verwenden")
+    static let promptTitle = Text(en: "Enter the passcode at each sign-in", de: "Passcode bei jeder Anmeldung eingeben")
+    static let totpTitle = Text(en: "Save the TOTP secret (codes are generated)", de: "TOTP-Geheimnis speichern (Codes werden erzeugt)")
+    static let shareTitle = Text(en: "Share a folder with sessions as drive M", de: "Einen Ordner als Laufwerk M für Sitzungen freigeben")
+    static let readOnlyTitle = Text(en: "Read-only (the session cannot change files)", de: "Nur lesen (die Sitzung kann nichts ändern)")
+    static let printTitle = Text(en: "Receive print jobs", de: "Druckaufträge empfangen")
+    static let printHint = Text(en: "From the Citrix PDF Printer in the session.", de: "Vom Citrix PDF Printer in der Sitzung.")
+    static let audioTitle = Text(en: "Play session sounds", de: "Sitzungstöne abspielen")
+    static let audioHint = Text(en: "The volume follows the Mac.", de: "Die Lautstärke folgt dem Mac.")
+    static let micTitle = Text(en: "Pass the microphone to the session", de: "Mikrofon an die Sitzung weitergeben")
+    static let micHint = Text(en: "Only while a session app records.", de: "Nur während eine Sitzungs-App aufnimmt.")
+    /// Row labels (column 0), in grid order.
+    static let rowLabels: [String: Text] = [
+        "gateway": Text(en: "Gateway:", de: "Gateway:"), "user": Text(en: "User name:", de: "Benutzername:"),
+        "password": Text(en: "Password:", de: "Kennwort:"), "passcode": Text(en: "Passcode:", de: "Passcode:"),
+        "secret": Text(en: "TOTP secret:", de: "TOTP-Geheimnis:"), "code": Text(en: "Code:", de: "Code:"),
+        "windows": Text(en: "Windows scaling:", de: "Windows-Skalierung:"), "client": Text(en: "Client scaling:", de: "Client-Skalierung:"),
+        "share": Text(en: "Shared folder:", de: "Freigabe:"), "print": Text(en: "Printing:", de: "Drucken:"),
+        "audio": Text(en: "Audio:", de: "Audio:"),
+    ]
+
+    private let protectBox = NSButton(checkboxWithTitle: T.protectTitle.shown, target: nil, action: nil)
+    private let promptRadio = NSButton(radioButtonWithTitle: T.promptTitle.shown, target: nil, action: nil)
+    private let totpRadio = NSButton(radioButtonWithTitle: T.totpTitle.shown, target: nil, action: nil)
     private let secretField = NSSecureTextField()
     private let digitsPopup = NSPopUpButton()
     private let periodField = NSTextField()
@@ -40,26 +62,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// the chosen scaling (or why that falls back).
     private let scalingNote = NSTextField(wrappingLabelWithString: " ")
     private var contentStack: NSStackView?
-    private let shareBox = NSButton(checkboxWithTitle: loc("Share a folder with sessions as drive M",
-                                                           "Einen Ordner als Laufwerk M für Sitzungen freigeben"),
-                                    target: nil, action: nil)
+    private let shareBox = NSButton(checkboxWithTitle: T.shareTitle.shown, target: nil, action: nil)
     private let folderPath = NSTextField(labelWithString: "")
     private let chooseFolderButton = NSButton(title: loc("Choose…", "Auswählen …"), target: nil, action: nil)
     private let revealFolderButton = NSButton(title: loc("Show in Finder", "Im Finder zeigen"), target: nil, action: nil)
-    private let readOnlyBox = NSButton(checkboxWithTitle: loc("Read-only (the session cannot change files)",
-                                                              "Nur lesen (die Sitzung kann nichts ändern)"),
-                                       target: nil, action: nil)
+    private let readOnlyBox = NSButton(checkboxWithTitle: T.readOnlyTitle.shown, target: nil, action: nil)
     private var sharedFolder = CDMSettings.defaultFolder
-    private let printBox = NSButton(checkboxWithTitle: loc("Receive print jobs (Citrix PDF Printer in the session)",
-                                                           "Druckaufträge empfangen (Citrix PDF Printer in der Sitzung)"),
-                                    target: nil, action: nil)
+    private let printBox = NSButton(checkboxWithTitle: T.printTitle.shown, target: nil, action: nil)
     private let printActionPopup = NSPopUpButton()
-    private let audioBox = NSButton(checkboxWithTitle: loc("Play session sounds (volume follows the Mac)",
-                                                           "Sitzungstöne abspielen (Lautstärke wie am Mac)"),
-                                    target: nil, action: nil)
-    private let micBox = NSButton(checkboxWithTitle: loc("Microphone: pass it when a session app records",
-                                                         "Mikrofon: weitergeben, wenn eine Sitzungs-App aufnimmt"),
-                                  target: nil, action: nil)
+    private let audioBox = NSButton(checkboxWithTitle: T.audioTitle.shown, target: nil, action: nil)
+    private let micBox = NSButton(checkboxWithTitle: T.micTitle.shown, target: nil, action: nil)
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -143,10 +155,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         }
         scalingNote.textColor = .secondaryLabelColor
         scalingNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        scalingNote.preferredMaxLayoutWidth = 360
         scalingNote.maximumNumberOfLines = 4
         scalingNote.setContentCompressionResistancePriority(.required, for: .vertical)
-        scalingNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
         shareBox.target = self
         shareBox.action = #selector(shareChanged)
         chooseFolderButton.target = self
@@ -168,11 +178,21 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         status.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
-        func label(_ text: String) -> NSTextField {
-            let l = NSTextField(labelWithString: text)
+        func label(_ key: String) -> NSTextField {
+            let l = NSTextField(labelWithString: T.rowLabels[key]!.shown)
             l.alignment = .right
             return l
         }
+        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup])
+        func hint(_ text: Text) -> NSTextField {
+            let l = NSTextField(wrappingLabelWithString: text.shown)
+            l.textColor = .secondaryLabelColor
+            l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            l.preferredMaxLayoutWidth = widths.column1
+            return l
+        }
+        scalingNote.preferredMaxLayoutWidth = widths.column1
+        scalingNote.widthAnchor.constraint(equalToConstant: widths.column1).isActive = true
         let params = NSStackView(views: [digitsPopup, NSTextField(labelWithString: loc("digits", "Stellen")),
                                          periodField, NSTextField(labelWithString: loc("s", "s")), algorithmPopup])
         params.spacing = 6
@@ -181,39 +201,45 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let folderRow = NSStackView(views: [folderPath, chooseFolderButton, revealFolderButton])
         folderRow.spacing = 6
         let grid = NSGridView(views: [
-            [label("Gateway:"), gatewayField],
-            [label(loc("User name:", "Benutzername:")), usernameField],
-            [label(loc("Password:", "Kennwort:")), passwordField],
+            [label("gateway"), gatewayField],
+            [label("user"), usernameField],
+            [label("password"), passwordField],
             [NSGridCell.emptyContentView, protectBox],
-            [label(loc("Passcode:", "Passcode:")), promptRadio],
+            [label("passcode"), promptRadio],
             [NSGridCell.emptyContentView, totpRadio],
-            [label(loc("TOTP secret:", "TOTP-Geheimnis:")), secretField],
-            [label(loc("Code:", "Code:")), params],
+            [label("secret"), secretField],
+            [label("code"), params],
             [NSGridCell.emptyContentView, previewRow],
-            [label(loc("Windows scaling:", "Windows-Skalierung:")), windowsScalingPopup],
-            [label(loc("Client scaling:", "Client-Skalierung:")), clientScalingPopup],
+            [label("windows"), windowsScalingPopup],
+            [label("client"), clientScalingPopup],
             [NSGridCell.emptyContentView, scalingNote],
-            [label(loc("Shared folder:", "Freigabe:")), shareBox],
+            [label("share"), shareBox],
             [NSGridCell.emptyContentView, folderRow],
             [NSGridCell.emptyContentView, readOnlyBox],
-            [label(loc("Printing:", "Drucken:")), printBox],
+            [label("print"), printBox],
+            [NSGridCell.emptyContentView, hint(T.printHint)],
             [NSGridCell.emptyContentView, printActionPopup],
-            [label(loc("Audio:", "Audio:")), audioBox],
+            [label("audio"), audioBox],
+            [NSGridCell.emptyContentView, hint(T.audioHint)],
             [NSGridCell.emptyContentView, micBox],
+            [NSGridCell.emptyContentView, hint(T.micHint)],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
-        // Fixed column widths and window width: the longest checkbox/radio label (about 310 pt in English or
-        // German) fits with the same 20 pt margin on the right as on the left.
-        grid.column(at: 0).width = 120
-        grid.column(at: 1).width = 360
+        // Column widths from the widest text in either language (`columnWidths`), so nothing is clipped
+        // or truncated in English or German; same 20 pt margin left and right.
+        grid.column(at: 0).width = widths.column0
+        grid.column(at: 1).width = widths.column1
         grid.row(at: 4).topPadding = 8
         grid.row(at: 9).topPadding = 12
         grid.row(at: 12).topPadding = 12
         grid.row(at: 15).topPadding = 12
-        grid.row(at: 17).topPadding = 12
+        grid.row(at: 16).topPadding = 0   // hint lines sit close under their checkbox
+        grid.row(at: 18).topPadding = 12
+        grid.row(at: 19).topPadding = 0
+        grid.row(at: 21).topPadding = 0
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
                               target: self, action: #selector(forgetAll))
@@ -231,7 +257,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         stack.alignment = .leading
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
-        stack.widthAnchor.constraint(equalToConstant: 540).isActive = true
+        stack.widthAnchor.constraint(equalToConstant: 20 + widths.column0 + grid.columnSpacing + widths.column1 + 20).isActive = true
         for v in [status, buttons] {
             v.translatesAutoresizingMaskIntoConstraints = false
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
@@ -240,6 +266,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         contentStack = stack
         updateScalingNote()
         window?.setContentSize(stack.fittingSize)
+    }
+
+    /// Column widths: column 0 fits the widest row label, column 1 the widest checkbox, radio button or
+    /// popup (at least 360 pt), each measured in English and German. Logged in demo mode.
+    static func columnWidths(popups: [NSPopUpButton]) -> (column0: CGFloat, column1: CGFloat) {
+        let labels = rowLabels.values.flatMap(\.both).map { ($0, NSTextField(labelWithString: $0).fittingSize.width) }
+        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle].flatMap(\.both)
+            .map { ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil).fittingSize.width) }
+        let radios = [promptTitle, totpTitle].flatMap(\.both)
+            .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
+        let menus = popups.map { ($0.titleOfSelectedItem ?? "popup", $0.fittingSize.width) }
+        let column0 = labels.max { $0.1 < $1.1 }!, column1 = (boxes + radios + menus).max { $0.1 < $1.1 }!
+        let widths = (ceil(max(column0.1, 60)), ceil(max(column1.1, 360)))
+        if Demo.enabled {
+            vlog("settings layout: column 0 \(Int(widths.0)) pt (widest \"\(column0.0)\" \(Int(column0.1))), column 1 \(Int(widths.1)) pt (widest \"\(column1.0)\" \(Int(column1.1)))")
+        }
+        return widths
     }
 
     /// Fits the window to its content (the scaling note changes height), keeping the top edge.
@@ -388,19 +431,24 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// The scaling note: first why the running (else the last) session uses 1x, if it fell back; then
     /// what the current screens get with the chosen settings, also when no session is connected.
     private func updateScalingNote() {
-        var lines: [String] = []
+        // (text, is a fallback): fallbacks get ⓘ and the normal label colour, a plain summary stays grey.
+        var lines: [(String, Bool)] = []
         if let running = SessionController.running.last {
-            if let note = running.layout.note { lines.append(scalingNoteText(note, context: .current)) }
+            if let note = running.layout.note { lines.append((scalingNoteText(note, context: .current), true)) }
         } else if let last = SessionController.lastLayout, let note = last.note {
-            lines.append(scalingNoteText(note, context: .last))
+            lines.append((scalingNoteText(note, context: .last), true))
         }
         let layout = ScalingLayout.resolve(screens: SessionController.currentScreens(), settings: selectedScaling,
                                            limit: ScalingLimits.sessionLimit())
-        let screens = layout.note.map { scalingNoteText($0, context: .screens) } ?? scalingSummary(layout)
-        if !lines.contains(where: { $0 == screens }) { lines.append(screens) }
-        let text = lines.joined(separator: "\n")
-        scalingNote.stringValue = text
-        scalingNote.toolTip = text
+        lines.append(layout.note.map { (scalingNoteText($0, context: .screens), true) } ?? (scalingSummary(layout), false))
+        let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let text = NSMutableAttributedString()
+        for (i, (line, fallback)) in lines.enumerated() {
+            text.append(NSAttributedString(string: (i > 0 ? "\n" : "") + (fallback ? "ⓘ " : "") + line,
+                                           attributes: [.font: font, .foregroundColor: fallback ? NSColor.labelColor : NSColor.secondaryLabelColor]))
+        }
+        scalingNote.attributedStringValue = text
+        scalingNote.toolTip = text.string
         fitWindow()
     }
 

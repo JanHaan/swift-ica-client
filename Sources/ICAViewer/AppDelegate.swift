@@ -169,12 +169,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `interactive`: the user chose the resource in the launcher. Automated launches (see `LaunchPolicy`)
     /// are limited to the test resources.
     private func launch(_ resource: StoreClient.Resource, interactive: Bool) {
-        guard let store, !launching else { return }
+        guard let store, !launching else {
+            if !launching { launcher?.launchEnded() }   // no launch started: release the launcher's guard
+            return
+        }
         let automated = !interactive || LaunchPolicy.envAutomated()
         if !LaunchPolicy.allows(resource.name, automated: automated) {
             launcher?.setStatus("Automated runs may only launch the test resources (ICA_TEST_RESOURCES; ICA_ALLOW_ANY_RESOURCE=1 lifts this)")
             vlog("automated launch of \"\(resource.name)\" refused (not in ICA_TEST_RESOURCES)")
             if autoLaunch != nil { AppQuit.request("automated launch refused") }
+            launcher?.launchEnded()
             return
         }
         launching = true
@@ -182,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             defer {
                 launching = false
+                launcher?.launchEnded()
                 if !launchQueue.isEmpty { launch(launchQueue.removeFirst(), interactive: true) }
             }
             do {
