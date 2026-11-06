@@ -47,11 +47,16 @@ The calculator above is a live session; the other images use the app's demo mode
 - Reconnecting to an existing disconnected session. A start that drops early is retried a few times.
 - Display scaling: Windows scaling and client scaling are set separately. The Auto default is
   Retina-sharp at normal size (2x / 200 %), chosen per screen, and falls back to 1x when the
-  session would exceed the protocol's size limit (5120x4096). Verified live on a single Retina
-  screen; the limit with several screens is not yet verified live.
+  session would exceed the protocol's size limit (5120x4096). Verified live: a single Retina
+  screen runs at 2x, and two Retina screens fall back to 1x. Settings explains the fallback.
 - Session management: a Connection Center window (Cmd-Shift-C) lists sessions and can reconnect,
-  disconnect or log them off. Cmd-Q asks whether to Disconnect (default) or Log off. The store
-  operations behind it are verified live; the window itself has not yet been reviewed by a user.
+  disconnect or log them off. Cmd-Q asks whether to Disconnect (default) or Log off. Verified live
+  with a user.
+- Launcher: type to filter the resource list, Return (or a double-click) launches.
+- Audio playback (PCM, Opus): verified live, heard on the Mac.
+- Microphone: Opus uplink when a session application records. Off by default in Settings; macOS asks
+  for permission on first use, and a menu-bar item disables the microphone for the current session.
+  Verified live.
 - Clipboard: text works both ways in the app (verified live).
 
 ## Status
@@ -66,10 +71,8 @@ Implemented but not yet verified live:
   does not redirect client drives.
 - Printing: PDF printing through the host's PDF printer to the macOS print panel. Off by default;
   the test site creates no client printers.
-- Audio playback (PCM, Opus). The channel negotiation works live; actual sound output is not yet
-  verified.
 
-Not implemented yet: microphone and webcam, one Dock entry per remote app (designed), session
+Not implemented yet: webcam, one Dock entry per remote app (designed, not built), session
 sharing, EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
 shared folder. H.264 is untested. Only seamless app launches are exercised; full desktops are
 untested.
