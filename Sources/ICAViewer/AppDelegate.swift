@@ -418,6 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Clipboard trigger: the user may have copied in another app (docs/70 §5.4).
     func applicationDidBecomeActive(_ notification: Notification) {
         sessions.filter { !$0.ended }.forEach { $0.clipboardCheck("app active") }
+        DockIcon.shared.scheduleRefresh()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
