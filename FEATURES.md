@@ -4,7 +4,7 @@ ICAViewer is an independent project and is not affiliated with Citrix. The stock
 summarise Citrix's public documentation (links under Sources); the ICAViewer column describes this
 client.
 
-Status date: 2026-11-05 (ICAViewer column); stock columns from Citrix documentation as fetched
+Status date: 2026-11-06 (ICAViewer column); stock columns from Citrix documentation as fetched
 2026-11-05.
 
 ## How to read this
@@ -26,7 +26,7 @@ Status date: 2026-11-05 (ICAViewer column); stock columns from Citrix documentat
 ## Matrix
 
 Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS = ChromeOS,
-**Ours** = ICAViewer, 2026-11-05.
+**Ours** = ICAViewer, 2026-11-06.
 
 | Feature | Win | Mac | Lin | Web | ChrOS | iOS | Andr | **Ours** |
 |---|---|---|---|---|---|---|---|---|
@@ -79,8 +79,8 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Smart card into session | ✅† | ? | ✅ | ? | ? | ? | ? | ❌ |
 | Scanners / TWAIN | ✅ | ❌ | ⚠️ [33] | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Webcam | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [43] |
-| Audio out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [42] |
-| Microphone (bidirectional audio) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [43] |
+| Audio out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [42] |
+| Microphone (bidirectional audio) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [44] |
 | MS Teams optimisation | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ [34] |
 | Zoom / WebEx optimisation | ✅† | ? | ? | ? | ? | ? | ? | ❌ |
 | Browser content redirection | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -113,9 +113,8 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 9. Not tested. The seamless path is the only one exercised.
 10. Implicit: launching a resource reconnects to the existing session. Verified live.
 11. A Connection Center window lists sessions and can reconnect, disconnect or log off through the
-    store's session endpoints; Cmd-Q asks Disconnect (default) or Log off. The store operations are
-    verified live; the window UI has not yet been reviewed by a user. Session sharing and the
-    reconnect offer at start are not done.
+    store's session endpoints; Cmd-Q asks Disconnect (default) or Log off. Verified live with a
+    user. Session sharing and the reconnect offer at start are not done.
 12. Resumes after a network drop, a Wi-Fi change or a short sleep, as long as the outage stays within
     the server's reliability timeout (typically 180 s). Verified live. On longer outages a Reconnect
     panel relaunches the app, which reconnects to the disconnected session.
@@ -136,8 +135,9 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 20. Windows scaling and client scaling are separate settings. Auto (default) is Retina-sharp at normal
     size: per screen, 2x with a 200 % Windows DPI on Retina, 1x otherwise. It falls back to 1x when
     the session would exceed the protocol's size limit (5120x4096). Verified live on a single Retina
-    screen (pixel-exact 2x, mouse mapping correct). The size limit with several screens is not yet
-    verified live. A settings change mid-session offers a reconnect.
+    screen (pixel-exact 2x, mouse mapping correct) and on two Retina screens, which would exceed the
+    limit and fall back to 1x; Settings explains the fallback. A settings change mid-session offers
+    a reconnect.
 21. ICAViewer uses a client-side frame-rate governor (5 fps idle, 30 fps active), not Citrix's HDX
     adaptive throughput. Idle host repaints (about 154 kB/s for a mail client) still arrive.
 22. Each remote window is a real `NSWindow`: `AXStandardWindow`, working minimize, no duplicate title
@@ -169,9 +169,11 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 40. None, by design.
 41. PDF printing through the host's PDF printer to the macOS print panel; nothing prints without a
     click. Implemented, off by default, not verified live: the test site creates no client printers.
-42. Playback (PCM, Opus) is implemented and the channel negotiation works live, but actual sound
-    output is not yet verified.
+42. Playback (PCM, Opus) verified live: the sound was heard on the Mac.
 43. Not implemented.
+44. Opus uplink, sent when a session application records. Off by default in Settings; macOS asks for
+    permission on first use, and a menu-bar item disables the microphone for the current session.
+    Verified live. The row is for audio only; Teams optimisation is separate.
 
 ## Gaps that matter most
 
@@ -179,13 +181,12 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 
 1. **Auto client reconnect.** Session reliability now covers short outages; automatic reconnect
    after longer ones is still manual (the Reconnect panel).
-2. **Live verification of what is already built.** Client drive mapping, printing and audio sound
-   output are implemented but need a site that redirects drives and printers and a sound-playing
-   app; clipboard HTML, RTF and images are unverified too, and the multi-screen scaling limit is
-   untested.
+2. **Live verification of what is already built.** Client drive mapping and printing are
+   implemented but need a site that redirects drives and printers; clipboard HTML, RTF and images
+   are unverified too.
 3. **Per-app Dock / Cmd-Tab identity and app icons.** The windows switch correctly, but all remote
    apps share one Dock entry (designed, not started).
-4. **Microphone and webcam.** Not implemented (Teams optimisation is a separate, larger piece).
+4. **Webcam.** Not implemented (Teams optimisation is a separate, larger piece).
 5. **Session sharing and full-desktop launch.** Needed for running a second app without a second
    session. The Connection Center covers cleanup.
 6. **General file transfer and clipboard files.** Only the shared folder exists.
