@@ -45,6 +45,11 @@ The calculator above is a live session; the other images use the app's demo mode
 - Seamless windows (TWI): native windows and popups, local move and resize without round trips,
   minimise, multi-monitor sessions spanning all screens.
 - Reconnecting to an existing disconnected session. A start that drops early is retried a few times.
+  At start, the launcher offers to reconnect disconnected sessions (verified live).
+- Session sharing: several published apps run in one session. A second app starts inside the
+  running session, with no second logon (verified live). Closing one app leaves the others running.
+- Dock and Cmd-Tab icon, and the menu-bar app name, follow the active remote app; the launcher shows
+  the real app icons (verified live). The Dock entry itself is still one for the whole client.
 - Display scaling: Windows scaling and client scaling are set separately. The Auto default is
   Retina-sharp at normal size (2x / 200 %), chosen per screen, and falls back to 1x when the
   session would exceed the protocol's size limit (5120x4096). Verified live: a single Retina
@@ -58,6 +63,8 @@ The calculator above is a live session; the other images use the app's demo mode
   for permission on first use, and a menu-bar item disables the microphone for the current session.
   Verified live.
 - Clipboard: text works both ways in the app (verified live).
+- Report a Problem (Help menu): builds a scrubbed report and a prefilled GitHub issue; see
+  [Reporting problems](#reporting-problems).
 
 ## Status
 
@@ -71,11 +78,25 @@ Implemented but not yet verified live:
   does not redirect client drives.
 - Printing: PDF printing through the host's PDF printer to the macOS print panel. Off by default;
   the test site creates no client printers.
+- Webcam: HDX webcam redirection (H.264) with a camera picker. Off by default; macOS asks for
+  permission when the host first starts the camera. The host handshake is verified, but no real
+  camera has been tried yet. Only 32-bit host applications can use this webcam path; 64-bit apps
+  (Windows Camera, Teams, modern browsers) will not see the camera.
 
-Not implemented yet: webcam, one Dock entry per remote app (designed, not built), session
-sharing, EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
+Not implemented yet: one Dock entry with its own name per remote app (designed, not built), EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
 shared folder. H.264 is untested. Only seamless app launches are exercised; full desktops are
 untested.
+
+## Reporting problems
+
+Help > Report a Problem... opens a dialog for a free-text description and a few options (environment,
+settings without secrets, log of the last 10, 30 or 60 minutes, app names hidden by default). It
+shows a scrubbed preview of exactly what the report contains: gateway and store hosts, user names,
+IP addresses, tokens and tickets, e-mail addresses, home paths and app names are removed or replaced.
+Nothing is sent automatically. You review the preview first; the dialog then opens a prefilled GitHub
+issue in your browser and saves the full report as a file you can attach. Issues are public, so check
+the preview before you submit. Separately, ICAViewer keeps a local log in `~/Library/Logs/ICAViewer`
+(readable only by you, not scrubbed); set `ICA_LOG_FILE=0` to turn it off.
 
 ## Requirements
 
