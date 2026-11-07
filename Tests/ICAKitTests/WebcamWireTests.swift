@@ -107,7 +107,7 @@ func webcamCreate(major: UInt32 = 1, minor: UInt32 = 1, devicePath: String? = ""
     @Test func engineProvidesWholeModuleAfterClipboardBeforePrinterWithBindEntry() throws {
         let wd = WinstationDriver(configuration: {
             var c = WinstationDriver.Configuration()
-            c.logon.initialProgram = "#Notepad"
+            c.logon.initialProgram = "#Notepad Demo"
             return c
         }())
         wd.register(ThinwireEngine())

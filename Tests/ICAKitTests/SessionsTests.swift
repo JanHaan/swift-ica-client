@@ -2,6 +2,10 @@ import Foundation
 import Testing
 @testable import ICAKit
 
+/// The resources the test-session gate allows by default (Sources/ICAKit/Sessions.swift): calculator and notepad.
+private let calcName = TestSessionGate.defaultResources[0]
+private let padName = TestSessionGate.defaultResources[1]
+
 // Fixtures are written from docs/90 (the StoreFront Web API examples quoted there); no real data.
 
 private let listJSON = #"""
@@ -257,9 +261,9 @@ private func session(_ id: String, _ state: StoreSessionInfo.ConnectionState, de
 private func refused(_ v: DeviceWideGuard.Verdict) -> Bool { if case .refused = v { true } else { false } }
 
 @Test func deviceWideGuardNeedsEveryListedSessionToBeOurs() {
-    let ours: (StoreSessionInfo) -> Bool = { TestSessionGate.allows($0, allowed: ["Calculator"]) }
-    let rechner = session("r", .connected, device: "D1", apps: ["Calculator"])
-    let rechner2 = session("r2", .disconnected, device: "D1", apps: ["Calculator"])
+    let ours: (StoreSessionInfo) -> Bool = { TestSessionGate.allows($0, allowed: [calcName]) }
+    let calc = session("r", .connected, device: "D1", apps: [calcName])
+    let calc2 = session("r2", .disconnected, device: "D1", apps: [calcName])
     let outlookHere = session("o", .connected, device: "D1", apps: ["Outlook"])
     let outlookByName = session("o2", .disconnected, device: "OTHER", client: "mac-ica", apps: ["Outlook"])
     let outlookElsewhere = session("e", .connected, device: "D2", client: "PC-1", apps: ["Outlook"])
@@ -267,20 +271,20 @@ private func refused(_ v: DeviceWideGuard.Verdict) -> Bool { if case .refused = 
         DeviceWideGuard.check(list, cookieDeviceId: cookie, clientNames: ["MAC-ICA"], isOurs: ours)
     }
 
-    #expect(check(.init(deviceId: "D1", sessions: [rechner, rechner2])) == .allowed(["r", "r2"]))
+    #expect(check(.init(deviceId: "D1", sessions: [calc, calc2])) == .allowed(["r", "r2"]))
     // Any session that is not ours blocks it, wherever the store says it runs (the tie is not trusted).
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner, outlookHere]))))
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner, outlookByName]))))
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner, outlookElsewhere]))))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc, outlookHere]))))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc, outlookByName]))))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc, outlookElsewhere]))))
     // Unreadable entries, or a session without a device id: refused.
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner], skipped: 1))))
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner, session("n", .connected, apps: ["Calculator"])]))))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc], skipped: 1))))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc, session("n", .connected, apps: [calcName])]))))
     // The store's device id must be the cookie we send (app and icactl may differ).
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner]), cookie: nil)))
-    #expect(refused(check(.init(deviceId: "D1", sessions: [rechner]), cookie: "D9")))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc]), cookie: nil)))
+    #expect(refused(check(.init(deviceId: "D1", sessions: [calc]), cookie: "D9")))
     // No device id from the store, or nothing tied to this device: refused.
-    #expect(refused(check(.init(deviceId: nil, sessions: [rechner]))))
-    #expect(refused(DeviceWideGuard.check(.init(deviceId: "D1", sessions: [session("x", .connected, device: "D2", apps: ["Calculator"])]),
+    #expect(refused(check(.init(deviceId: nil, sessions: [calc]))))
+    #expect(refused(DeviceWideGuard.check(.init(deviceId: "D1", sessions: [session("x", .connected, device: "D2", apps: [calcName])]),
                                           cookieDeviceId: "D1", clientNames: [], isOurs: ours)))
 }
 
@@ -292,14 +296,14 @@ private func refused(_ v: DeviceWideGuard.Verdict) -> Bool { if case .refused = 
     await #expect(throws: SessionsError.self) { try await api("dw.test", t).logOffDevice(clientNames: [], isOurs: ours) }
     #expect(t.sent.map(\.path) == ["Sessions/List"])
 
-    let mine = #"{"deviceId": "D1", "sessions": [{"sessionId": "r", "connectionState": "connected", "deviceId": "D1", "applications": [{"name": "Calculator"}]}]}"#
+    let mine = #"{"deviceId": "D1", "sessions": [{"sessionId": "r", "connectionState": "connected", "deviceId": "D1", "applications": [{"name": "\#(calcName)"}]}]}"#
     // Cookie differs from the store's device id: not sent.
     let t1 = FakeTransport([{ _ in (200, [:], mine) }, { _ in (200, [:], #"{"status": "success"}"#) }])
     t1.cookies[DeviceIdentity.cookieName] = "OTHER"
     await #expect(throws: SessionsError.self) { try await api("dw1.test", t1).disconnectDevice(clientNames: [], isOurs: ours) }
     #expect(t1.sent.map(\.path) == ["Sessions/List"])
     // An unreadable entry in the list: not sent.
-    let skipped = #"{"deviceId": "D1", "sessions": [{"sessionId": "r", "connectionState": "connected", "deviceId": "D1", "applications": [{"name": "Calculator"}]}, {"connectionState": "connected"}]}"#
+    let skipped = #"{"deviceId": "D1", "sessions": [{"sessionId": "r", "connectionState": "connected", "deviceId": "D1", "applications": [{"name": "\#(calcName)"}]}, {"connectionState": "connected"}]}"#
     let t3 = FakeTransport([{ _ in (200, [:], skipped) }, { _ in (200, [:], #"{"status": "success"}"#) }])
     t3.cookies[DeviceIdentity.cookieName] = "D1"
     await #expect(throws: SessionsError.self) { try await api("dw3.test", t3).disconnectDevice(clientNames: [], isOurs: ours) }
@@ -313,23 +317,23 @@ private func refused(_ v: DeviceWideGuard.Verdict) -> Bool { if case .refused = 
 }
 
 @Test func testSessionGate() {
-    #expect(TestSessionGate.allowedNames([:]) == ["Calculator", "Notepad"])
+    #expect(TestSessionGate.allowedNames([:]) == [calcName, padName])
     // ICA_TEST_RESOURCES alone changes nothing; only with ICA_ALLOW_ANY_RESOURCE=1.
-    #expect(TestSessionGate.allowedNames(["ICA_TEST_RESOURCES": "Outlook"]) == ["Calculator", "Notepad"])
-    #expect(TestSessionGate.allowedNames(["ICA_TEST_RESOURCES": " Calculator , ", "ICA_ALLOW_ANY_RESOURCE": "1"]) == ["Calculator"])
-    #expect(TestSessionGate.allowedNames(["ICA_TEST_RESOURCES": " , ", "ICA_ALLOW_ANY_RESOURCE": "1"]) == ["Calculator", "Notepad"])
+    #expect(TestSessionGate.allowedNames(["ICA_TEST_RESOURCES": "Outlook"]) == [calcName, padName])
+    #expect(TestSessionGate.allowedNames(["ICA_TEST_RESOURCES": " \(calcName) , ", "ICA_ALLOW_ANY_RESOURCE": "1"]) == [calcName])
+    #expect(TestSessionGate.allowedNames(["ICA_TEST_RESOURCES": " , ", "ICA_ALLOW_ANY_RESOURCE": "1"]) == [calcName, padName])
     let allowed = TestSessionGate.defaultResources
-    #expect(TestSessionGate.allows(session("a", .connected, apps: ["Calculator", "Notepad"]), allowed: allowed))
-    #expect(!TestSessionGate.allows(session("b", .connected, apps: ["Calculator", "Outlook ABC"]), allowed: allowed))
+    #expect(TestSessionGate.allows(session("a", .connected, apps: [calcName, padName]), allowed: allowed))
+    #expect(!TestSessionGate.allows(session("b", .connected, apps: [calcName, "Outlook Demo"]), allowed: allowed))
     #expect(!TestSessionGate.allows(session("c", .disconnected, apps: []), allowed: allowed))
-    #expect(!TestSessionGate.allows(session("d", .connected, apps: ["rechner ekm"]), allowed: allowed))
+    #expect(!TestSessionGate.allows(session("d", .connected, apps: [calcName.lowercased()]), allowed: allowed))
     // App names as ids only: resolved through the resource list.
-    let resources = try! JSONDecoder().decode([StoreClient.Resource].self, from: data(#"[{"id": "CVAD.Calc", "name": "Calculator"}]"#))
+    let resources = try! JSONDecoder().decode([StoreClient.Resource].self, from: data(#"[{"id": "CVAD.Calc", "name": "\#(calcName)"}]"#))
     let byId = StoreSessionInfo(sessionId: "e", connectionState: .connected, applications: [.init(id: "cvad.calc", name: "Calc")])
     #expect(TestSessionGate.allows(byId, allowed: allowed, resources: resources))
     #expect(!TestSessionGate.allows(byId, allowed: allowed))
-    #expect(TestSessionGate.resolvedNames(byId, resources: resources) == ["Calculator"])
-    #expect(TestSessionGate.allows(AvailableSession(launchurl: "a", launchstatusurl: "b", initialapp: "Notepad"), allowed: allowed))
+    #expect(TestSessionGate.resolvedNames(byId, resources: resources) == [calcName])
+    #expect(TestSessionGate.allows(AvailableSession(launchurl: "a", launchstatusurl: "b", initialapp: padName), allowed: allowed))
     #expect(!TestSessionGate.allows(AvailableSession(launchurl: "a", launchstatusurl: "b"), allowed: allowed))
 }
 
@@ -349,13 +353,13 @@ private func entry(_ id: String, _ app: String) -> AvailableSession {
 }
 
 private let mixedList = StoreSessionList(deviceId: "D1", sessions: [
-    session("here", .connected, device: "D1", apps: ["Calculator"]),
-    session("disc", .disconnected, device: "D1", apps: ["Notepad"]),
+    session("here", .connected, device: "D1", apps: [calcName]),
+    session("disc", .disconnected, device: "D1", apps: [padName]),
     session("away", .connected, device: "D2", client: "PC-1", apps: ["Outlook"]),
 ])
 
 @Test func mergeOffersReconnectOnlyForJoinedDisconnectedSessions() {
-    let disc = entry("1", "Notepad"), away = entry("2", "Outlook")
+    let disc = entry("1", padName), away = entry("2", "Outlook")
     let rows = SessionDirectory.merge(list: mixedList, available: [disc, away], excludingActive: [disc], clientNames: [])
     #expect(rows.count == 3)
     let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id ?? "", $0) })
@@ -371,13 +375,13 @@ private let mixedList = StoreSessionList(deviceId: "D1", sessions: [
 }
 
 @Test func mergeNeverTrustsExcludeActiveAlone() {
-    let disc = entry("1", "Notepad"), away = entry("2", "Outlook")
+    let disc = entry("1", padName), away = entry("2", "Outlook")
     // The store ignored excludeActive (same answer twice) although a session is open elsewhere.
     let ignored = SessionDirectory.merge(list: mixedList, available: [disc, away], excludingActive: [disc, away], clientNames: [])
     #expect(ignored.first { $0.id == "away" }?.reconnect == nil && ignored.first { $0.id == "away" }?.takeOver == away)
     #expect(ignored.first { $0.id == "disc" }?.reconnect == disc)
     // Even a trusted answer cannot turn a session the List shows elsewhere into a Reconnect.
-    let other = entry("3", "Notepad")
+    let other = entry("3", padName)
     let wrong = SessionDirectory.merge(list: mixedList, available: [away, other], excludingActive: [away], clientNames: [])
     #expect(wrong.first { $0.id == "away" }?.reconnect == nil && wrong.first { $0.id == "away" }?.takeOver == away)
     // An entry of the trusted answer that is not disconnected in the List: Take Over.
@@ -390,17 +394,17 @@ private let mixedList = StoreSessionList(deviceId: "D1", sessions: [
 }
 
 @Test func mergeWithoutSessionsListOffersOnlyTakeOver() {
-    let a = entry("1", "Notepad"), b = entry("2", "Outlook")
+    let a = entry("1", padName), b = entry("2", "Outlook")
     let rows = SessionDirectory.merge(list: nil, available: [a, b], excludingActive: [a], clientNames: [])
-    #expect(rows == [StoreSession(id: nil, state: .unknown, initialApp: "Notepad", takeOver: a),
+    #expect(rows == [StoreSession(id: nil, state: .unknown, initialApp: padName, takeOver: a),
                      StoreSession(id: nil, state: .unknown, initialApp: "Outlook", takeOver: b)])
 }
 
 @Test func mergeJoinRuleAndAmbiguity() {
-    let e = entry("1", "Calculator")
+    let e = entry("1", calcName)
     let one = StoreSessionList(deviceId: "D1", sessions: [
-        session("calc", .disconnected, apps: ["Calculator"], started: 200),
-        session("other", .disconnected, apps: ["Notepad"], started: 50),
+        session("calc", .disconnected, apps: [calcName], started: 200),
+        session("other", .disconnected, apps: [padName], started: 50),
     ])
     let rows = SessionDirectory.merge(list: one, available: [e], excludingActive: [e], clientNames: [])
     #expect(rows.first { $0.id == "calc" }?.reconnect == e)
@@ -408,20 +412,20 @@ private let mixedList = StoreSessionList(deviceId: "D1", sessions: [
 
     // Two sessions with the same app, one entry: ambiguous, neither Reconnect nor Take Over.
     let two = StoreSessionList(deviceId: "D1", sessions: [
-        session("late", .disconnected, apps: ["Calculator"], started: 200),
-        session("early", .connected, device: "D2", apps: ["Calculator"], started: 100),
+        session("late", .disconnected, apps: [calcName], started: 200),
+        session("early", .connected, device: "D2", apps: [calcName], started: 100),
     ])
     let amb = SessionDirectory.merge(list: two, available: [e], excludingActive: nil, clientNames: [])
     #expect(amb.count == 2 && amb.allSatisfy { $0.joinAmbiguous && $0.reconnect == nil && $0.takeOver == nil })
 
     // Two entries with the same initial app, one session: ambiguous too, and no extra rows.
-    let e2 = entry("2", "Calculator")
-    let single = StoreSessionList(deviceId: "D1", sessions: [session("calc", .disconnected, apps: ["Calculator"])])
+    let e2 = entry("2", calcName)
+    let single = StoreSessionList(deviceId: "D1", sessions: [session("calc", .disconnected, apps: [calcName])])
     let twice = SessionDirectory.merge(list: single, available: [e, e2], excludingActive: [e, e2], clientNames: [])
     #expect(twice.count == 1 && twice[0].joinAmbiguous && twice[0].reconnect == nil && twice[0].takeOver == nil)
     // Two entries, two sessions, same app: all ambiguous.
     let both = SessionDirectory.merge(list: StoreSessionList(deviceId: "D1", sessions: [
-        session("a", .disconnected, apps: ["Calculator"]), session("b", .disconnected, apps: ["Calculator"])]),
+        session("a", .disconnected, apps: [calcName]), session("b", .disconnected, apps: [calcName])]),
         available: [e, e2], excludingActive: [e, e2], clientNames: [])
     #expect(both.count == 2 && both.allSatisfy { $0.joinAmbiguous && $0.reconnect == nil })
     // A shared session claimed by entries of two of its apps: ambiguous.
@@ -433,19 +437,19 @@ private let mixedList = StoreSessionList(deviceId: "D1", sessions: [
     // An entry not (yet) in Sessions/List gets its own row, Take Over only.
     let extra = SessionDirectory.merge(list: StoreSessionList(deviceId: "D1", sessions: []), available: [e], excludingActive: [e],
                                        clientNames: [])
-    #expect(extra == [StoreSession(id: nil, state: .unknown, initialApp: "Calculator", takeOver: e)])
+    #expect(extra == [StoreSession(id: nil, state: .unknown, initialApp: calcName, takeOver: e)])
     // Sessions connected here never get an entry.
-    let here = StoreSessionList(deviceId: "D1", sessions: [session("h", .connected, device: "D1", apps: ["Calculator"])])
+    let here = StoreSessionList(deviceId: "D1", sessions: [session("h", .connected, device: "D1", apps: [calcName])])
     let r = SessionDirectory.merge(list: here, available: [e], excludingActive: [e], clientNames: [])
     #expect(r.first { $0.id == "h" }?.reconnect == nil && r.count == 2)
 }
 
 @Test func reconnectOfferOnlyListsSafeSessions() {
-    let disc = entry("1", "Notepad"), away = entry("2", "Outlook"), lone = entry("3", "Paint")
+    let disc = entry("1", padName), away = entry("2", "Outlook"), lone = entry("3", "Paint")
     // Ambiguous pair, an elsewhere session, an unjoined entry and one plain disconnected session.
     let list = StoreSessionList(deviceId: "D1", sessions: mixedList.sessions + [
-        session("c1", .disconnected, apps: ["Calculator"]), session("c2", .disconnected, apps: ["Calculator"])])
-    let rows = SessionDirectory.merge(list: list, available: [disc, away, lone, entry("4", "Calculator")],
+        session("c1", .disconnected, apps: [calcName]), session("c2", .disconnected, apps: [calcName])])
+    let rows = SessionDirectory.merge(list: list, available: [disc, away, lone, entry("4", calcName)],
                                       excludingActive: [disc, lone], clientNames: [])
     #expect(SessionDirectory.reconnectable(rows).map(\.id) == ["disc"])
     #expect(SessionDirectory.reconnectable(SessionDirectory.merge(list: nil, available: [disc], excludingActive: [disc], clientNames: [])).isEmpty)

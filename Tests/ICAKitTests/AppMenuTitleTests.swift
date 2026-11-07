@@ -9,13 +9,13 @@ import Testing
     }
 
     @Test func prefersTheResourceName() throws {
-        let list = try resources(#"{"resources":[{"id":"a","name":"Sound ABC"},{"id":"b","name":"Notepad"}]}"#)
+        let list = try resources(#"{"resources":[{"id":"a","name":"Sound Demo"},{"id":"b","name":"Notepad"}]}"#)
         #expect(AppMenuTitle.name(resources: list, candidates: ["notepad.exe", "x"]) == "Notepad")
-        #expect(AppMenuTitle.name(resources: list, candidates: ["Unknown", " sound  ekm "]) == "Sound ABC")
+        #expect(AppMenuTitle.name(resources: list, candidates: ["Unknown", " sound  demo "]) == "Sound Demo")
     }
 
     @Test func fallsBackToTheAppName() throws {
-        let list = try resources(#"{"resources":[{"id":"a","name":"Sound ABC"}]}"#)
+        let list = try resources(#"{"resources":[{"id":"a","name":"Sound Demo"}]}"#)
         #expect(AppMenuTitle.name(resources: list, candidates: ["", "  Calc  "]) == "Calc")
         #expect(AppMenuTitle.name(resources: [], candidates: ["Calc"]) == "Calc")
         #expect(AppMenuTitle.name(resources: list, candidates: []) == nil)

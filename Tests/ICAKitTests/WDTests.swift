@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import ICAKit
 
-/// Server INIT_REQUEST captured live from the VDA behind gateway.example.com (capabilities only, no secrets).
+/// Server INIT_REQUEST captured live from the VDA behind a Citrix VDA (capabilities only, no secrets).
 let liveInitRequestHex = [
     "00060207002004000600020007001000060001001e0002000000000000000c0010001300000000000000080019000700",
     "00000c002200000000000000000004000100060004000900060007000300440008000000000000000000000000000000",

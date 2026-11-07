@@ -3,7 +3,7 @@ import Testing
 @testable import ICAKit
 
 @Test func windowControlsFollowRemoteStyle() {
-    // Rechner, live: 0x14ca0000 (visible, clipsiblings, caption, sysmenu, minimizebox; no sizing border).
+    // Calculator, live: 0x14ca0000 (visible, clipsiblings, caption, sysmenu, minimizebox; no sizing border).
     let calc = TWIWindowControls(style: 0x14ca_0000)
     #expect(!calc.resizable && !calc.zoomable && calc.minimizable)
     // Notepad-like WS_OVERLAPPEDWINDOW | WS_VISIBLE: sizing border and maximize box.
