@@ -100,7 +100,7 @@ private func makePDF(pages: Int, title: String? = nil, password: String? = nil) 
     @Test func moduleInInitResponseAndBindTable() throws {
         let wd = WinstationDriver(configuration: {
             var c = WinstationDriver.Configuration()
-            c.logon.initialProgram = "#Notepad"
+            c.logon.initialProgram = "#Notepad Demo"
             return c
         }())
         wd.register(ThinwireEngine())

@@ -107,7 +107,7 @@ private func pcmWrite(_ bytes: [UInt8], device: UInt8 = 1) -> AudioHostCommand {
     @Test func engineProvidesWholeModuleInInitResponseAndBindTable() throws {
         let wd = WinstationDriver(configuration: {
             var c = WinstationDriver.Configuration()
-            c.logon.initialProgram = "#Notepad"
+            c.logon.initialProgram = "#Notepad Demo"
             return c
         }())
         wd.register(ThinwireEngine())
@@ -784,21 +784,21 @@ private func code3Packet(_ frames: [Data]) -> Data {
 @Suite struct AudioFallbackTests {
     @Test func omitsCTXCAMOnceAfterAnUnestablishedDrop() {
         var f = AudioFallback()
-        let none = f.takeOmission("Notepad")
+        let none = f.takeOmission("Notepad Demo")
         #expect(!none)
         // Dropped after the module went out, before the seamless channel / Thinwire INIT: omit once.
-        var r = [f.relaunching("Notepad", announcedAudio: true, established: false),
-                 f.takeOmission("Calculator"), f.takeOmission("Notepad"), f.takeOmission("Notepad")]
+        var r = [f.relaunching("Notepad Demo", announcedAudio: true, established: false),
+                 f.takeOmission("Calculator Demo"), f.takeOmission("Notepad Demo"), f.takeOmission("Notepad Demo")]
         #expect(r == [true, false, true, false])
         // The omitted launch dropped too (no CTXCAM in it): the next relaunch announces it again.
-        r = [f.relaunching("Notepad", announcedAudio: false, established: false), f.takeOmission("Notepad")]
+        r = [f.relaunching("Notepad Demo", announcedAudio: false, established: false), f.takeOmission("Notepad Demo")]
         #expect(r == [false, false])
         // Early drops before the INIT_RESPONSE, or established sessions, never omit it; clear forgets it.
-        r = [f.relaunching("Notepad", announcedAudio: true, established: true),
-             f.relaunching("Notepad", announcedAudio: true, established: false)]
+        r = [f.relaunching("Notepad Demo", announcedAudio: true, established: true),
+             f.relaunching("Notepad Demo", announcedAudio: true, established: false)]
         #expect(r == [false, true])
-        f.clear("Notepad")
-        let after = f.takeOmission("Notepad")
+        f.clear("Notepad Demo")
+        let after = f.takeOmission("Notepad Demo")
         #expect(!after)
     }
 }

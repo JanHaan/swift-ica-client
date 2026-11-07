@@ -127,7 +127,7 @@ private struct FindReply {
     @Test func cdmModuleInInitResponseAndBindTable() throws {
         let wd = WinstationDriver(configuration: {
             var c = WinstationDriver.Configuration()
-            c.logon.initialProgram = "#Notepad"
+            c.logon.initialProgram = "#Notepad Demo"
             return c
         }())
         wd.register(ThinwireEngine())

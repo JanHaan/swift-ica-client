@@ -227,7 +227,7 @@ private func allEven(_ r: TWIRect) -> Bool { [r.left, r.top, r.right, r.bottom].
 
 @Test func twiRectToFrameUsesTheMonitorHoldingMostOfIt() {
     let l = ScalingLayout.resolve(screens: thisMac, settings: auto, limit: noLimit)
-    // Rechner on the Retina screen at 200 %: half the pixels in points.
+    // Calculator on the Retina screen at 200 %: half the pixels in points.
     #expect(l.pointRect(TWIRect(x: 200, y: 100, width: 428, height: 632)) == CGRect(x: 100, y: 803, width: 214, height: 316))
     // Maximised on the external screen: Windows puts it 8 px over the edge into the built-in screen.
     let maxed = TWIRect(left: 3592, top: 890, right: 6168, bottom: 2346)
@@ -307,7 +307,7 @@ private func allEven(_ r: TWIRect) -> Bool { [r.left, r.top, r.right, r.bottom].
 
 @Test func dragOntoAnotherScreenMapsThroughThatScreen() {
     let l = ScalingLayout.resolve(screens: thisMac, settings: auto, limit: noLimit)
-    // Rechner on the Retina screen (monitor 0, 2x): px 200,100 428×632 = pt 100,803 214×316.
+    // Calculator on the Retina screen (monitor 0, 2x): px 200,100 428×632 = pt 100,803 214×316.
     let origin = TWIRect(x: 200, y: 100, width: 428, height: 632)
     let frame = CGRect(x: 100, y: 803, width: 214, height: 316)
     func event(_ screen: CGPoint) -> (x: Int, y: Int) {

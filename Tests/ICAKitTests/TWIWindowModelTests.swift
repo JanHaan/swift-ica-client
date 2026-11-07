@@ -358,15 +358,15 @@ private let vis = F.visible
     print("TWI replay: files=\(files.count) types: \(counts.joined(separator: " ")) unknown=\(engine.unknownTypeCounts) malformed=\(engine.malformedCount) \(host)")
     print("TWI replay: sent types \(sent.value.map { String(format: "%02x", $0) }.joined(separator: ",")) icons \(icons.value.map { "type\($0.0):\($0.1)px" })")
     for w in added.value {
-        let title = w.title == "Rechner" ? w.title : "(\(w.title.count) chars)"
+        let title = "(\(w.title.count) chars)"
         print("TWI replay: window \(String(w.id, radix: 16)) \(w.kind) \(title) rect \(w.windowRect) style \(String(w.style, radix: 16)) app \(w.appKey)")
     }
     for a in apps.value { print("TWI replay: app \(a.key) name \(a.name)") }
     #expect(engine.malformedCount == 0)
-    // The lifecycle checks need a complete fresh-logon capture of "Calculator": the logon UI, then one
+    // The lifecycle checks need a complete fresh-logon capture of the calculator resource: the logon UI, then one
     // calculator window that is removed again (logoff). A reconnect or a cut-off capture only replays.
     let sawLogonUI = added.value.contains { $0.appKey.lowercased().hasSuffix("\\logonui.exe") }
-    if sawLogonUI, let w = added.value.first(where: { $0.title == "Rechner" }), removed.value.contains(w.id) {
+    if sawLogonUI, let w = added.value.first(where: { $0.kind == .appWindow && !$0.appKey.lowercased().hasSuffix("\\logonui.exe") }), removed.value.contains(w.id) {
         #expect(added.value.filter { $0.kind == .appWindow && !$0.appKey.lowercased().hasSuffix("\\logonui.exe") }.count == 1)
         #expect(w.kind == .appWindow && w.hasTaskbarEntry)
         #expect(w.windowRect.width > 100 && w.windowRect.height > 100)
@@ -389,7 +389,7 @@ private let vis = F.visible
     // Multi-monitor host flags seen live (no 0x10: no monitor layout from us).
     engine.receive(F.hostInit(flags: 0x015f_ff89))
     engine.receive(F.open)
-    engine.receive(F.createV2(id: 7, style: vis | F.caption, pid: 1, title: "Rechner", appId: ""))
+    engine.receive(F.createV2(id: 7, style: vis | F.caption, pid: 1, title: "Calculator", appId: ""))
     #expect(engine.model.windows.count == 1)
     sent.value.removeAll()
     #expect(engine.pauseResume())                        // second Thinwire INIT
@@ -398,7 +398,7 @@ private let vis = F.visible
     #expect(names(events.value).contains("removed:7"))
     engine.receive(F.hostInit(flags: 0x015f_ff89))
     engine.receive(F.open)
-    engine.receive(F.createV2(id: 7, style: vis | F.caption, pid: 1, title: "Rechner", appId: ""))
+    engine.receive(F.createV2(id: 7, style: vis | F.caption, pid: 1, title: "Calculator", appId: ""))
     #expect(engine.model.windows[7]?.kind == .appWindow)
 }
 

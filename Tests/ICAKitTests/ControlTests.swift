@@ -28,13 +28,14 @@ let controlCapabilityResponse = hex("""
     """)
 /// The same layout as the commit (cmd 0x02).
 let controlCapabilityCommit = [UInt8](controlCapabilityRequest.prefix(2)) + [0x02] + controlCapabilityRequest.dropFirst(3)
-/// docs/55 §6.5: launch request for "Explorer Citrix ABC", no command line, 66 bytes.
+/// Layout of docs/55 §6.5 (worked example there: an Explorer resource with a longer name, 66 bytes), for
+/// "Explorer Demo", no command line, 54 bytes.
 let controlExplorerLaunch = hex("""
-    3E 00 03 00
-    0C 00 3C 00 00 00 00 00 00 00 00 00
+    32 00 03 00
+    0C 00 30 00 00 00 00 00 00 00 00 00
     23 00 22 00 45 00 78 00 70 00 6C 00 6F 00 72 00
-    65 00 72 00 20 00 43 00 69 00 74 00 72 00 69 00
-    78 00 20 00 45 00 4B 00 4D 00 22 00 22 00 00 00
+    65 00 72 00 20 00 44 00 65 00 6D 00 6F 00 22 00
+    22 00 00 00
     00 00
     """)
 private let success = hex("04 00 04 00 00 00 00 00")
@@ -101,7 +102,7 @@ private final class Harness {
     @Test func registeredAfterCTXCAMOnChannel20WithBindEntry() throws {
         let wd = WinstationDriver(configuration: {
             var c = WinstationDriver.Configuration()
-            c.logon.initialProgram = "#Notepad"
+            c.logon.initialProgram = "#Notepad Demo"
             return c
         }())
         wd.register(ThinwireEngine())
@@ -169,17 +170,17 @@ private final class Harness {
 }
 
 @Suite struct ControlLaunchTests {
-    @Test func explorerExample66BytesExactly() throws {
-        let bytes = try #require(ControlLaunch(initialProgram: "#Explorer Citrix ABC").request(commandLineLimit: 0x800))
-        #expect(bytes.count == 66)
+    @Test func explorerExample54BytesExactly() throws {
+        let bytes = try #require(ControlLaunch(initialProgram: "#Explorer Demo").request(commandLineLimit: 0x800))
+        #expect(bytes.count == 54)
         #expect(bytes == controlExplorerLaunch)
     }
 
-    @Test func rechnerHeaderValues() throws {
-        let bytes = try #require(ControlLaunch(initialProgram: "#Calculator").request(commandLineLimit: 0x800))
-        // `#"Calculator""` + NUL = 16 units → A = 32, L = 46, command line at 44.
-        #expect(Array(bytes.prefix(8)) == hex("2E 00 03 00 0C 00 2C 00"))
-        #expect(bytes.count == 50)
+    @Test func calculatorHeaderValues() throws {
+        let bytes = try #require(ControlLaunch(initialProgram: "#Calculator Demo").request(commandLineLimit: 0x800))
+        // `#"Calculator Demo""` + NUL = 20 units → A = 52 (12 + 40), L = 54, command line at 52.
+        #expect(Array(bytes.prefix(8)) == hex("36 00 03 00 0C 00 34 00"))
+        #expect(bytes.count == 58)
         #expect(Array(bytes.suffix(2)) == [0, 0])
     }
 
@@ -194,7 +195,7 @@ private final class Harness {
     @Test func commandLineJoinFromICAFile() throws {
         let long = try #require(ICAFile(text: """
             [Application]
-            InitialProgram=#Notepad
+            InitialProgram=#Notepad Demo
             LongCommandLine="C:\\a b"
             LongCommandLine000=\\c.txt
             LongCommandLine001=""
@@ -225,7 +226,7 @@ private final class Harness {
 @Suite struct ControlEngineTests {
     @Test func handshakeQueuesUntilCommitThenLaunchesAndMatchesStatus() {
         let h = Harness()
-        let id = h.launch("#Explorer Citrix ABC")
+        let id = h.launch("#Explorer Demo")
         #expect(h.sent.isEmpty && h.engine.state == .waiting && h.engine.pendingLaunches == 1)
         h.feed(controlCapabilityRequest)
         #expect(h.sent == [controlCapabilityResponse])
@@ -243,7 +244,7 @@ private final class Harness {
     @Test func fifoMatchingAndIgnoredStatus5() {
         let h = Harness()
         h.ready()
-        let a = h.launch("#Calculator"), b = h.launch("#Explorer Citrix ABC"), c = h.launch("#Notepad")
+        let a = h.launch("#Calculator Demo"), b = h.launch("#Explorer Demo"), c = h.launch("#Notepad Demo")
         #expect(h.sent.count == 3)
         h.feed(status(5))                     // unnamed: dequeues nothing
         #expect(h.results.isEmpty)
@@ -257,7 +258,7 @@ private final class Harness {
 
     @Test func splitWritesAndUnknownCommandsSkippedByLength() {
         let h = Harness()
-        let id = h.launch("#Calculator")
+        let id = h.launch("#Calculator Demo")
         let stream = controlCapabilityRequest + hex("06 00 09 00 01 02 03 04 05 06") + controlCapabilityCommit
             + hex("02 00 0C 00 AA BB") + success
         for byte in stream { h.feed([byte]) }
@@ -269,7 +270,7 @@ private final class Harness {
     @Test func notHashProgramIsDroppedWithoutSending() {
         let h = Harness()
         h.ready()
-        let id = h.launch("Calculator")
+        let id = h.launch("Calculator Demo")
         #expect(h.sent.isEmpty)
         if case .notSent = h.results[id] {} else { Issue.record("expected notSent, got \(String(describing: h.results[id]))") }
     }
@@ -277,10 +278,10 @@ private final class Harness {
     @Test func responseTimeoutKeepsAPlaceholderSoLateResponsesDoNotShift() {
         let h = Harness()
         h.ready()
-        let a = h.launch("#Calculator")
+        let a = h.launch("#Calculator Demo")
         h.fire(20)
         #expect(h.results[a] == .timedOut)
-        let b = h.launch("#Notepad")
+        let b = h.launch("#Notepad Demo")
         h.feed(success)                       // late answer for a
         #expect(h.results[b] == nil)
         h.feed(status(4))
@@ -290,22 +291,22 @@ private final class Harness {
 
     @Test func readyTimeoutAndShutdown() {
         let h = Harness()
-        let a = h.launch("#Calculator")
+        let a = h.launch("#Calculator Demo")
         h.fire(90)
         if case .notSent = h.results[a] {} else { Issue.record("expected notSent") }
-        let b = h.launch("#Calculator")
+        let b = h.launch("#Calculator Demo")
         h.ready()
-        let c = h.launch("#Notepad")
+        let c = h.launch("#Notepad Demo")
         h.engine.shutdown()
         #expect(h.results[b] == .sessionEnded && h.results[c] == .sessionEnded)
-        let d = h.launch("#Notepad")
+        let d = h.launch("#Notepad Demo")
         if case .notSent = h.results[d] {} else { Issue.record("expected notSent after shutdown") }
         #expect(h.engine.state == .ended)
     }
 
     @Test func commitWithCap5SendsOwnAppFirstAndSharedLaunchesWait() throws {
         var config = ControlEngine.Config()
-        config.own = ControlLaunch(initialProgram: "#Notepad")
+        config.own = ControlLaunch(initialProgram: "#Notepad Demo")
         let h = Harness(config)
         h.feed(controlCapabilityRequest)
         // Our own app has no command line: cap 5 answered 0.
@@ -316,9 +317,9 @@ private final class Harness {
             05 00 08 00 01 00 00 00
             """)
         h.feed(commit)
-        let own = try #require(ControlLaunch(initialProgram: "#Notepad").request(commandLineLimit: 0x800))
+        let own = try #require(ControlLaunch(initialProgram: "#Notepad Demo").request(commandLineLimit: 0x800))
         #expect(h.sent.last == own && h.engine.diagnostics.ownLaunchSent)
-        let shared = h.launch("#Calculator")
+        let shared = h.launch("#Calculator Demo")
         #expect(h.sent.count == 2)           // waits for the own launch's response
         h.feed(success)                       // the own launch's answer
         #expect(h.results[shared] == nil && h.sent.count == 3)
@@ -328,11 +329,11 @@ private final class Harness {
 
     @Test func ownLaunchWithoutResponseReleasesTheQueue() {
         var config = ControlEngine.Config()
-        config.own = ControlLaunch(initialProgram: "#Notepad")
+        config.own = ControlLaunch(initialProgram: "#Notepad Demo")
         let h = Harness(config)
         h.feed(controlCapabilityRequest)
         h.feed(hex("0C 00 02 00 04 00 01 00 05 00 08 00 01 00 00 00"))
-        let shared = h.launch("#Calculator")
+        let shared = h.launch("#Calculator Demo")
         #expect(h.sent.count == 2)
         h.fire(5)
         #expect(h.sent.count == 3)
@@ -366,8 +367,8 @@ private final class Harness {
         """
 
     @Test func gatewayEndpointNotTheTicket() {
-        let a = SessionShareKey(ica: Self.ica(Self.base + "\nAddress=TICKET-A\nInitialProgram=#Maus ABC"))
-        let b = SessionShareKey(ica: Self.ica(Self.base + "\nAddress=TICKET-B\nInitialProgram=#Explorer Citrix ABC"))
+        let a = SessionShareKey(ica: Self.ica(Self.base + "\nAddress=TICKET-A\nInitialProgram=#Mouse Demo"))
+        let b = SessionShareKey(ica: Self.ica(Self.base + "\nAddress=TICKET-B\nInitialProgram=#Explorer Demo"))
         #expect(a.connectHost == "gw.example.test" && a.connectPort == 443 && a.sslEnabled)
         #expect(b.shares(with: a))
     }
@@ -420,14 +421,14 @@ private final class Harness {
     @Test func timeoutsWaitWhileTheLinkIsDown() {
         let h = Harness()
         h.ready()
-        let a = h.launch("#Calculator")
+        let a = h.launch("#Calculator Demo")
         h.engine.suspend()
         h.fire(20)
         #expect(h.results[a] == nil)          // re-armed, not failed
         h.engine.resume()
         h.feed(success)
         #expect(h.results[a] == .started)
-        let b = h.launch("#Notepad")
+        let b = h.launch("#Notepad Demo")
         h.fire(20)
         #expect(h.results[b] == .timedOut)
     }
