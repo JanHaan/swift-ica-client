@@ -4,7 +4,7 @@ ICAViewer is an independent project and is not affiliated with Citrix. The stock
 summarise Citrix's public documentation (links under Sources); the ICAViewer column describes this
 client.
 
-Status date: 2026-11-06 (ICAViewer column); stock columns from Citrix documentation as fetched
+Status date: 2026-11-07, v0.4.0 (ICAViewer column); stock columns from Citrix documentation as fetched
 2026-11-05.
 
 ## How to read this
@@ -26,7 +26,7 @@ Status date: 2026-11-06 (ICAViewer column); stock columns from Citrix documentat
 ## Matrix
 
 Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS = ChromeOS,
-**Ours** = ICAViewer, 2026-11-06.
+**Ours** = ICAViewer v0.4.0, 2026-11-07.
 
 | Feature | Win | Mac | Lin | Web | ChrOS | iOS | Andr | **Ours** |
 |---|---|---|---|---|---|---|---|---|
@@ -41,7 +41,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | **Session launch** | | | | | | | | |
 | Seamless published apps | ✅† | ⚠️ [5] | ? | ⚠️ [6] | ? | ⚠️† [7] | ⚠️† [7] | ✅ [8] |
 | Full desktops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ? [9] |
-| Session sharing (several apps, one session) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Session sharing (several apps, one session) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [45] |
 | Reconnect to disconnected session / Follow Me | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [10] |
 | Connection Center / session management | ✅† | ? | ? | ? | ? | ? | ? | ⚠️ [11] |
 | **Transport** | | | | | | | | |
@@ -62,7 +62,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Native per-window integration | ✅† | ⚠️ [5] | ? | ❌ [6] | ? | ❌† | ❌† | ✅ [22] |
 | Taskbar / Dock entry per remote app | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ❌ [23] |
 | Visible to window switchers | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ✅ [22] |
-| App icons | ✅† | ✅ | ? | ? | ? | ? | ? | ⚠️ [24] |
+| App icons | ✅† | ✅ | ? | ? | ? | ? | ? | ✅ [24] |
 | **Input** | | | | | | | | |
 | Keyboard layout sync (client to Windows VDA) | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ [25] |
 | Scancode keyboard mode | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
@@ -78,7 +78,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Generic USB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Smart card into session | ✅† | ? | ✅ | ? | ? | ? | ? | ❌ |
 | Scanners / TWAIN | ✅ | ❌ | ⚠️ [33] | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Webcam | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ [43] |
+| Webcam | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [43] |
 | Audio out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [42] |
 | Microphone (bidirectional audio) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [44] |
 | MS Teams optimisation | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ [34] |
@@ -94,6 +94,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Config via policy / GACS | ✅ | ✅ | ⚠️ [38] | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Auto-update | ✅ | ✅ | ❌ | ❌ | ❌ | ⚠️ [39] | ⚠️ [39] | ❌ |
 | Telemetry / experience metrics | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ [40] |
+| In-app problem report | ? | ? | ? | ? | ? | ? | ? | ✅ [46] |
 
 ## Footnotes
 
@@ -111,10 +112,11 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 7. Mobile clients show published apps inside a session view, not as OS windows. Unverified.
 8. Tested live with a calculator and a mail client.
 9. Not tested. The seamless path is the only one exercised.
-10. Implicit: launching a resource reconnects to the existing session. Verified live.
+10. Launching a resource reconnects to the existing session, and the launcher offers to reconnect
+    disconnected sessions at start. Verified live.
 11. A Connection Center window lists sessions and can reconnect, disconnect or log off through the
     store's session endpoints; Cmd-Q asks Disconnect (default) or Log off. Verified live with a
-    user. Session sharing and the reconnect offer at start are not done.
+    user. The launcher also offers to reconnect disconnected sessions at start (verified live).
 12. Resumes after a network drop, a Wi-Fi change or a short sleep, as long as the outage stays within
     the server's reliability timeout (typically 180 s). Verified live. On longer outages a Reconnect
     panel relaunches the app, which reconnects to the disconnected session.
@@ -142,9 +144,11 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
     adaptive throughput. Idle host repaints (about 154 kB/s for a mail client) still arrive.
 22. Each remote window is a real `NSWindow`: `AXStandardWindow`, working minimize, no duplicate title
     bar, visible to Cmd-Tab and third-party window switchers.
-23. Planned: one Cmd-Tab/Dock identity per remote app, probably via generated helper bundles. Today
-    the whole client is one Dock entry.
-24. Icons are decoded from the TWI channel but not yet shown in any UI.
+23. Not built: one Cmd-Tab/Dock entry with its own name per remote app, probably via generated helper
+    bundles. Today the whole client is one Dock entry; its icon and the menu-bar app name follow the
+    active remote app, but the Dock and Cmd-Tab name cannot change at runtime.
+24. The launcher shows the real app icons, and the Dock and Cmd-Tab icon follows the active remote app
+    (icons from the store, else the session). Verified live.
 25. Scancodes with a German layout. There is no dynamic layout sync from the Mac to the VDA.
 26. Unicode events exist only for Option-composed characters; scancodes cover the rest.
 27. Matrix: server IME yes, generic client IME (CTXIME) no.
@@ -170,10 +174,22 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 41. PDF printing through the host's PDF printer to the macOS print panel; nothing prints without a
     click. Implemented, off by default, not verified live: the test site creates no client printers.
 42. Playback (PCM, Opus) verified live: the sound was heard on the Mac.
-43. Not implemented.
+43. HDX webcam redirection (H.264) with a camera picker. Off by default; the camera opens only while
+    the host is using it, and a menu-bar item disables it for the session. The host handshake is
+    verified live (headless, with a synthetic test pattern) and the picker lists the cameras, but a
+    real camera has not been tried. This client path supports 32-bit host applications only; 64-bit
+    apps (Windows Camera, Teams, modern browsers) will not see the camera. Teams optimisation is
+    separate.
 44. Opus uplink, sent when a session application records. Off by default in Settings; macOS asks for
     permission on first use, and a menu-bar item disables the microphone for the current session.
     Verified live. The row is for audio only; Teams optimisation is separate.
+45. Several published apps run in one session: the second app is launched into the running session
+    over the control channel, with no second logon. Verified live (a second app started fast, the
+    Dock icon and menu name followed, closing one app left the other running). Logoff happens only
+    when all apps have ended.
+46. Help > Report a Problem... builds a scrubbed report with a preview and a prefilled GitHub issue
+    plus a saved report file. You review the report before anything is shared; nothing is sent
+    automatically. Verified live (dialog and preview).
 
 ## Gaps that matter most
 
@@ -183,12 +199,12 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
    after longer ones is still manual (the Reconnect panel).
 2. **Live verification of what is already built.** Client drive mapping and printing are
    implemented but need a site that redirects drives and printers; clipboard HTML, RTF and images
-   are unverified too.
-3. **Per-app Dock / Cmd-Tab identity and app icons.** The windows switch correctly, but all remote
-   apps share one Dock entry (designed, not started).
-4. **Webcam.** Not implemented (Teams optimisation is a separate, larger piece).
-5. **Session sharing and full-desktop launch.** Needed for running a second app without a second
-   session. The Connection Center covers cleanup.
+   are unverified too, as is the webcam with a real camera.
+3. **Per-app Dock / Cmd-Tab name.** The windows switch correctly and the icon follows the active app,
+   but all remote apps share one Dock entry and name (designed, not built).
+4. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
+   optimisation is a separate, larger piece).
+5. **Full-desktop launch.** Only seamless apps are exercised.
 6. **General file transfer and clipboard files.** Only the shared folder exists.
 7. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
 
@@ -204,7 +220,7 @@ skip them. The Dock icons come from placeholder "Husk" processes (`com.citrix.ct
 no windows, controlled by `enableAppDockEnhancement` / `EnableAppPreview`. In ICAViewer each remote
 window is an `AXStandardWindow` with an enabled minimize button that round-trips to a TWI minimise,
 a single caption (the remote one), and no helper processes. Verified across two screens. The one
-open piece is per-app Dock/Cmd-Tab identity (gap 3).
+open piece is a per-app Dock/Cmd-Tab name (gap 3).
 
 Secondary points: no telemetry, no background services, and the whole client is small enough to
 read in one sitting. These are design choices rather than features, and they come at the price of
