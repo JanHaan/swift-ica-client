@@ -49,12 +49,21 @@ import Testing
         let details = try HelperBundleGenerator.codesign(["-dv", first.url.path])
         #expect(details.contains("Identifier=" + HelperBundle.bundleIdentifier(for: label)))
         #expect(details.contains("adhoc") && details.contains("runtime"))
+        // The cdhash the host records at generation (docs/99 §12.17): codesign reports the same one.
+        let cdhash = try #require(CodeIdentity.cdhash(bundle: first.url))
+        #expect(cdhash.count >= 40 && cdhash.allSatisfy(\.isHexDigit))
+        let verbose = try HelperBundleGenerator.codesign(["-dvvv", first.url.path])
+        #expect(verbose.lowercased().contains("cdhash=" + cdhash))
+        #expect(try generator.generate(label, icon: icon(0.5)).url == first.url)
+        #expect(CodeIdentity.cdhash(bundle: first.url) == cdhash)          // unchanged bundle, same identity
         let icns = first.url.appendingPathComponent("Contents/Resources/AppIcon.icns")
         let source = try #require(CGImageSourceCreateWithURL(icns as CFURL, nil))
         #expect(CGImageSourceGetCount(source) >= 5)            // multi-size icns from ImageIO (docs/99 §7)
 
         #expect(try generator.generate(label, icon: icon(0.5)).outcome == .unchanged)
+        let before = CodeIdentity.cdhash(bundle: first.url)
         #expect(try generator.generate(label, icon: icon(0.9)).outcome == .updated)
+        #expect(CodeIdentity.cdhash(bundle: first.url) != before)          // a re-signed bundle is new code
 
         // Rename: same key, same directory, the old bundle goes.
         let renamed = try generator.generate(HelperLabel(key: label.key, name: "Spike Alpha 2"), icon: nil)

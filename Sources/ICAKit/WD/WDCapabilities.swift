@@ -78,6 +78,10 @@ public struct WDCapabilityPolicy: Sendable {
     public var credentialRequest = true
     public var unicodeKeyboard = true
     public var maxChannels: UInt16 = 0x40
+    /// Negotiate cap 0x10 (high throughput) when the server offers it: body u32 flags 0, u16 1460, u16 0 [I], which
+    /// turns the HT frame header on (docs/30 §8.3). Off by default (docs/30 recommends not to); `ICA_WD_HT=1` in
+    /// icactl is the docs/76 §7.1 V2 discovery variant.
+    public var highThroughput = false
 
     public init() {}
 
@@ -109,6 +113,8 @@ public struct WDCapabilityPolicy: Sendable {
                 // Client offers version 1, mode 1; the reference reads single bytes at body 0 and 2.
                 let version = min(cap.body.first ?? 1, 1)
                 result = WDCapability(id: cap.id, body: [version, 0, 1, 0])
+            case WDCapability.highThroughput where highThroughput:
+                result = WDCapability(id: cap.id, body: [0, 0, 0, 0, 0xB4, 0x05, 0, 0])
             case WDCapability.vcCount:
                 let n = min(cap.u16(at: 0) ?? maxChannels, maxChannels)
                 result = WDCapability(id: cap.id, body: [UInt8(n & 0xff), UInt8(n >> 8)])
@@ -143,4 +149,25 @@ public struct WDInitRequest: Sendable {
 
     /// Server cap 0x0D: 1 Windows, 2 Linux, 3 Mac.
     public var hostOS: UInt16? { capability(WDCapability.hostOS)?.u16(at: 0) }
+}
+
+/// The high-throughput frame header (docs/30 §8.3): `flags u8 [bandwidth u16 if 0x10] [rtt u16 if 0x08] payload`,
+/// inside encryption and outside compression.
+public enum WDHighThroughput {
+    public static let flagBandwidth: UInt8 = 0x10
+    public static let flagRTT: UInt8 = 0x08
+    /// The receiver answers with `3F 01 04`.
+    public static let flagAnswer: UInt8 = 0x04
+    public static let flagInterrupted: UInt8 = 0x80
+    public static let answer: [UInt8] = [0x3F, 0x01, 0x04]
+
+    /// Payload after the header, and the flags; nil if the frame is shorter than its header.
+    public static func strip(_ frame: [UInt8]) -> ([UInt8], UInt8)? {
+        guard let flags = frame.first else { return nil }
+        var at = 1
+        if flags & flagBandwidth != 0 { at += 2 }
+        if flags & flagRTT != 0 { at += 2 }
+        guard frame.count >= at else { return nil }
+        return (Array(frame[at...]), flags)
+    }
 }

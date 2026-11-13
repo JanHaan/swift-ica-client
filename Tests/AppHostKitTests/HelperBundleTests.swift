@@ -83,7 +83,14 @@ import Testing
 @Suite struct HelperLaunchTests {
     @Test func argumentsRoundTrip() {
         let launch = HelperLaunch(broker: HelperLaunch.brokerName(hostPid: 42), token: HelperLaunch.makeToken(), hostPid: 42, headless: true)
-        #expect(HelperLaunch.parse(["/path/exe"] + launch.arguments) == launch)
+        #expect(HelperLaunch.parse(["/path/exe"] + launch.arguments, environment: launch.environment) == launch)
+        // The token never goes into argv (ps shows it to every user), only into the environment.
+        #expect(!launch.arguments.contains(launch.token))
+        #expect(HelperLaunch.parse(["/path/exe"] + launch.arguments) == nil)
+        #expect(launch.environment == [HelperLaunch.tokenVariable: launch.token])
+        // The environment wins over a --token argument.
+        #expect(HelperLaunch.parse(["exe", "--broker", "b", "--token", "argv", "--host-pid", "7"],
+                                   environment: [HelperLaunch.tokenVariable: "env"])?.token == "env")
         #expect(launch.token.count == 32)
         #expect(launch.broker == "local.alttab.ICAViewer.broker.42")
     }
@@ -104,16 +111,25 @@ import Testing
         let host: [HostMessage] = [
             .hello(appName: "Spike Alpha"), .surface(width: 1600, height: 1000),
             .windowAdded(HelperWindowSpec(id: 3, title: "Beta — Message", rect: WireRect(x: 1, y: 2, width: 3, height: 4))),
+            .windowChanged(HelperWindowSpec(id: 4, title: "Editor", rect: WireRect(x: 10, y: 20, width: 800, height: 600),
+                                            frame: WirePointRect(x: 5, y: 900, width: 400, height: 300), scale: 2, seamless: true,
+                                            minimized: false, topmost: true, dim: 0.2)),
             .windowRemoved(id: 3), .frame(seed: 9, dirty: [WireRect(x: 0, y: 0, width: 10, height: 10)], sentNs: 123),
             .activate(windowId: 1), .yieldActivation(toPid: 77), .probe(x: 1, y: 2, sentNs: 3), .quit,
         ]
         for m in host { #expect(try WireCoding.decode(HostMessage.self, from: WireCoding.encode(m)) == m) }
         let helper: [HelperMessage] = [
             .checkIn(token: "t", pid: 5),
-            .key(windowId: 1, keyCode: 0, characters: "ä", modifiers: 0x100000, down: true, sentNs: 1),
-            .mouse(windowId: 2, kind: .down, button: 0, x: 10.5, y: 20, clickCount: 2, sentNs: 2),
-            .scroll(windowId: 2, dx: 0, dy: -3, sentNs: 3), .focus(windowId: 2), .appActive(true), .close(windowId: 2),
-            .frameStats(count: 120, meanUs: 80, maxUs: 900), .probeResult(pixel: 0xFF00_00FF, seed: 4, sentNs: 5),
+            .key(windowId: 1, phase: .down, keyCode: 0, characters: "ä", charactersIgnoringModifiers: "a", modifiers: 0x100000,
+                 isRepeat: false, sentNs: 1),
+            .key(windowId: 1, phase: .flags, keyCode: 56, characters: "", charactersIgnoringModifiers: "", modifiers: 0x20102,
+                 isRepeat: false, sentNs: 1),
+            .mouse(windowId: 2, kind: .down, button: 0, x: 10.5, y: 20, screenX: 300.5, screenY: -20, clickCount: 2,
+                   modifiers: 0x40000, sentNs: 2),
+            .scroll(windowId: 2, dx: 0, dy: -3, precise: true, x: 1, y: 2, screenX: 3, screenY: 4, sentNs: 3),
+            .focus(windowId: 2), .resignedKey(windowId: 2), .appActive(true), .close(windowId: 2),
+            .minimized(windowId: 2, true), .moved(windowId: 2, frame: WirePointRect(x: -1440, y: 25.5, width: 400, height: 300)),
+            .frameStats(count: 120, meanUs: 80, p95Us: 300, maxUs: 900), .probeResult(pixel: 0xFF00_00FF, seed: 4, sentNs: 5),
             .yielded(toPid: 9, wasActive: true), .activation("ok"), .appQuit,
         ]
         for m in helper { #expect(try WireCoding.decode(HelperMessage.self, from: WireCoding.encode(m)) == m) }

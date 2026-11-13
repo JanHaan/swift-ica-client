@@ -381,7 +381,10 @@ default:
       icactl cliptest-files              clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
                                          copy them back (SHA-256), delete only that folder, log off (fresh logon only)
                                          (ICA_GDT=1: also announce CTXGDT, log host GDT writes to .session/gdt/;
-                                         ICA_GDT_ECHO_INIT=1|inc|inc@N|hex:…, ICA_GDT_HELLO=<hex>; docs/76 §6)
+                                         ICA_GDT_ECHO_INIT=1|inc|inc@N|hex:…, ICA_GDT_HELLO=<hex>, ICA_GDT_VERSION=N|L-H,
+                                         ICA_GDT_VDDATA=<hex>, ICA_WD_HT=1, ICA_CLIP_REPLY_WORD2/_TAIL, ICA_CTXCTL=1,
+                                         ICA_CTL_ACCEPT=09[,..], ICA_GDT_CDM=1, ICA_STUB_VCS=NAME[:l-h],..,
+                                         ICA_STOCK_VCS=1; docs/76 §6-7)
       icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
@@ -929,6 +932,15 @@ func clipTestConfig(files: Bool = false) -> ClipboardEngine.Config {
     }
     c.traceWire = c.maxVersion >= 4 || env["ICA_CLIP_TRACE"] == "1" || files
     c.files = files
+    // docs/76 §7.1 V5: CLIP_INIT_REPLY u16 at offset 2 and the 6-byte tail (discovery only).
+    if let text = env["ICA_CLIP_REPLY_WORD2"] {
+        guard let v = text.hasPrefix("0x") ? UInt16(text.dropFirst(2), radix: 16) : UInt16(text) else { fail("ICA_CLIP_REPLY_WORD2 must be a u16") }
+        c.initReplyWord2 = v
+    }
+    if let text = env["ICA_CLIP_REPLY_TAIL"] {
+        guard let bytes = GDTEngine.parseHex(text), bytes.count == 6 else { fail("ICA_CLIP_REPLY_TAIL must be 6 hex bytes") }
+        c.initReplyTail = bytes
+    }
     return c
 }
 
@@ -1014,8 +1026,102 @@ func runClipFilesTest(ica: ICAFile) async throws {
     var config = WinstationDriver.Configuration()
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
-    let session = try ICASession(ica: ica, configuration: config, clipboard: clipConfig, gdt: gdtConfig)
+    // docs/76 §7.1 V2: negotiate WD cap 0x10 (high throughput) and use the HT frame header.
+    config.policy.highThroughput = env["ICA_WD_HT"] == "1"
+    // docs/76 §7.2 V6/V7: announce CTXCTL (no app is launched over it: no own app, no launch call) and optionally echo
+    // host capability ids it otherwise skips (ICA_CTL_ACCEPT=09 or a comma list of hex ids).
+    var controlConfig: ControlEngine.Config?
+    if env["ICA_CTXCTL"] == "1" {
+        var c = ControlEngine.Config()
+        for item in (env["ICA_CTL_ACCEPT"] ?? "").split(separator: ",") {
+            let text = item.trimmingCharacters(in: .whitespaces)
+            guard let id = UInt16(text.hasPrefix("0x") ? String(text.dropFirst(2)) : text, radix: 16) else { fail("ICA_CTL_ACCEPT: \(text) is not a hex id") }
+            c.acceptCapabilities.insert(id)
+        }
+        controlConfig = c
+    } else if env["ICA_CTL_ACCEPT"] != nil {
+        fail("ICA_CTL_ACCEPT needs ICA_CTXCTL=1")
+    }
+    // docs/76 §7.4 V10: CTXCDM with an empty read-only temp folder as M: (created and removed by this run).
+    var cdmConfig: CDMEngine.Config?
+    var cdmDir: URL?
+    if env["ICA_GDT_CDM"] == "1" || env["ICA_STOCK_VCS"] == "1" {
+        let dir = URL(fileURLWithPath: "/tmp/ica-gdt-cdm-\(runID)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        cdmDir = dir
+        let fs = try CDMPOSIXFileSystem(root: dir, readOnly: true)
+        fs.quarantineAgent = "icactl"
+        cdmConfig = CDMEngine.Config(fileSystem: fs, letter: "M", label: "gdttest")
+        say("CTXCDM: \(dir.path) as M: (read-only, empty)")
+    }
+    defer { if let cdmDir { try? FileManager.default.removeItem(at: cdmDir) } }
+    // §7.4 V11: announced-only stubs (ICA_STUB_VCS=CTXFILE[:low-high],…). V12 (ICA_STOCK_VCS=1): every stock channel
+    // with the stock client's numbers; ours where we have an engine (+ CTXCPM PDF printer, CTXCAM playback without a
+    // sink, CTXMM without a frame source), stubs for the rest.
+    var stubs: [StubChannelEngine] = []
+    for item in (env["ICA_STUB_VCS"] ?? "").split(separator: ",") {
+        guard let stub = StubChannelEngine.parse(String(item)) else { fail("ICA_STUB_VCS: \(item) is not NAME[:low-high]") }
+        stubs.append(stub)
+    }
+    let stock = env["ICA_STOCK_VCS"] == "1"
+    if stock {
+        stubs = StockChannels.stubs() + stubs.filter { s in !StockChannels.all.contains { $0.name == s.channelName } }
+        config.channelOverrides = StockChannels.channelMap
+    }
+    // §7.6 V14–V17: module-header names/versions (ICA_MODNAME_<VC>, ICA_MODVER_<VC>; ICA_STOCK_NAMES=1 = the stock
+    // client's list for every announced module, explicit variables win). ICA_GDT_AUDIO=1 announces CTXCAM (playback,
+    // no sink).
+    let modEnv = WDModuleOverride.fromEnvironment(env)
+    if let error = modEnv.errors.first { fail(error) }
+    var moduleOverrides = env["ICA_STOCK_NAMES"] == "1" ? StockChannels.moduleNames : [:]
+    for (key, value) in modEnv.overrides {
+        var merged = moduleOverrides[key] ?? WDModuleOverride()
+        if let name = value.name { merged.name = name }
+        if value.versionLow != nil { merged.versionLow = value.versionLow; merged.versionHigh = value.versionHigh }
+        moduleOverrides[key] = merged
+    }
+    config.moduleOverrides = moduleOverrides
+    if !moduleOverrides.isEmpty {
+        say("module overrides: " + moduleOverrides.sorted { $0.key < $1.key }.map { key, o in
+            "\(key)=\"\(o.name.map { String($0.utf8.prefix(12))! } ?? "")\" \(o.versionLow.map(String.init) ?? "-")-\(o.versionHigh.map(String.init) ?? "-")"
+        }.joined(separator: ", "))
+    }
+    let announceAudio = stock || env["ICA_GDT_AUDIO"] == "1"
+    let variant = ["ICA_GDT", "ICA_GDT_VERSION", "ICA_GDT_VDDATA", "ICA_GDT_ECHO_INIT", "ICA_GDT_HELLO", "ICA_WD_HT", "ICA_CLIP_VERSION",
+                   "ICA_CLIP_REPLY_WORD2", "ICA_CLIP_REPLY_TAIL", "ICA_CTXCTL", "ICA_CTL_ACCEPT", "ICA_GDT_CDM", "ICA_STUB_VCS", "ICA_STOCK_VCS",
+        "ICA_STOCK_NAMES", "ICA_GDT_AUDIO"] + env.keys.filter { $0.hasPrefix("ICA_MODNAME_") || $0.hasPrefix("ICA_MODVER_") }.sorted().compactMap { key in env[key].map { "\(key)=\($0)" } }
+    say("variant: " + (variant.isEmpty ? "(defaults)" : variant.joined(separator: " ")) +
+        String(format: "; CLIP_INIT_REPLY word2 0x%04x tail %@", clipConfig.initReplyWord2, GDTHexLog.hex(clipConfig.initReplyTail)))
+    let session = try ICASession(ica: ica, configuration: config, clipboard: clipConfig, cdm: cdmConfig,
+                                 printing: stock ? PrinterEngine.Config() : nil, audio: announceAudio ? AudioEngine.Config() : nil,
+                                 webcam: stock ? WebcamEngine.Config() : nil, control: controlConfig, gdt: gdtConfig,
+                                 extraEngines: stubs)
     guard let clip = session.clipboard else { fail("no clipboard engine") }
+    for stub in stubs { stub.onEvent = { say("stub: \($0)") } }
+    var cdmConnect = false
+    var channelWrites: [UInt8: Int] = [:]
+    session.cdm?.onEvent = { event in
+        if event.description.hasPrefix("CONNECT") { cdmConnect = true }
+        say("cdm: \(event)")
+    }
+    session.printer?.onEvent = { say("cpm: \($0)") }
+    session.webcam?.onEvent = { say("cam: \($0)") }
+    // CTXCTL: every event, and the full capability request / response / commit in hex (test data: host capabilities).
+    func controlHex(_ label: String, _ bytes: [UInt8]?) {
+        guard let bytes else { return say("ctl: \(label): none") }
+        say("ctl: \(label) \(bytes.count) B: " + GDTHexLog.hex(bytes))
+        gdtLog?.write("CTXCTL \(label) \(bytes.count) B: " + GDTHexLog.hex(bytes))
+    }
+    if let control = session.control {
+        control.onEvent = { event in
+            say("ctl: \(event)")
+            if case .ready = event {
+                controlHex("capability request payload", control.diagnostics.capabilityRequest)
+                controlHex("capability response", control.diagnostics.capabilityResponse)
+                controlHex("capability commit payload", control.diagnostics.capabilityCommit)
+            }
+        }
+    }
     let seamless = session.seamless
     let layout = config.logon.keyboardLayout
     var gdtLastHost: Date?
@@ -1102,7 +1208,11 @@ func runClipFilesTest(ica: ICAFile) async throws {
         case .wd(.terminate(let reason)):
             terminateReason = reason
             say("← TERMINATE reason \(reason)")
-        case .wd(.initResponseSent(let modules, _)): say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+        case .wd(.initResponseSent(let modules, let negotiated)):
+            say("→ INIT_RESPONSE modules \(modules.joined(separator: ", ")); caps " +
+                negotiated.map { String(format: "0x%02x", $0.id) }.joined(separator: " "))
+        case .wd(.connected): say("WD connected, HT header \(session.wd.highThroughput ? "on" : "off")")
+        case .wd(.packet(let p)): if let channel = p.channel { channelWrites[channel, default: 0] += 1 }
         case .wd(.failure(let text)): say("WD failure: \(text)")
         default: break
         }
@@ -1362,6 +1472,26 @@ func runClipFilesTest(ica: ICAFile) async throws {
     }
     if let url = trace.url { say("trace: \(url.path)") }
     say("end: \(ending)")
+    // One line for scripts/gdt-matrix.sh.
+    let (gdtPackets, requests, served) = await onSession(session) { (session.gdt?.statistics.packets, fileRequests, fileServed) }
+    let ctl = await onSession(session) { () -> String in
+        guard let d = session.control?.diagnostics else { return "off" }
+        func ids(_ caps: [ControlCapability]) -> String { caps.map { String(format: "%02x", $0.id) }.joined(separator: ",") }
+        return "req[\(ids(d.hostCapabilities))] resp[\(ids(d.answeredCapabilities))] commit[\(d.capabilityCommit == nil ? "none" : ids(d.commitCapabilities))]"
+    }
+    if let d = await onSession(session, { session.control?.diagnostics }), d.readyAt == nil {
+        // No commit: still show what came and went.
+        controlHex("capability request payload", d.capabilityRequest)
+        controlHex("capability response", d.capabilityResponse)
+    }
+    let stubWrites = await onSession(session) {
+        stubs.filter { $0.hostWrites > 0 }.map { "\($0.label):\($0.hostWrites)/\($0.hostBytes)B" }.joined(separator: ",")
+    }
+    say("MATRIX gdt_host_packets=\(gdtPackets.map(String.init) ?? "off") file_requests=\(requests) file_served=\(served) ctl=\(ctl) " +
+        "cdm=\(cdmConfig == nil ? "off" : "on") cdm_connect=\(await onSession(session) { cdmConnect }) " +
+        "ch_writes=[\(await onSession(session) { channelWrites.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",") })] " +
+        "stubs=\(stubs.count) stub_writes=[\(stubWrites)] " +
+        "clip_version=\(version) fresh=\(fresh) pasted=\(pasted) deleted=\(deleted) protocol_errors=\(protocolErrors) end=\"\(ending)\"")
 }
 
 // MARK: - Sessions command (docs/90)

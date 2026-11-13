@@ -53,6 +53,9 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
     public struct Config: Sendable {
         public var versionLow = GDTWire.versionLow
         public var versionHigh = GDTWire.versionHigh
+        /// VD-specific data after the 48-byte common part (docs/30 §5.5); empty by default. Variant V1 puts the
+        /// stock client's "maxPacketSize 4999" there as u16 `87 13`, the way CTXMM carries 4996 (docs/98b §1.3).
+        public var vdData: [UInt8] = []
         /// Answer the host's first write if it looks like an init (≤ `initMaxSize` bytes, before we sent anything).
         public var initReply: InitReply?
         public var initMaxSize = 128
@@ -61,12 +64,18 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
 
         public init() {}
 
-        /// `ICA_GDT=1` enables the channel; `ICA_GDT_VERSION=N` sets min = max = N; `ICA_GDT_ECHO_INIT` see
-        /// `InitReply`. Nil without `ICA_GDT=1` (no module, no bind entry: default behaviour).
+        /// `ICA_GDT=1` enables the channel; `ICA_GDT_VERSION=N` sets min = max = N, `=L-H` min L and max H;
+        /// `ICA_GDT_VDDATA=<hex>` the VD data; `ICA_GDT_ECHO_INIT` see `InitReply`. Nil without `ICA_GDT=1` (no
+        /// module, no bind entry: default behaviour).
         public static func fromEnvironment(_ env: [String: String]) -> Config? {
             guard env["ICA_GDT"] == "1" else { return nil }
             var c = Config()
-            if let text = env["ICA_GDT_VERSION"], let v = UInt8(text), v > 0 { c.versionLow = v; c.versionHigh = v }
+            if let text = env["ICA_GDT_VERSION"] {
+                let parts = text.split(separator: "-").map { UInt8($0.trimmingCharacters(in: .whitespaces)) }
+                if parts.count == 1, let v = parts[0] { c.versionLow = v; c.versionHigh = v }
+                if parts.count == 2, let low = parts[0], let high = parts[1] { c.versionLow = low; c.versionHigh = high }
+            }
+            if let text = env["ICA_GDT_VDDATA"], let bytes = GDTEngine.parseHex(text) { c.vdData = bytes }
             c.initReply = InitReply(environment: env["ICA_GDT_ECHO_INIT"])
             return c
         }
@@ -135,7 +144,9 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
     public func module(channel: UInt8, date: Date) -> [UInt8] {
         let identity = WDModuleIdentity(moduleClass: .vd, versionLow: config.versionLow, versionHigh: config.versionHigh,
                                         name: "", hostName: "ICA")
-        let bytes = WDModules.vdHeader(identity, channel: channel, date: date).bytes()
+        var w = WDModules.vdHeader(identity, channel: channel, date: date)
+        w.raw(config.vdData)
+        let bytes = w.bytes()
         moduleBytes = bytes
         onEvent(.module(bytes))
         return bytes

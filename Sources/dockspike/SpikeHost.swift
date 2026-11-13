@@ -43,6 +43,8 @@ final class SpikeHost {
     /// Activation waiting for the active helper's `yielded`: (helper index, window id).
     private var pendingActivation: (Int, UInt32)?
     private let started = Date()
+    /// Session pixels per point of the helpers' windows (they use the main screen's backing scale).
+    private let helperScale = Double(NSScreen.main?.backingScaleFactor ?? 2)
 
     init?(options: Options) {
         self.options = options
@@ -114,7 +116,9 @@ final class SpikeHost {
     private func launch(_ i: Int) {
         guard let url = helpers[i].bundle else { return }
         let config = NSWorkspace.OpenConfiguration()
-        config.arguments = HelperLaunch(broker: brokerName, token: helpers[i].token, hostPid: getpid()).arguments
+        let launch = HelperLaunch(broker: brokerName, token: helpers[i].token, hostPid: getpid())
+        config.arguments = launch.arguments
+        config.environment = launch.environment
         config.activates = false
         config.addsToRecentItems = false
         config.createsNewApplicationInstance = false
@@ -192,20 +196,23 @@ final class SpikeHost {
         switch message {
         case .checkIn:
             break
-        case .key(let id, let code, let chars, let modifiers, let down, let sentNs):
-            guard let i = owner(id) else { return }
+        case .key(let id, let phase, let code, let chars, _, let modifiers, _, let sentNs):
+            guard let i = owner(id), phase != .flags else { return }
+            let down = phase == .down
             let shown = chars.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F } ? chars : "\\u{\(chars.unicodeScalars.first.map { String($0.value, radix: 16) } ?? "")}"
             say("\(helpers[i].label.name) window \(id): key \(down ? "down" : "up  ") code \(code) chars \"\(shown)\" modifiers 0x\(String(modifiers, radix: 16)) (\(latency(sentNs)))")
             if down { updateInput(i, "key \"\(shown)\" (\(code))") }
-        case .mouse(let id, let kind, let button, let x, let y, let clicks, let sentNs):
-            guard let i = owner(id) else { return }
+        case .mouse(let id, let kind, let button, let viewX, let viewY, _, _, let clicks, _, let sentNs):
+            guard let i = owner(id), let spec = helpers[i].windows.first(where: { $0.id == id }) else { return }
+            // The helper sends view points; the spike's session maps 1:1 at the helper's backing scale.
+            let x = Double(spec.rect.x) + viewX * helperScale, y = Double(spec.rect.y) + viewY * helperScale
             if kind == .moved || kind == .dragged { moves += 1; return }
             say("\(helpers[i].label.name) window \(id): mouse \(kind.rawValue) button \(button) at (\(Int(x)), \(Int(y))) clicks \(clicks) (\(latency(sentNs)))")
             if kind == .down {
                 if let dirty = scene.mark(id, at: CGPoint(x: x, y: y)) { sendFrame([id: [dirty]]) }
                 updateInput(i, "click (\(Int(x)), \(Int(y)))")
             }
-        case .scroll(let id, let dx, let dy, let sentNs):
+        case .scroll(let id, let dx, let dy, _, _, _, _, _, let sentNs):
             guard let i = owner(id) else { return }
             say("\(helpers[i].label.name) window \(id): scroll (\(dx), \(dy)) (\(latency(sentNs)))")
         case .focus(let id):
@@ -223,8 +230,8 @@ final class SpikeHost {
                 say("\(helpers[i].label.name): last window gone → quit")
                 send(i, .quit)
             }
-        case .frameStats(let count, let mean, let max):
-            say(String(format: "frame latency host→helper over %d frames: mean %.0f µs, max %.0f µs (dropped so far: %d, mouse moves: %d)", count, mean, max, droppedFrames, moves))
+        case .frameStats(let count, let mean, let p95, let max):
+            say(String(format: "frame latency host→helper over %d frames: mean %.0f µs, p95 %.0f µs, max %.0f µs (dropped so far: %d, mouse moves: %d)", count, mean, p95, max, droppedFrames, moves))
         case .probeResult:
             break
         case .yielded(let pid, let wasActive):
@@ -236,7 +243,13 @@ final class SpikeHost {
         case .activation(let text):
             say("  helper: \(text)")
         case .appQuit:
-            say("a helper was quit by the user (Cmd-Q) → host would close that app's windows")
+            say("a helper was quit by the user (Cmd-Q) → host would close that app's windows (spike: quit with q)")
+        case .resignedKey(let id):
+            say("window \(id) resigned key → host would release held keys")
+        case .minimized(let id, let on):
+            say("window \(id) \(on ? "minimised" : "restored") by the user → host would send TWI minimise/restore")
+        case .moved(let id, let frame):
+            say("window \(id) moved locally to \(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height)) pt")
         }
     }
 

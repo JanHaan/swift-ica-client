@@ -39,8 +39,9 @@ import Testing
         let receiver = MachReceiver(port: receivePort)
         let done = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var got: (Data, mach_port_t)?
-        receiver.start(queue: DispatchQueue(label: "test")) { received in
-            if case .message(let data, let port) = received { got = (data, port); done.signal() }
+        nonisolated(unsafe) var senderPid: pid_t?
+        receiver.start(queue: DispatchQueue(label: "test")) { [unowned receiver] received in
+            if case .message(let data, let port) = received { got = (data, port); senderPid = receiver.senderPid; done.signal() }
         }
         let message = HostMessage.frame(seed: 1, dirty: [WireRect(x: 1, y: 2, width: 3, height: 4)], sentNs: 5)
         #expect(MachChannel.send(message, to: receivePort, port: carried, disposition: mach_msg_type_name_t(MACH_MSG_TYPE_MAKE_SEND)) == KERN_SUCCESS)
@@ -48,6 +49,7 @@ import Testing
         let (data, port) = try #require(got)
         #expect(try WireCoding.decode(HostMessage.self, from: data) == message)
         #expect(port == carried)                               // one name per port within a task
+        #expect(senderPid == getpid())                         // the kernel's audit trailer names the sender
         receiver.cancel()
         MachChannel.deallocate(port)
         mach_port_mod_refs(mach_task_self_, carried, MACH_PORT_RIGHT_RECEIVE, -1)

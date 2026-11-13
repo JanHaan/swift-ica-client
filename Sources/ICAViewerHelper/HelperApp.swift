@@ -7,7 +7,7 @@ import os
 /// every input event goes back to the host. It never outlives the host and never lingers windowless.
 final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let link: HostLink
-    private let logger = Logger(subsystem: "local.alttab.ICAViewer.helper", category: "spike")
+    private let logger = Logger(subsystem: "local.alttab.ICAViewer.helper", category: "helper")
     private var surface: IOSurfaceRef?
     private var windows: [UInt32: SurfaceWindow] = [:]
     private var appName = ProcessInfo.processInfo.processName
@@ -15,8 +15,8 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var greeted = false
     private var windowlessCheck: DispatchWorkItem?
     private var latencies: [Double] = []
-    /// Session pixels per point, fixed at launch (the spike does not follow screen changes).
-    private let scale = NSScreen.main?.backingScaleFactor ?? 2
+    /// Session pixels per point for specs without a scale (the spike does not follow screen changes).
+    private let defaultScale = NSScreen.main?.backingScaleFactor ?? 2
 
     init(launch: HelperLaunch) { link = HostLink(launch: launch) }
 
@@ -47,12 +47,33 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Cmd-Q quits the remote app, not this process: the host closes the app's windows (TWI close each)
+    /// and sends `quit` after the last one is gone (docs/99 §5, §12.12). A save prompt the remote app shows
+    /// arrives as a new window of this helper. Logout, restart and shutdown are never held up: then this
+    /// process goes (the main app decides about the session itself).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if !hostQuit { link.send(.appQuit) }        // Cmd-Q: the host closes this app's windows (docs/99 §5)
-        return .terminateNow
+        if hostQuit || Self.systemIsQuitting() { return .terminateNow }
+        link.send(.appQuit)
+        return .terminateCancel
     }
 
+    /// The quit Apple event carries `kAEQuitReason` when the system logs out, restarts or shuts down.
+    static func systemIsQuitting() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue else { return false }
+        return Self.systemQuitReasons.contains(reason)
+    }
+
+    static let systemQuitReasons: Set<OSType> = [
+        OSType(kAELogOut), OSType(kAEReallyLogOut), OSType(kAEShowRestartDialog), OSType(kAEShowShutdownDialog),
+        OSType(kAERestart), OSType(kAEShutDown),
+    ]
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    private func send(_ message: HelperMessage) {
+        link.send(message, timeoutMs: message.mayDrop ? 0 : 200)
+    }
 
     private func handle(_ message: HostMessage, port: mach_port_t) {
         switch message {
@@ -66,25 +87,40 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 MachChannel.deallocate(port)
             }
             if surface == nil { note("IOSurfaceLookupFromMachPort failed") }
-            for window in windows.values { window.surfaceView.refresh(surface) }
+            for window in windows.values { window.surfaceView.refresh(surface, crop: window.spec.rect) }
         case .windowAdded(let spec):
-            let window = SurfaceWindow(spec: spec, scale: scale) { [weak self] in self?.link.send($0) }
+            if let existing = windows[spec.id] { return existing.apply(spec, surface: surface) }
+            let window = SurfaceWindow(spec: spec, defaultScale: defaultScale) { [weak self] in self?.send($0) }
             window.delegate = self
             windows[spec.id] = window
-            window.surfaceView.refresh(surface)
-            window.orderFrontRegardless()           // visible without taking activation
+            window.surfaceView.refresh(surface, crop: spec.rect)
             windowlessCheck?.cancel()
+            if !window.isSeamless {
+                window.orderFrontRegardless()       // spike: visible without taking activation
+            } else if spec.minimized == true {
+                window.orderFront(nil)
+                window.expectMiniaturize = true
+                window.miniaturize(nil)
+            } else {
+                window.orderFront(nil)              // the host's activate (after a yield) brings it forward
+            }
+        case .windowChanged(let spec):
+            windows[spec.id]?.apply(spec, surface: surface)
         case .windowRemoved(let id):
-            windows.removeValue(forKey: id)?.close()
+            if let window = windows.removeValue(forKey: id) {
+                window.delegate = nil
+                window.orderOut(nil)
+                window.close()
+            }
             if windows.isEmpty { scheduleWindowlessQuit() }
         case .frame(_, let dirty, let sentNs):
             for window in windows.values where dirty.contains(where: { $0.intersects(window.spec.rect) }) {
-                window.surfaceView.refresh(surface)
+                window.surfaceView.refresh(surface, crop: window.spec.rect)
             }
             record(latencyUs: Double(uptimeNanoseconds() &- sentNs) / 1000)
         case .activate(let id):
             NSApp.activate()
-            windows[id]?.makeKeyAndOrderFront(nil)
+            if let window = windows[id], !window.isMiniaturized { window.makeKeyAndOrderFront(nil) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 let key = NSApp.keyWindow.map { "\(($0 as? SurfaceWindow)?.spec.id ?? 0)" } ?? "none"
                 self?.link.send(.activation("activate(\(id)): isActive=\(NSApp.isActive) key=\(key)"))
@@ -105,25 +141,26 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// No windows for 3 s (the host removed the last one and did not send quit): leave anyway, a
-    /// windowless helper would be a Husk (docs/99 §1).
+    /// No windows for 5 s (the host removed the last one and did not send quit): leave anyway, a
+    /// windowless helper would be a Husk (docs/99 §1). The host's own grace is 3 s.
     private func scheduleWindowlessQuit() {
         windowlessCheck?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.windows.isEmpty else { return }
-            self.note("windowless for 3 s; exiting")
+            self.note("windowless for 5 s; exiting")
             self.hostQuit = true
             NSApp.terminate(nil)
         }
         windowlessCheck = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: item)
     }
 
     private func record(latencyUs: Double) {
         latencies.append(latencyUs)
         guard latencies.count >= 120 else { return }
-        link.send(.frameStats(count: latencies.count, meanUs: latencies.reduce(0, +) / Double(latencies.count),
-                              maxUs: latencies.max() ?? 0))
+        let sorted = latencies.sorted()
+        send(.frameStats(count: sorted.count, meanUs: sorted.reduce(0, +) / Double(sorted.count),
+                         p95Us: sorted[min(sorted.count - 1, sorted.count * 95 / 100)], maxUs: sorted.last ?? 0))
         latencies.removeAll(keepingCapacity: true)
     }
 
@@ -138,15 +175,43 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let window = notification.object as? SurfaceWindow { link.send(.focus(windowId: window.spec.id)) }
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        if let window = notification.object as? SurfaceWindow { link.send(.resignedKey(windowId: window.spec.id)) }
+    }
+
     /// The host decides (TWI close) and answers with windowRemoved.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if let window = sender as? SurfaceWindow { link.send(.close(windowId: window.spec.id)) }
         return false
     }
 
+    func windowDidMiniaturize(_ notification: Notification) {
+        guard let window = notification.object as? SurfaceWindow, window.isSeamless else { return }
+        if window.expectMiniaturize { window.expectMiniaturize = false; return }
+        link.send(.minimized(windowId: window.spec.id, true))
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        guard let window = notification.object as? SurfaceWindow, window.isSeamless else { return }
+        if window.expectDeminiaturize { window.expectDeminiaturize = false; return }
+        window.localRestoreSince = Date()
+        link.send(.minimized(windowId: window.spec.id, false))
+    }
+
+    /// Moved or resized here, not by the host (AX, Mission Control, a window manager): the host turns it
+    /// into one TWI move once it settles, as for its own windows (D20).
+    func windowDidMove(_ notification: Notification) { reportGeometry(notification) }
+    func windowDidResize(_ notification: Notification) { reportGeometry(notification) }
+
+    private func reportGeometry(_ notification: Notification) {
+        guard let window = notification.object as? SurfaceWindow, window.isSeamless, !window.applyingHost,
+              !window.isMiniaturized else { return }
+        link.send(.moved(windowId: window.spec.id, frame: WirePointRect(window.contentRect(forFrameRect: window.frame))))
+    }
+
     // MARK: Menu
 
-    /// App menu (the bold title is CFBundleName) and a Window menu, so Cmd-M, Cmd-H and Cmd-Q work.
+    /// App menu (the bold title is CFBundleName) and a Window menu, so Cmd-W, Cmd-M, Cmd-H and Cmd-Q work.
     static func menu(appName: String) -> NSMenu {
         let main = NSMenu()
         let appItem = NSMenuItem()
@@ -158,6 +223,7 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         main.addItem(appItem)
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowItem.submenu = windowMenu
         main.addItem(windowItem)

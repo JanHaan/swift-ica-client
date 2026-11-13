@@ -61,6 +61,18 @@ final class DockIcon {
         scheduleRefresh()
     }
 
+    /// Name and icon for a helper app of this remote app (docs/99 §12): the store resource name if one
+    /// matches, else the TWI app name; the store icon unless the TWI icon is larger (as `refresh`). Works
+    /// with ICA_DOCK_ICON=0 too (then without store data). The icon may still be loading: nil until then.
+    func identity(for source: Source) -> (name: String?, icon: CGImage?) {
+        let name = AppMenuTitle.name(resources: resources, candidates: source.names)
+        if let url = StoreIconIndex.iconURL(in: index, names: source.names),
+           let stored = StoreIconCache.shared.image(forIconURL: url), stored.width >= (source.twi?.width ?? 0) {
+            return (name, stored)
+        }
+        return (name, source.twi)
+    }
+
     private func refresh() {
         work = nil
         var remote = (NSApp.keyWindow as? SeamlessWindow)?.remote

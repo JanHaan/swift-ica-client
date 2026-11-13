@@ -607,6 +607,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Helper apps go with the main process (docs/99 §5); they would also exit on its death.
+    func applicationWillTerminate(_ notification: Notification) {
+        if HelperManager.enabled { HelperManager.shared.quitAll() }
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { launcher?.showWindow(nil) }
         return true

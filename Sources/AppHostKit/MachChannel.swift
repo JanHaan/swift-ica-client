@@ -135,8 +135,14 @@ public enum MachChannel {
 }
 
 /// Receives on one port with a dispatch source; the handler runs on `queue`. Owns the receive right.
+/// Every message is received with the kernel's audit trailer, so the handler can tell who sent it.
 public final class MachReceiver {
     public let port: mach_port_t
+    /// Audit token of the sender of the message being handled (set by the kernel, cannot be forged);
+    /// valid only inside the handler, nil for notifications.
+    public private(set) var sender: audit_token_t?
+    /// The sender's pid (`audit_token_to_pid`: element 5 of the token).
+    public var senderPid: pid_t? { sender.map { pid_t(bitPattern: $0.val.5) } }
     private var source: DispatchSourceMachReceive?
     private let buffer = UnsafeMutableRawPointer.allocate(byteCount: MachChannel.receiveBufferSize, alignment: 8)
 
@@ -168,11 +174,15 @@ public final class MachReceiver {
         return kr
     }
 
+    /// MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT):
+    /// C macros Swift does not import.
+    static let auditTrailerOption: mach_msg_option_t = (0 & 0xf) << 28 | (3 & 0xf) << 24
+
     private func drain(_ handler: (MachReceived) -> Void) {
         while true {
             let header = buffer.assumingMemoryBound(to: mach_msg_header_t.self)
-            let kr = mach_msg(header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, mach_msg_size_t(MachChannel.receiveBufferSize),
-                              port, 0, mach_port_t(MACH_PORT_NULL))
+            let kr = mach_msg(header, MACH_RCV_MSG | MACH_RCV_TIMEOUT | Self.auditTrailerOption, 0,
+                              mach_msg_size_t(MachChannel.receiveBufferSize), port, 0, mach_port_t(MACH_PORT_NULL))
             if kr == MACH_RCV_TIMED_OUT { return }
             if kr == MACH_RCV_TOO_LARGE { continue }       // dropped by the kernel (no MACH_RCV_LARGE)
             guard kr == KERN_SUCCESS else { return }
@@ -183,7 +193,12 @@ public final class MachReceiver {
                     ? raw.loadUnaligned(fromByteOffset: MachChannel.headerSize + 8, as: mach_port_name_t.self) : 0
                 handler(.deadName(name))
             } else if let (payload, port) = MachChannel.decode(raw) {
+                // The trailer follows the message (msgh_size is 4-aligned and excludes it).
+                let offset = Int(header.pointee.msgh_size)
+                let trailer = buffer.loadUnaligned(fromByteOffset: offset, as: mach_msg_audit_trailer_t.self)
+                sender = trailer.msgh_trailer_size >= MemoryLayout<mach_msg_audit_trailer_t>.size ? trailer.msgh_audit : nil
                 handler(.message(payload, port: port))
+                sender = nil
             } else {
                 mach_msg_destroy(header)                     // not ours: release any rights it carried
             }

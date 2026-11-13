@@ -59,6 +59,10 @@ public final class ClipboardEngine: VirtualChannelEngine {
         public var files = false
         /// At most this many file entries are fetched from the host (test cap).
         public var maxFileEntries = 16
+        /// CLIP_INIT_REPLY u16 at offset 2 and the 6 bytes at offset 6 (docs/76 §7.1 V5 discovery only; 0 / zeros
+        /// as docs/70 §3.2.2 by default).
+        public var initReplyWord2: UInt16 = 0
+        public var initReplyTail = [UInt8](repeating: 0, count: 6)
         public init() {}
     }
 
@@ -290,7 +294,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
             localFormats = []
             localData = [:]
             phase = .uninit
-            write(ClipboardWire.initReply(version: version))
+            write(ClipboardWire.initReply(version: version, word2: config.initReplyWord2, tail: config.initReplyTail))
             emit(.hostInit(lowVersion: lowVersion, hostVersion: hostVersion, version: version))
             if version < ClipboardWire.namesVersion { becomeReady() } else { phase = .awaitingNames }
         case .formatNames(_, let entries):
