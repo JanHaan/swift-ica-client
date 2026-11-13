@@ -344,7 +344,7 @@ final class SeamlessPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Shows a RemoteWindow somewhere else than in its own NSWindow: in a helper app (docs/99 §12 phase 1,
+/// Shows a RemoteWindow somewhere else than in its own NSWindow: in a helper app (docs/99 §12 phases 1–2,
 /// `HelperManager`). The RemoteWindow keeps all its logic (geometry, scaling maps, local gestures, TWI
 /// requests) on a window that is never ordered in; the presenter mirrors its state.
 protocol RemotePresenter: AnyObject {
@@ -354,6 +354,8 @@ protocol RemotePresenter: AnyObject {
     func update(_ w: RemoteWindow)
     /// The host removed the window.
     func dismiss(_ w: RemoteWindow)
+    /// A local move/resize is settled (confirmed, refused or timed out): the window shows live content again.
+    func gestureDone(_ w: RemoteWindow)
 }
 
 /// One remote window and its local NSWindow/NSPanel, kept in sync in both directions.
@@ -545,6 +547,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         if let latest = controller?.currentInfo(info.id) { info = latest }
         vlog("window \(String(info.id, radix: 16)): live again (\(why))")
         view.refresh()
+        presenter?.gestureDone(self)
         controller?.localGestureEnded(self)
         // If the host refused the change (e.g. fixed size), snap to what it reports.
         verifyWork?.cancel()
@@ -590,6 +593,15 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
 
     // MARK: Caption and border hit areas (docs/50 §3.1), compared in session pixels
 
+    /// The caption and sizing-border bands of this window (`TWIHitBands`, window-relative session pixels);
+    /// a helper gets them in points (docs/99 §12 phase 2).
+    var hitBands: TWIHitBands {
+        let s = metricScale
+        var bands = TWIHitBands(style: info.style, flags: info.flags, metrics: controller?.systemMetrics, hostScale: s.host, minimumScale: s.minimum)
+        if !window.styleMask.contains(.resizable) { bands.resizeEdge = nil }
+        return bands
+    }
+
     /// View point (points) → window-relative session pixels, and the view size in pixels.
     private func pixels(_ p: NSPoint) -> (p: NSPoint, size: CGSize) {
         let k = displayScale
@@ -598,32 +610,14 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
 
     /// Remote resize border: local resize for resizable windows.
     func isResizeEdge(_ point: NSPoint) -> Bool {
-        guard window.styleMask.contains(.resizable), !info.isMaximized else { return false }
-        let m = controller?.systemMetrics, s = metricScale
-        let band = max(4 * s.minimum, m.map { CGFloat($0.frameThickness.x) * s.host } ?? 0)
-        let (p, b) = pixels(point)
-        return p.x < band || p.y < band || p.x > b.width - band || p.y > b.height - band
+        let (p, size) = pixels(point)
+        return hitBands.isResizeEdge(p, size: size)
     }
 
     /// Remote caption without its icon and caption buttons: dragging there moves the window locally.
     func isCaptionDrag(_ point: NSPoint) -> Bool {
-        let hasCaption = info.style & TWIStyle.caption == TWIStyle.caption || info.flags & 0x0004 != 0
-        guard hasCaption, info.flags & 0x0008 == 0, !info.isMaximized else { return false }
-        let m = controller?.systemMetrics, s = metricScale
-        let thick = info.isResizable
-        func metric(_ v: Int16?, _ fallback: CGFloat) -> CGFloat { v.map { CGFloat($0) * s.host } ?? fallback * s.minimum }
-        let fx = metric(thick ? m?.frameThickness.x : m?.dialogFrameThickness.x, thick ? 4 : 3)
-        let fy = metric(thick ? m?.frameThickness.y : m?.dialogFrameThickness.y, thick ? 4 : 3)
-        let captionHeight = max(metric(m?.captionHeight, 23), 23 * s.minimum)
-        // Visible caption buttons are wider than the classic metric on current Windows; be generous:
-        // anything excluded here still works, the host then moves the window itself.
-        let buttonWidth = max(metric(m?.captionButtonWidth, 46), 46 * s.minimum)
-        let boxes = info.style & (TWIStyle.minimizeBox | TWIStyle.maximizeBox) != 0
-        let buttons = (boxes ? 3 : 1) * buttonWidth
-        let icon = info.style & TWIStyle.sysMenu != 0 ? captionHeight : 0
-        let top = fy, bottom = fy + captionHeight + 6 * s.minimum
         let (p, size) = pixels(point)
-        return p.y >= top && p.y < bottom && p.x >= fx + icon && p.x < size.width - fx - buttons
+        return hitBands.isCaption(p, size: size)
     }
 
     /// The screen layout changed: re-place the window for the new mapping.
@@ -666,7 +660,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         view.remote = nil
     }
 
-    // MARK: Helper apps (docs/99 §12 phase 1)
+    // MARK: Helper apps (docs/99 §12)
 
     /// The helper could not take the window (no check-in, crash): show it here after all.
     func adoptLocally(activate: Bool) {
@@ -687,6 +681,22 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         window.setFrame(frame, display: false)
         applyingRemote = false
         localGeometryChanged()
+    }
+
+    /// A caption drag or edge resize the helper ran locally ended at `content` (docs/99 §12 phase 2, D20):
+    /// the same commit as for a local gesture here — frozen at the remote rect where it started, exactly one
+    /// TWI move/resize, live again once the host confirmed and a covering frame was presented (or 500 ms).
+    /// The helper is told by `gestureDone` (also when nothing changed).
+    func helperGestureEnded(content: CGRect) {
+        guard presenter != nil, !closingFromRemote, !info.isMinimized else { presenter?.gestureDone(self); return }
+        beginLocalGeometry()
+        let frame = window.frameRect(forContentRect: content)
+        if window.frame != frame {
+            applyingRemote = true
+            window.setFrame(frame, display: false)
+            applyingRemote = false
+        }
+        endLocalGeometry()
     }
 
     // MARK: NSWindowDelegate (local → remote)

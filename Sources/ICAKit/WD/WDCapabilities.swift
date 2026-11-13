@@ -82,6 +82,16 @@ public struct WDCapabilityPolicy: Sendable {
     /// turns the HT frame header on (docs/30 §8.3). Off by default (docs/30 recommends not to); `ICA_WD_HT=1` in
     /// icactl is the docs/76 §7.1 V2 discovery variant.
     public var highThroughput = false
+    /// Negotiate cap 0x0D (host OS info) with this client OS value (1 Windows, 2 Linux, 3 Mac) and two zero u16s
+    /// instead of leaving it out (docs/30 §4.3; the reference sends three zeros). nil = left out (default); discovery
+    /// only (docs/76 §7.8 V18, `ICA_WD_OSCAP`).
+    public var hostOSReply: UInt16?
+    /// Negotiate cap 0x21 (VC count). Off: every VD module carries the channel as the bit mask `1 << n` (docs/30
+    /// §5.5) and only channels < 32 work. On by default; off only for docs/76 §7.9 V21 (`ICA_WD_VCMASK=1`).
+    public var vcCountCapability = true
+    /// Server capabilities we otherwise drop, echoed with the server's body (discovery only, docs/76 §7.9 V22). Empty
+    /// by default.
+    public var echoCapabilities: Set<UInt16> = []
 
     public init() {}
 
@@ -113,11 +123,16 @@ public struct WDCapabilityPolicy: Sendable {
                 // Client offers version 1, mode 1; the reference reads single bytes at body 0 and 2.
                 let version = min(cap.body.first ?? 1, 1)
                 result = WDCapability(id: cap.id, body: [version, 0, 1, 0])
+            case WDCapability.hostOS where hostOSReply != nil:
+                let os = hostOSReply ?? 0
+                result = WDCapability(id: cap.id, body: [UInt8(os & 0xff), UInt8(os >> 8), 0, 0, 0, 0])
             case WDCapability.highThroughput where highThroughput:
                 result = WDCapability(id: cap.id, body: [0, 0, 0, 0, 0xB4, 0x05, 0, 0])
-            case WDCapability.vcCount:
+            case WDCapability.vcCount where vcCountCapability:
                 let n = min(cap.u16(at: 0) ?? maxChannels, maxChannels)
                 result = WDCapability(id: cap.id, body: [UInt8(n & 0xff), UInt8(n >> 8)])
+            case let id where echoCapabilities.contains(id) && id != WDCapability.vcCount:
+                result = WDCapability(id: cap.id, body: cap.body)
             default:
                 result = nil
             }

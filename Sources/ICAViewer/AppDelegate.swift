@@ -1,3 +1,4 @@
+import AppHostKit
 import AppKit
 import ICAKit
 import Network
@@ -92,6 +93,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         startSystemHooks()
+        if HelperManager.enabled {
+            HelperManager.shared.onCommand = { [weak self] command, controller, cancelled in
+                // From a Mach receive handler (a main-queue block): the confirmation's modal loop must not run
+                // inside it, or the main queue (session, frames) would stall until it closes (D21).
+                RunLoop.main.perform(inModes: [.common, .modalPanel]) {
+                    MainActor.assumeIsolated { self?.helperCommand(command, controller, cancelled: cancelled) }
+                }
+            }
+        }
         // The store's device id persists in the app's settings (docs/90 §8.6), not in .session/.
         StoreClient.deviceIdentity = UserDefaultsDeviceIdentity()
         let launcher = LauncherWindowController()
@@ -618,6 +628,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showLauncher() { launcher?.showWindow(nil) }
+
+    /// An item of a helper app's ICA menu (docs/99 §12 phase 2). The helper has yielded activation to this
+    /// process, so the window or prompt comes to the front. Disconnect and Log Off concern the whole session
+    /// (all its apps, docs/55), so they are confirmed first; Cancel gives activation back to the helper.
+    @MainActor private func helperCommand(_ command: HelperCommand, _ controller: SessionController?, cancelled: @escaping () -> Void) {
+        NSApp.activate()
+        switch command {
+        case .showLauncher: showLauncher()
+        case .connectionCenter: showConnectionCenter()
+        case .settings: showSettings()
+        case .reportProblem: FeedbackWindowController.show()
+        case .disconnect, .logoff:
+            guard let c = controller, !c.ended else { return cancelled() }
+            let apps = c.appNames.map(displayName).joined(separator: ", ")
+            let alert = NSAlert()
+            let button: NSButton
+            if command == .disconnect {
+                alert.messageText = String(format: loc("Disconnect the session with %@?", "Sitzung mit %@ trennen?"), apps)
+                alert.informativeText = loc("All apps of this session close on this Mac. They keep running; the session can be reconnected later.",
+                                            "Alle Apps dieser Sitzung werden auf diesem Mac geschlossen. Sie laufen weiter; die Sitzung kann später wieder verbunden werden.")
+                button = alert.addButton(withTitle: loc("Disconnect", "Trennen"))
+            } else {
+                alert.messageText = String(format: loc("Log off the session with %@?", "Sitzung mit %@ abmelden?"), apps)
+                alert.informativeText = loc("All apps of this session are closed. Unsaved work in them is lost.",
+                                            "Alle Apps dieser Sitzung werden beendet. Nicht gesicherte Arbeit geht verloren.")
+                button = alert.addButton(withTitle: loc("Log Off", "Abmelden"))
+                button.hasDestructiveAction = true
+            }
+            alert.addButton(withTitle: loc("Cancel", "Abbrechen"))
+            guard alert.runModal() == .alertFirstButtonReturn, !c.ended else {
+                vlog("helper apps: \(command.rawValue) cancelled")
+                return cancelled()
+            }
+            if command == .disconnect {
+                disconnect(c)
+            } else {
+                vlog("helper apps: log off \(logName(c.name))")
+                c.logoff()
+            }
+        }
+    }
 
     // MARK: Sleep, wake and network path (docs/20 §3.12.2)
 

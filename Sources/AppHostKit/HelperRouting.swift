@@ -7,11 +7,45 @@ public enum HelperRouting {
     /// the main process (docs/99 §3). Mirrors `WindowModel.sessionAppKey` and `noGroup` (ICAKit).
     public static let unroutedKeys: Set<String> = ["", "session", "_NONE_"]
 
-    /// The helper key of a window, or nil when the main process keeps it. Phase 1: app windows only;
-    /// popups and menus stay in the main process (§12.4).
+    /// The helper key of an app window, or nil when the main process keeps it; the first app window of a key
+    /// starts its helper. Popups and menus: `popupHelperKey`.
     public static func helperKey(appKey: String, isAppWindow: Bool) -> String? {
         guard isAppWindow, !unroutedKeys.contains(appKey) else { return nil }
         return appKey
+    }
+
+    /// Phase 2: the helper a popup, menu or tooltip goes to, or nil when the main process keeps it. Only an
+    /// app with a running helper takes its popups; a popup never starts a helper (it is transient, and a
+    /// helper takes up to seconds to check in).
+    public static func popupHelperKey(appKey: String, helperRunning: Bool) -> String? {
+        guard helperRunning, !unroutedKeys.contains(appKey) else { return nil }
+        return appKey
+    }
+
+    /// A helper lives as long as its app has app windows; its own windowless rule counts only those too
+    /// (docs/99 §12.22). nil = keep it; else it quits and these popups (left over after the last app window)
+    /// go back to the main process first.
+    public static func popupsToHandBack<ID>(_ windows: [(id: ID, isApp: Bool)]) -> [ID]? {
+        windows.contains(where: \.isApp) ? nil : windows.map(\.id)
+    }
+
+    /// A content rect a helper reported, made safe for the integer session maths: nil when not finite or
+    /// empty; else its size capped to `limit` (the screens' union) and its origin kept within `limit`
+    /// widened by its size (a window may hang off an edge, not be anywhere).
+    public static func validFrame(_ r: WirePointRect, limit: CGRect) -> CGRect? {
+        guard [r.x, r.y, r.width, r.height].allSatisfy(\.isFinite), r.width > 0, r.height > 0,
+              !limit.isEmpty, limit.minX.isFinite, limit.maxY.isFinite else { return nil }
+        let w = min(CGFloat(r.width), limit.width), h = min(CGFloat(r.height), limit.height)
+        let x = min(max(CGFloat(r.x), limit.minX - w), limit.maxX), y = min(max(CGFloat(r.y), limit.minY - h), limit.maxY)
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// A pointer position from a helper: nil when not finite; else clamped to `limit` widened by its size
+    /// on every side (drags may leave the screens, but never by astronomical amounts).
+    public static func validPoint(x: Double, y: Double, limit: CGRect) -> CGPoint? {
+        guard x.isFinite, y.isFinite, !limit.isEmpty else { return nil }
+        let wide = limit.insetBy(dx: -limit.width, dy: -limit.height)
+        return CGPoint(x: min(max(CGFloat(x), wide.minX), wide.maxX), y: min(max(CGFloat(y), wide.minY), wide.maxY))
     }
 
     /// The dirty rects a helper needs: those that touch one of its windows' crops. Order kept.

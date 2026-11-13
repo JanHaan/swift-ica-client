@@ -250,6 +250,14 @@ final class SpikeHost {
             say("window \(id) \(on ? "minimised" : "restored") by the user → host would send TWI minimise/restore")
         case .moved(let id, let frame):
             say("window \(id) moved locally to \(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height)) pt")
+        case .gestureEnded(let id, let frame):
+            say("window \(id) gesture ended at \(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height)) pt → host would send one TWI move/resize")
+        case .edit(let id, let command):
+            say("window \(id): Edit menu \(command.rawValue) → host would send Ctrl-\(command.letter.uppercased())")
+        case .zoom(let id):
+            say("window \(id): Zoom → host would send TWI maximise/restore")
+        case .command(let command):
+            say("ICA menu: \(command.rawValue) → host would run it")
         }
     }
 

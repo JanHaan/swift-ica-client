@@ -52,11 +52,86 @@ public struct HelperWindowSpec: Codable, Equatable, Sendable {
     public var topmost: Bool?
     /// Dark overlay alpha while the session is suspended (docs/20 §3.12.9); nil = none.
     public var dim: Double?
+    /// Phase 2: a menu, tooltip or tool window of the app (borderless, non-activating panel); `menu` puts it
+    /// at the pop-up menu level, else floating, as in the main process.
+    public var popup: Bool?
+    public var menu: Bool?
+    /// Window controls from the remote style (D20): a sizing border allows a local resize, a maximise box Zoom.
+    public var resizable: Bool?
+    public var zoomable: Bool?
+    /// Caption and sizing-border bands for local move/resize (D20), in view points; nil = no local gestures.
+    public var bands: HelperHitBands?
 
     public init(id: UInt32, title: String, rect: WireRect, frame: WirePointRect? = nil, scale: Double? = nil,
-                seamless: Bool? = nil, minimized: Bool? = nil, topmost: Bool? = nil, dim: Double? = nil) {
+                seamless: Bool? = nil, minimized: Bool? = nil, topmost: Bool? = nil, dim: Double? = nil,
+                popup: Bool? = nil, menu: Bool? = nil, resizable: Bool? = nil, zoomable: Bool? = nil, bands: HelperHitBands? = nil) {
         self.id = id; self.title = title; self.rect = rect; self.frame = frame; self.scale = scale
         self.seamless = seamless; self.minimized = minimized; self.topmost = topmost; self.dim = dim
+        self.popup = popup; self.menu = menu; self.resizable = resizable; self.zoomable = zoomable; self.bands = bands
+    }
+}
+
+/// Where a press starts a local gesture (D20, docs/50 §3.1), in view points (top-left origin) of the window's
+/// content: the main process computes it from the TWI style, flags and system metrics (`TWIHitBands`), so the
+/// helper only compares numbers. A press elsewhere goes to the remote window.
+public struct HelperHitBands: Codable, Equatable, Sendable {
+    /// Width of the sizing border; nil = no local resize.
+    public var resizeEdge: Double?
+    /// Caption drag area: rows `captionTop..<captionBottom`, columns `captionLeft..<(width - captionRight)`
+    /// (the icon and the caption buttons excluded); nil = no local move.
+    public var caption: Caption?
+
+    public struct Caption: Codable, Equatable, Sendable {
+        public var top: Double, bottom: Double, left: Double, right: Double
+        public init(top: Double, bottom: Double, left: Double, right: Double) {
+            self.top = top; self.bottom = bottom; self.left = left; self.right = right
+        }
+    }
+
+    public init(resizeEdge: Double? = nil, caption: Caption? = nil) {
+        self.resizeEdge = resizeEdge; self.caption = caption
+    }
+
+    public var isEmpty: Bool { resizeEdge == nil && caption == nil }
+
+    public func isResizeEdge(_ p: CGPoint, size: CGSize) -> Bool {
+        guard let band = resizeEdge else { return false }
+        let x = Double(p.x), y = Double(p.y)
+        return x < band || y < band || x > Double(size.width) - band || y > Double(size.height) - band
+    }
+
+    public func isCaption(_ p: CGPoint, size: CGSize) -> Bool {
+        guard let c = caption else { return false }
+        let x = Double(p.x), y = Double(p.y)
+        return y >= c.top && y < c.bottom && x >= c.left && x < Double(size.width) - c.right
+    }
+}
+
+/// A remote pointer shape (Thinwire, session pixels) for the helpers' windows (phase 2): PNG plus hotspot in
+/// image pixels; each window shows it at its own k, so it has the same size as in the main process.
+public struct HelperCursor: Codable, Equatable, Sendable {
+    /// nil = the host hid the pointer.
+    public var png: Data?
+    /// Size and hotspot of the host's shape in session pixels; the PNG may be downscaled to fit the channel
+    /// (it is drawn at this size either way).
+    public var pixelWidth: Int, pixelHeight: Int
+    public var hotX: Double, hotY: Double
+    /// true = the system arrow (the shape could not be sent).
+    public var arrow: Bool?
+
+    public init(png: Data?, pixelWidth: Int, pixelHeight: Int, hotX: Double, hotY: Double, arrow: Bool? = nil) {
+        self.png = png; self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.hotX = hotX; self.hotY = hotY
+        self.arrow = arrow
+    }
+
+    public static let hidden = HelperCursor(png: nil, pixelWidth: 0, pixelHeight: 0, hotX: 0, hotY: 0)
+    public static let systemArrow = HelperCursor(png: nil, pixelWidth: 0, pixelHeight: 0, hotX: 0, hotY: 0, arrow: true)
+
+    /// Size and hotspot in points at k session pixels per point, as `ScalingLayout.cursor` in the main process
+    /// (a 64 px host cursor at 200 % is a 32 pt Retina-sharp cursor).
+    public func geometry(scale: Double) -> (size: CGSize, hotspot: CGPoint) {
+        let k = CGFloat(max(1, scale.rounded()))
+        return (CGSize(width: CGFloat(pixelWidth) / k, height: CGFloat(pixelHeight) / k), CGPoint(x: hotX / k, y: hotY / k))
     }
 }
 
@@ -78,6 +153,11 @@ public enum HostMessage: Codable, Equatable, Sendable {
     /// Headless IPC check: read the pixel at (x, y) and reply with `probeResult`.
     case probe(x: Int, y: Int, sentNs: UInt64)
     case quit
+    /// Phase 2: the remote pointer shape changed (shown over every window of the helper).
+    case cursor(HelperCursor)
+    /// Phase 2: the local move/resize the helper reported with `gestureEnded` is settled (the host confirmed
+    /// it and presented a covering frame, refused it, or 500 ms passed): show the live crop again (D20).
+    case gestureDone(windowId: UInt32)
 }
 
 public enum MouseKind: String, Codable, Sendable { case down, up, dragged, moved }
@@ -120,6 +200,17 @@ public enum HelperMessage: Codable, Equatable, Sendable {
     case activation(String)
     /// The user quit the helper (Cmd-Q). The helper stays; the host closes the app's windows (docs/99 §12.12).
     case appQuit
+    /// Phase 2: a local caption drag or edge resize ended with this content rect; the host sends exactly one
+    /// TWI move/resize and answers with `gestureDone` (D20). Nothing is sent during the gesture.
+    case gestureEnded(windowId: UInt32, frame: WirePointRect)
+    /// Phase 2: an Edit menu item was chosen (by mouse): the host sends the same Ctrl+key as the shortcut,
+    /// with the clipboard sync before a paste.
+    case edit(windowId: UInt32, EditCommand)
+    /// Phase 2: Window → Zoom: TWI maximise, or restore when maximised.
+    case zoom(windowId: UInt32)
+    /// Phase 2: an item of the helper's ICA menu; it runs in the main process (the helper has yielded
+    /// activation to it first).
+    case command(HelperCommand)
 }
 
 extension HelperMessage {

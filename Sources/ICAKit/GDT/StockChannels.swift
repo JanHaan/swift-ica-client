@@ -53,6 +53,16 @@ public enum StockChannels {
         "CTXNSAP": .init(name: "NetScalerAppFlow", versionLow: 1, versionHigh: 1),
         "CTXCSB": .init(name: "CTXBCR", versionLow: 1, versionHigh: 2),
         "CTXPFWD": .init(name: "CTXPFWD", versionLow: 1, versionHigh: 2),
+        // `SendAllInitResponse: Module[n]: <name> (<host name>), lowest … highest supported version: A-B` [B]:
+        "CTXTW": .init(name: "Thinwire3.0", versionLow: 4, versionHigh: 5, hostName: "vdtw30"),
+        "CTXTWI": .init(name: "TWI", versionLow: 1, versionHigh: 1, hostName: ""),
+        "CTXTUI": .init(name: "TUI", versionLow: 0, versionHigh: 1, hostName: "VDTUI"),
+        "CTXDT": .init(name: "ctxdt", versionLow: 7, versionHigh: 26, hostName: "ctxdt"),
+        "WD": .init(name: "ICA 3.0", versionLow: 1, versionHigh: 9, hostName: "WDICA"),
+        "PDCRYPT1": .init(name: "Encrypt", versionLow: 1, versionHigh: 1, hostName: "PDCRYPT1"),
+        "PDRFRAME": .init(name: "RFrame", versionLow: 1, versionHigh: 2, hostName: "PDRFRAME"),
+        "TD": .init(name: "TCP", versionLow: 1, versionHigh: 2, hostName: ""),
+        "UI": .init(name: "ui", versionLow: 1, versionHigh: 8, hostName: ""),
     ]
 
     /// Name → stock channel number, for `WinstationDriver.Configuration.channelOverrides`.

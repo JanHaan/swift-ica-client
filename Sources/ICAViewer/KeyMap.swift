@@ -1,4 +1,5 @@
 import Carbon.HIToolbox
+import ICAKit
 
 /// macOS virtual key codes (kVK_*) → PC scancode set 1. Scancodes are positional, so the
 /// server's keyboard layout (German, 0x407) decides the character. Extended keys carry 0xE0.
@@ -63,6 +64,30 @@ enum KeyMap {
         t[kVK_ANSI_KeypadEquals] = Code(0x0D)
         return t
     }()
+
+    /// The key that types `character` (a letter) in the current keyboard layout, for a menu command sent
+    /// as its shortcut (scancodes are positional: on a German layout Z is kVK_ANSI_Y, on Dvorak V is
+    /// kVK_ANSI_Period). Every key code is searched; the ANSI position when the layout has no Unicode data.
+    static func keyCode(typing character: String) -> UInt16? {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
+            return KeyLayoutSearch.keyCode(typing: character, translate: nil)
+        }
+        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
+        return data.withUnsafeBytes { raw -> UInt16? in
+            guard let layout = raw.bindMemory(to: UCKeyboardLayout.self).baseAddress else {
+                return KeyLayoutSearch.keyCode(typing: character, translate: nil)
+            }
+            return KeyLayoutSearch.keyCode(typing: character) { code in
+                var dead: UInt32 = 0
+                var chars = [UniChar](repeating: 0, count: 4)
+                var length = 0
+                let status = UCKeyTranslate(layout, code, UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
+                                            OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, chars.count, &length, &chars)
+                return status == noErr ? String(utf16CodeUnits: chars, count: length) : nil
+            }
+        }
+    }
 
     static let leftControl = Code(0x1D)
     static let leftAlt = Code(0x38)
