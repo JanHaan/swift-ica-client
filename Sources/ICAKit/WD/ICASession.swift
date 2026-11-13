@@ -56,6 +56,10 @@ public final class ICASession: @unchecked Sendable {
     /// further published apps inside this session (docs/55). Set `control.onEvent` before `start`; it is called on the
     /// session queue.
     public let control: ControlEngine?
+    /// CTXGDT discovery engine (ch 29, docs/76 §6), when the session was created with a GDT config (`ICA_GDT=1` in
+    /// icactl). Set `gdt.onEvent` before `start`; it is called on the session queue.
+    public let gdt: GDTEngine?
+    private let gdtChannel: UInt8?
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -66,6 +70,13 @@ public final class ICASession: @unchecked Sendable {
     public var pauseResumeOnThinwireInit = true
     /// When that PAUSE/RESUME last actually went out (the host then re-announces its windows). Session queue.
     public private(set) var lastPauseResumeSent: Date?
+    /// Handshake milestones for the early-drop classification (session queue).
+    private var dropMonitor = EarlyDropMonitor()
+    /// Last packets each way, redacted (session queue; dumped on an early drop).
+    private var packetRing = PacketRing(capacity: 8)
+    /// Set when the connection closed before the first Thinwire INIT (before `.closed` is delivered). Any
+    /// thread after `.closed`.
+    public private(set) var earlyDrop: EarlyDrop?
 
     public let transport: CGPTransport
     private let queue: DispatchQueue
@@ -79,10 +90,10 @@ public final class ICASession: @unchecked Sendable {
     /// CTXCPM module, so the host creates no PDF printer for this client (docs/97 §6.2). `audio` nil: no CTXCAM
     /// module, so the host plays no sound to this client (docs/98 §1). `webcam` nil: no CTXMM module, so the host
     /// shows no HDX camera (docs/98b §10.5). `control` nil: no CTXCTL module, so no later app can start inside this
-    /// session (docs/55 §1).
+    /// session (docs/55 §1). `gdt` nil: no CTXGDT module and no bind entry (the default; docs/76 §6).
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
                 cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
-                webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil) throws {
+                webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil, gdt: GDTEngine.Config? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -119,6 +130,11 @@ public final class ICASession: @unchecked Sendable {
         // The first VC without a fixed number, after CTXCAM, as in the reference: channel 20 (docs/55 §4.1).
         self.control = control.map { ControlEngine(config: $0) }
         if let engine = self.control { wd.register(engine) }
+        // Discovery only: last, on the stock client's channel 29 (D57).
+        let gdtEngine = gdt.map { GDTEngine(config: $0) }
+        self.gdt = gdtEngine
+        let driver = wd
+        gdtChannel = gdtEngine.map { driver.register($0, number: GDTWire.channelNumber) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
@@ -128,13 +144,28 @@ public final class ICASession: @unchecked Sendable {
         wd.schedule = { [weak self] block in self?.perform(block) }
         wd.transmit = { [weak self] bytes in
             guard let self else { return }
+            if self.wd.phase != .connected { self.packetRing.sentHandshake(bytes) }
             // Acks ride on data only once connected; during the handshake only the >5 rule applies.
             self.transport.send(Data(bytes), piggybackAck: self.wd.phase == .connected)
         }
+        wd.onPacketSent = { [weak self] packet in self?.packetRing.sent(packet) }
         wd.onEvent = { [weak self] event in
-            // After WD TERMINATE the host closes TCP without CGP FINISH (live): that is the end.
-            if case .terminate(let reason) = event { self?.transport.expectServerClose("WD TERMINATE \(reason)") }
-            self?.onEvent(.wd(event))
+            guard let self else { return }
+            switch event {
+            case .terminate(let reason):
+                // After WD TERMINATE the host closes TCP without CGP FINISH (live): that is the end.
+                self.dropMonitor.terminate(reason)
+                self.transport.expectServerClose("WD TERMINATE \(reason)")
+            case .connected: self.dropMonitor.connectResponseSent()
+            case .packet(let p):
+                self.dropMonitor.hostPacket()
+                self.packetRing.received(p)
+                if let gdt = self.gdt, let channel = p.channel, channel == self.gdtChannel {
+                    gdt.noteWDPacketType(p.type)
+                }
+            default: break
+            }
+            self.onEvent(.wd(event))
         }
         transport.onEvent = { [weak self] event in self?.transportEvent(event) }
         if let engine = self.clipboard {
@@ -178,6 +209,7 @@ public final class ICASession: @unchecked Sendable {
             guard let self else { return }
             // From the first Thinwire INIT on, a dead link is resumed (docs/20 §3.12.2, early drop).
             self.transport.markEstablished()
+            self.dropMonitor.thinwireInit()
             let text: String
             if !self.pauseResumeOnThinwireInit { text = "disabled" }
             else if self.seamless.pauseResume() {
@@ -214,6 +246,11 @@ public final class ICASession: @unchecked Sendable {
             onEvent(.resumed(result))
         case .gaveUp(let info): onEvent(.gaveUp(info))
         case .closed(let reason):
+            if let drop = dropMonitor.classify() {
+                earlyDrop = drop
+                onEvent(.log(drop.summary))
+                for line in packetRing.lines { onEvent(.log("early drop: " + line)) }
+            }
             closed = true
             setSuspended(false)
             cdm?.shutdown()

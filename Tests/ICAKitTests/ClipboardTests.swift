@@ -146,7 +146,7 @@ private final class Harness {
         + Host.list([13]) + Host.emptyList + Host.request(13) + Host.response(13, Data([0x41, 0, 0, 0])) + Host.failure
     let messages = p.feed(stream)
     #expect(messages == [
-        .initRequest(flags: 0x10, version: 3),
+        .initRequest(lowVersion: 0x10, highVersion: 3),
         .formatNames(flags: 0, entries: [ClipboardFormatName(id: 0xC00D, name: "HTML Format")]),
         .formatList(flags: 3, formats: [13, 0xC00D]),
         .formatList(flags: 1, formats: [13]),

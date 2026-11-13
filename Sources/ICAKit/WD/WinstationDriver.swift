@@ -42,6 +42,8 @@ public final class WinstationDriver {
     /// One transport write (one CGP data packet).
     public var transmit: ([UInt8]) -> Void = { _ in }
     public var onEvent: (Event) -> Void = { _ in }
+    /// Every framed client → server WD packet as queued (type byte first), for diagnostics (`PacketRing`).
+    public var onPacketSent: (([UInt8]) -> Void)?
     /// How engine output is brought onto the driver's queue; default runs inline.
     public var schedule: (@escaping () -> Void) -> Void = { $0() }
 
@@ -70,13 +72,17 @@ public final class WinstationDriver {
 
     // MARK: Channels
 
-    /// Registers an engine before the handshake; returns its channel number.
+    /// Registers an engine before the handshake; returns its channel number. `number` asks for a specific free
+    /// channel outside the fixed table (CTXGDT on 29, docs/76 §6.1); taken or invalid numbers fall back to the
+    /// normal allocation.
     @discardableResult
-    public func register(_ engine: VirtualChannelEngine) -> UInt8 {
+    public func register(_ engine: VirtualChannelEngine, number requested: UInt8? = nil) -> UInt8 {
         let name = engine.channelName
         let number: UInt8
         if let existing = channelOrder.first(where: { $0.name == name }) { number = existing.number }
         else if let fixed = WDModules.fixedChannels[name] { number = fixed }
+        else if let requested, requested >= 20, requested < 0x3A, !channelOrder.contains(where: { $0.number == requested }),
+                !WDModules.fixedChannels.values.contains(requested) { number = requested }
         else {
             var n: UInt8 = 20
             while channelOrder.contains(where: { $0.number == n }) || WDModules.fixedChannels.values.contains(n) { n += 1 }
@@ -312,6 +318,7 @@ public final class WinstationDriver {
     }
 
     private func countSent(_ packet: [UInt8]) {
+        onPacketSent?(packet)
         guard let type = packet.first else { return }
         var key = String(format: "WD %02x", type)
         if WDPacketType.isVirtualWrite(type) {

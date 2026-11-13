@@ -2,7 +2,7 @@ import Foundation
 
 /// The key sequence of `icactl audiotest` for the sound test apps (`ICA_AUDIOTEST_KEYS`), e.g.
 /// `ctrl+tab,tab,alt+t,esc`: comma-separated steps, each `[ctrl+][alt+][shift+]<key>`. Keys: a–z, 0–9, f1–f12,
-/// tab, esc, enter, space, up, down, left, right, home, end, pgup, pgdn. Enter and Space are sent only when they
+/// tab, esc, enter, space, backspace, delete, up, down, left, right, home, end, pgup, pgdn. Enter and Space are sent only when they
 /// are written in the sequence. Letters are mapped to the key that types them on the session layout (QWERTZ
 /// swaps y and z). Anything unknown makes the whole sequence invalid, so nothing is sent.
 public struct AudioTestKeyStep: Equatable, Sendable, CustomStringConvertible {
@@ -61,6 +61,7 @@ public enum AudioTestKeys {
         }
         let named: [String: (UInt8, Bool)] = [
             "tab": (0x0F, false), "esc": (0x01, false), "enter": (0x1C, false), "space": (0x39, false),
+            "backspace": (0x0E, false), "delete": (0x53, true),
             "up": (0x48, true), "down": (0x50, true), "left": (0x4B, true), "right": (0x4D, true),
             "home": (0x47, true), "end": (0x4F, true), "pgup": (0x49, true), "pgdn": (0x51, true),
         ]

@@ -1,4 +1,5 @@
 import CoreMedia
+import CryptoKit
 import Foundation
 import ICAKit
 
@@ -212,6 +213,23 @@ case "cliptest":
         fail("\(error)")
     }
 
+case "cliptest-files":
+    // icactl cliptest-files — clipboard file copy discovery (docs/75 §10 E2/E3), "Explorer Citrix ABC" only, fresh
+    // logon only. Mac → session: two known files pasted into %TEMP%\ica-cliptest-<run> (created by this run);
+    // session → Mac: Ctrl+A, Ctrl+C there and SHA-256 compare; then that folder (only) is deleted and the session
+    // logged off. ICA_CLIP_VERSION=4 answers 4; every CTXCLIP byte is traced to .session/clipfiles/. ICA_GDT=1 also
+    // announces CTXGDT (ch 29, docs/76 §6) and hex-logs every host GDT write to .session/gdt/<run>.log.
+    guard (args.first ?? "Explorer Citrix ABC") == "Explorer Citrix ABC" else { fail("cliptest-files is limited to \"Explorer Citrix ABC\"") }
+    do {
+        let resources = try await storeClient().resources()
+        guard let resource = resources.first(where: { $0.name == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
+        guard let ica = ICAFile(text: try await storeClient().launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runClipFilesTest(ica: ica)
+    } catch {
+        fail("\(error)")
+    }
+
 case "cdmtest":
     // icactl cdmtest [resource] — client drive mapping test, Notepad only (docs/95 "To verify live"): maps a
     // fresh temp folder as drive M and records what the host sends. In a session this run logged on itself:
@@ -359,6 +377,11 @@ default:
       icactl session [resource]          launch, logon, capture to .session/last/ (ICA_CAPTURE_REPLAY=1: .session/replay/), log off
       icactl droptest [resource]         session with one link drop after ICA_TEST_DROP_AFTER s and a CGP resume
       icactl cliptest                    clipboard test in "Notepad" (Notepad): paste in, copy out, never saves
+                                         (ICA_CLIP_VERSION=4: answer v4 and trace CTXCLIP to .session/clipfiles/)
+      icactl cliptest-files              clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
+                                         copy them back (SHA-256), delete only that folder, log off (fresh logon only)
+                                         (ICA_GDT=1: also announce CTXGDT, log host GDT writes to .session/gdt/;
+                                         ICA_GDT_ECHO_INIT=1|inc|inc@N|hex:…, ICA_GDT_HELLO=<hex>; docs/76 §6)
       icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
@@ -388,6 +411,7 @@ default:
     ICA_TEST_RESOURCES=<name>[,<name>]   apps the sessions commands may act on: "Calculator,Notepad"; another
                                          list only together with ICA_ALLOW_ANY_RESOURCE=1
     ICA_SESSION_END=disconnect           session/droptest/reconnect: end with CGP FINISH (disconnect), never log off
+    ICA_TEST_EARLY_LED=1                 session: SET_LED right behind INIT_CONNECT_RESPONSE (early-drop A/B test)
 
     ICA_LOGOFF_IF_ONLY=<exe>[,<exe>]     session: also log off a reconnected session, but only if every window
                                          seen belongs to one of these executables (or logonui.exe/cmd.exe)
@@ -547,6 +571,12 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
                 FileManager.default.createFile(atPath: path, contents: Data(payload), attributes: [.posixPermissions: 0o600])
             case .connected(let version, let rp, let ep, let caps):
                 connectedAt = Date()
+                if ProcessInfo.processInfo.environment["ICA_TEST_EARLY_LED"] == "1" {
+                    // A/B test (notes/early-drop-analysis.md H1): SET_LED right behind INIT_CONNECT_RESPONSE,
+                    // as the old viewer did. Inline on the session queue, so it shares the flush.
+                    session.send { wd, _ in wd.setLED(0x20) }
+                    say("led: sent right after INIT_CONNECT_RESPONSE (ICA_TEST_EARLY_LED=1)")
+                }
                 say("→ INIT_CONNECT_RESPONSE; connected (reducer v\(version), powers \(rp)/\(ep)); final caps: \(caps.map(\.description).joined(separator: ", "))")
             case .encryption(let mode): say("encryption established: \(mode)")
             case .sessionInfo(let tag, let value):
@@ -654,6 +684,7 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
             }
             say("  TWI messages: \(seamless.messageCounts.sorted { $0.key < $1.key }.map { String(format: "0x%02x×%d", $0.key, $0.value) }.joined(separator: " ")), malformed \(seamless.malformedCount)")
             for line in windowLines { say("  " + line) }
+            say("early drop: \(session.earlyDrop.map(\.summary) ?? "none (established or not closed early)")")
             say("end: \(ending)")
             c.resume()
         }
@@ -708,7 +739,10 @@ func runClipTest(ica: ICAFile) async throws {
     var config = WinstationDriver.Configuration()
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
-    let session = try ICASession(ica: ica, configuration: config, clipboard: ClipboardEngine.Config())
+    // E1 (docs/75 §10): ICA_CLIP_VERSION=4 answers CLIP_INIT with 4 and traces every CTXCLIP byte.
+    let clipConfig = clipTestConfig()
+    let trace = ClipTrace(enabled: clipConfig.traceWire, name: "cliptest")
+    let session = try ICASession(ica: ica, configuration: config, clipboard: clipConfig)
     guard let clip = session.clipboard else { fail("no clipboard engine") }
     let seamless = session.seamless
 
@@ -723,7 +757,9 @@ func runClipTest(ica: ICAFile) async throws {
     var terminateReason: UInt8?
 
     clip.onEvent = { event in
+        if case .trace(let line) = event { return trace.write(line) }
         say("clip: \(event)")
+        trace.write(event.description)
         switch event {
         case .ready: ready = true
         case .formatNames(let entries):
@@ -877,6 +913,454 @@ func runClipTest(ica: ICAFile) async throws {
     say("clipboard ready: \(gotReady), version \(summary.0), host format names: \(summary.1), last host list: \(summary.2.map { clip.label($0) })")
     say("fresh logon: \(fresh)")
     for step in steps { say("  " + step) }
+    say("end: \(ending)")
+}
+
+// MARK: - Clipboard file discovery (docs/75 §10)
+
+/// Clipboard config of the icactl clipboard tests: ICA_CLIP_VERSION (1–4, default 3; 4 also traces),
+/// ICA_CLIP_TRACE=1 (trace at any version), files for `cliptest-files`.
+func clipTestConfig(files: Bool = false) -> ClipboardEngine.Config {
+    let env = ProcessInfo.processInfo.environment
+    var c = ClipboardEngine.Config()
+    if let text = env["ICA_CLIP_VERSION"] {
+        guard let v = UInt16(text), (1...4).contains(v) else { fail("ICA_CLIP_VERSION must be 1…4") }
+        c.maxVersion = v
+    }
+    c.traceWire = c.maxVersion >= 4 || env["ICA_CLIP_TRACE"] == "1" || files
+    c.files = files
+    return c
+}
+
+/// Raw CTXCLIP trace file `.session/clipfiles/<name>-<run>.log` (0600). Test data only: these runs carry nothing
+/// but the test's own strings and files.
+final class ClipTrace: @unchecked Sendable {
+    let url: URL?
+    private let handle: FileHandle?
+    private let lock = NSLock()
+
+    init(enabled: Bool, name: String, runID: String = String(format: "%06x", UInt32.random(in: 0...0xFF_FFFF))) {
+        guard enabled else { url = nil; handle = nil; return }
+        let dir = sessionDir.appendingPathComponent("clipfiles")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let file = dir.appendingPathComponent("\(name)-\(runID).log")
+        FileManager.default.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        url = file
+        handle = try? FileHandle(forWritingTo: file)
+        say("CTXCLIP trace: \(file.path)")
+    }
+
+    func write(_ line: String) {
+        guard let handle else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        handle.write(Data((String(format: "%7.3f ", Date().timeIntervalSince(Clock.start)) + line + "\n").utf8))
+    }
+}
+
+func sha256(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
+func runClipFilesTest(ica: ICAFile) async throws {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let env = ProcessInfo.processInfo.environment
+    let runID = String(format: "%06x", UInt32.random(in: 0...0xFF_FFFF))
+    let folder = "ica-cliptest-\(runID)"
+    let clipConfig = clipTestConfig(files: true)
+    let trace = ClipTrace(enabled: true, name: "cliptest-files", runID: runID)
+    let shots = sessionDir.appendingPathComponent("clipfiles")
+    say("run \(runID): CTXCLIP max version \(clipConfig.maxVersion), session folder %TEMP%\\\(folder)")
+    // CTXGDT discovery (docs/76 §6): off unless ICA_GDT=1; then every host write is hex-logged and nothing is answered
+    // unless ICA_GDT_ECHO_INIT asks for it.
+    let gdtConfig = GDTEngine.Config.fromEnvironment(env)
+    let gdtHello: [UInt8]? = env["ICA_GDT_HELLO"].map { text in
+        guard let bytes = GDTEngine.parseHex(text), !bytes.isEmpty else { fail("ICA_GDT_HELLO must be hex bytes") }
+        return bytes
+    }
+    let gdtLog: GDTLogFile? = try gdtConfig.map { _ in
+        try GDTLogFile(directory: sessionDir.appendingPathComponent("gdt"), runID: "cliptest-files-\(runID)", start: Clock.start)
+    }
+    if let gdtConfig, let gdtLog {
+        say("CTXGDT discovery: versions \(gdtConfig.versionLow)…\(gdtConfig.versionHigh), init reply " +
+            (gdtConfig.initReply.map { "\($0)" } ?? "none") + (gdtHello.map { ", hello \($0.count) B" } ?? "") + "; log \(gdtLog.url.path)")
+    }
+
+    // Mac side: two known files (1 KB text, 70 KB u32 counter pattern) in a fresh temp dir, or ICA_CLIP_FILES_TEST.
+    var macDir: URL
+    var createdMacDir = false
+    if let given = env["ICA_CLIP_FILES_TEST"] {
+        macDir = URL(fileURLWithPath: given, isDirectory: true)
+    } else {
+        macDir = URL(fileURLWithPath: "/tmp/ica-clipfiles-\(runID)", isDirectory: true)
+        try FileManager.default.createDirectory(at: macDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        createdMacDir = true
+        let line = "ICA clipboard file test \(runID): the quick brown fox jumps over the lazy dog.\r\n"
+        var text = Data(String(repeating: line, count: 1024 / line.utf8.count + 1).utf8.prefix(1024))
+        text.replaceSubrange(1022..<1024, with: Data("\r\n".utf8))
+        var counter = Data(capacity: 70 * 1024)
+        for i in 0..<(70 * 1024 / 4) { withUnsafeBytes(of: UInt32(i).littleEndian) { counter.append(contentsOf: $0) } }
+        try text.write(to: macDir.appendingPathComponent("a.txt"))
+        try counter.write(to: macDir.appendingPathComponent("b.bin"))
+    }
+    defer { if createdMacDir { try? FileManager.default.removeItem(at: macDir) } }
+    let files = ClipboardLocalFile.load(directory: macDir)
+    guard !files.isEmpty else { fail("no regular files in \(macDir.path)") }
+    var originals: [String: String] = [:]
+    for f in files {
+        guard let data = f.read() else { fail("cannot read \(f.entry.name)") }
+        originals[f.entry.name] = sha256(data)
+        say("Mac file \"\(f.entry.name)\" \(data.count) B sha256 \(originals[f.entry.name]!)")
+    }
+
+    var config = WinstationDriver.Configuration()
+    config.logon = WDLogon(ica: ica)
+    config.display = WDDisplay(width: 1920, height: 1080)
+    let session = try ICASession(ica: ica, configuration: config, clipboard: clipConfig, gdt: gdtConfig)
+    guard let clip = session.clipboard else { fail("no clipboard engine") }
+    let seamless = session.seamless
+    let layout = config.logon.keyboardLayout
+    var gdtLastHost: Date?
+    if let gdt = session.gdt {
+        let limit = gdt.config.logLimit
+        gdt.onEvent = { event in
+            switch event {
+            case .hostWrite(let w):
+                gdtLastHost = Date()
+                gdtLog?.write(GDTHexLog.dump(w, limit: limit))
+            case .sent(let w, let reason):
+                gdtLog?.write(GDTHexLog.dump(w, direction: "→", limit: limit) + ["    (\(reason))"])
+            case .module, .log:
+                gdtLog?.write(event.description)
+            }
+            say("gdt: \(event)")
+        }
+    }
+
+    // Session-queue state.
+    var logon = FreshLogonDetector()
+    var windowsSeen = SeenWindows()
+    var appWindows: [UInt32] = []
+    var ready = false
+    var fileRequests = 0
+    var fileServed = 0
+    var hostGroup: [ClipboardFileEntry]?
+    var hostContents: [(index: UInt32, name: String?, sha: String, bytes: Int)] = []
+    var hostText: String?
+    var protocolErrors = 0
+    var terminateReason: UInt8?
+
+    clip.onEvent = { event in
+        if case .trace(let line) = event { return trace.write(line) }
+        trace.write(event.description)
+        switch event {
+        case .hostFileContents(let i, let name, let data):
+            hostContents.append((i, name, sha256(data), data.count))
+            say("clip: \(event) sha256 \(sha256(data))")
+            return
+        case .hostClipboard(let content, _, _):
+            hostText = content.text   // only the test's own folder name is ever copied as text; compared, not logged
+            say("clip: host clipboard: \(content.summary)")
+            return
+        default:
+            break
+        }
+        say("clip: \(event)")
+        switch event {
+        case .ready: ready = true
+        case .hostFileRequest(_, _, _, let served, _, _):
+            fileRequests += 1
+            if served { fileServed += 1 }
+        case .hostFileGroup(let entries): hostGroup = entries
+        case .protocolError: protocolErrors += 1
+        default: break
+        }
+    }
+    seamless.onEvent = { event in
+        switch event {
+        case .channelReady:
+            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+        case .windowAdded(let w):
+            logon.windowAdded(appKey: w.appKey)
+            windowsSeen.note(w)
+            if w.kind == .appWindow { appWindows.append(w.id) }
+            say("TWI window \(w.id) \(w.kind) \"\(w.title)\" app \(w.appKey)")
+        case .windowChanged(let w, let changes):
+            windowsSeen.note(w)
+            if changes.contains(.title) { say("TWI window \(w.id) title \"\(w.title)\"") }
+        case .windowRemoved(let w):
+            appWindows.removeAll { $0 == w.id }
+            say("TWI window \(w.id) removed")
+        default: break
+        }
+    }
+    session.onThinwireInit = { _ in
+        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+    }
+    session.onEvent = { event in
+        switch event {
+        case .log(let text): say(text)
+        case .closed(let reason): say("session closed: \(reason)")
+        case .wd(.terminate(let reason)):
+            terminateReason = reason
+            say("← TERMINATE reason \(reason)")
+        case .wd(.initResponseSent(let modules, _)): say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
+        case .wd(.failure(let text)): say("WD failure: \(text)")
+        default: break
+        }
+    }
+
+    try await session.start()
+    let start = Date()
+    let gotReady = await waitFor(session, 90) { ready }
+    say(gotReady ? "clipboard channel ready" : "clipboard channel NOT ready after 90 s")
+    if let gdt = session.gdt, let gdtHello { await onSession(session) { gdt.send(gdtHello, reason: "ICA_GDT_HELLO") } }
+    let explorer: () -> UInt32? = {
+        appWindows.first { id in
+            if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == "explorer.exe" }
+            return windowsSeen.appKey(id)?.lowercased() == "app:explorer citrix ekm"
+        }
+    }
+    _ = await waitFor(session, max(5, 120 - Date().timeIntervalSince(start))) { logon.isFresh && explorer() != nil }
+    let fresh = await onSession(session) { logon.isFresh }
+    let target = await onSession(session) { explorer() }
+
+    // Helpers. Every key step and typed text is followed by a screenshot of the Explorer window.
+    var shot = 0
+    var steps: [String] = []
+    func note(_ line: String) { steps.append(line); say(line) }
+    func title() async -> String { await onSession(session) { target.flatMap { seamless.model.windows[$0]?.title } ?? "" } }
+    func appWindowIDs() async -> Set<UInt32> { await onSession(session) { Set(seamless.model.windows.filter { $0.value.kind == .appWindow }.keys) } }
+    func screenshot(_ label: String) async {
+        guard let target else { return }
+        shot += 1
+        say("[\(label)] " + (await audioTestScreenshot(session, target: target, index: shot, file: "cliptest-files-\(runID)", dir: shots)))
+    }
+    func keys(_ sequence: String, wait: Double = 1.5) async throws {
+        let parsed = try AudioTestKeys.parse(sequence, keyboardLayout: layout)
+        say("keys: \(sequence)")
+        for step in parsed {
+            session.sendInput { wd in
+                for m in step.modifiers { wd.keyScancode(m, up: false) }
+                if step.extended {
+                    wd.keyScancodes([0xE0, step.scancode], up: false)
+                    wd.keyScancodes([0xE0, step.scancode], up: true)
+                } else {
+                    wd.keyScancode(step.scancode, up: false)
+                    wd.keyScancode(step.scancode, up: true)
+                }
+                for m in step.modifiers.reversed() { wd.keyScancode(m, up: true) }
+            }
+            try await Task.sleep(nanoseconds: 300_000_000)
+        }
+        try await Task.sleep(nanoseconds: UInt64(wait * 1e9))
+        await screenshot(sequence)
+    }
+    func type(_ text: String) async throws {
+        say("type: \(text)")
+        session.sendInput { wd in
+            for unit in text.utf16 {
+                wd.keyUnicode(unit, flags: [])
+                wd.keyUnicode(unit, flags: .up)
+            }
+        }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        await screenshot("typed")
+    }
+    /// Text the focused control copies: `prefix` keys (e.g. Ctrl+A), Ctrl+C, then the host's text through the
+    /// clipboard channel (no screenshot reading). Nil if no text arrived within 8 s.
+    func copiedText(_ prefix: String? = nil) async throws -> String? {
+        await onSession(session) { hostText = nil; clip.fetchFileContents = false }
+        if let prefix { try await keys(prefix, wait: 0.5) }
+        try await keys("ctrl+c", wait: 0.5)
+        _ = await waitFor(session, 8) { hostText != nil }
+        return await onSession(session) { hostText }
+    }
+    /// The name of the item selected in the file list, via F2 (rename box), Ctrl+C, Esc: nothing is renamed.
+    func selectedName() async throws -> String? {
+        try await keys("f2", wait: 1)
+        let name = try await copiedText()
+        try await keys("esc", wait: 1)
+        return name
+    }
+    /// The address bar's text: Ctrl+L (language-independent; German Alt+D opens the "Datei" menu), Ctrl+C, Esc.
+    func addressBar() async throws -> String? {
+        try await keys("ctrl+l", wait: 1)
+        let text = try await copiedText()
+        try await keys("esc", wait: 1)
+        return text
+    }
+    /// Focus the address bar (Ctrl+L, else F4), type `text`, and check it is really there (Ctrl+A, Ctrl+C).
+    func typeIntoAddressBar(_ text: String) async throws -> Bool {
+        for focus in ["ctrl+l", "f4"] {
+            try await keys(focus, wait: 1)
+            if focus == "f4" { try await keys("ctrl+a", wait: 0.5) }
+            try await type(text)
+            if try await copiedText("ctrl+a") == text { note("address bar holds \"\(text)\" (\(focus))"); return true }
+            note("address bar check after \(focus): the typed text is not there")
+            try await keys("esc", wait: 1)
+        }
+        return false
+    }
+    func leaf(_ path: String) -> String { String(path.split(whereSeparator: { $0 == "\\" || $0 == "/" }).last ?? "") }
+    /// Stop: Esc (closes a dialog or rename box), no further input.
+    func abort(_ why: String) async throws {
+        note("STOP: \(why); Esc, no further input")
+        try await keys("esc", wait: 1)
+    }
+
+    var pasted = false, compared = false, deleted = false
+    if !fresh {
+        say("not a fresh logon by this run: no input is sent (this may be an existing session)")
+    } else if !gotReady || target == nil {
+        say("no Explorer window or no clipboard channel: no input is sent")
+    } else if let target {
+        session.send { _, twi in twi.activate(windowId: target) }
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        await screenshot("start, title \"\(await title())\"")
+        // 1. %TEMP% via the address bar; success = the title is the leaf of the path the address bar then shows
+        // (TEMP may be "…\Temp" or a numbered session subfolder "…\Temp\2"). Only the leaf is logged.
+        var tempLeaf = ""
+        var atTemp = false
+        if try await typeIntoAddressBar("%TEMP%") {
+            try await keys("enter", wait: 2.5)
+            let path = try await addressBar() ?? ""
+            tempLeaf = leaf(path)
+            let inTemp = path.split(whereSeparator: { $0 == "\\" }).contains { $0.lowercased() == "temp" }
+            let shown = await title()
+            atTemp = inTemp && !tempLeaf.isEmpty && shown.lowercased() == tempLeaf.lowercased()
+            note("after Enter: title \"\(shown)\", address-bar leaf \"\(tempLeaf)\", Temp in the path: \(inTemp)")
+        }
+        if !atTemp {
+            try await abort("not in the TEMP folder (address bar or title check failed)")
+        } else {
+            // 2. A new folder with this run's name (checked in the rename box and as the selection), then open it.
+            try await keys("ctrl+shift+n", wait: 2)
+            try await type(folder)
+            let typed = try await copiedText("ctrl+a")
+            var inside = ""
+            if typed != folder {
+                try await abort("the new folder's rename box does not hold \"\(folder)\"")
+            } else {
+                try await keys("enter", wait: 1.5)
+                if try await selectedName() != folder {
+                    try await abort("the selected item after renaming is not \"\(folder)\"")
+                } else {
+                    try await keys("enter", wait: 2.5)
+                    inside = await title()
+                    if inside != folder { try await abort("Explorer title is \"\(inside)\" after opening the new folder, expected \"\(folder)\"") }
+                }
+            }
+            if inside == folder {
+                note("in %TEMP%\\\(folder)")
+                // 3. E2: Mac → session paste of the files.
+                await onSession(session) { fileRequests = 0; fileServed = 0 }
+                session.clipboardAnnounce(ClipboardSnapshot(content: ClipboardContent(files: files)))
+                try await Task.sleep(nanoseconds: 500_000_000)
+                let gdtBefore = await onSession(session) { session.gdt?.statistics.packets ?? 0 }
+                try await keys("ctrl+v", wait: 1)
+                if session.gdt != nil {
+                    // GDT discovery: collect host GDT traffic for up to 60 s; stop early once it has been quiet for 15 s.
+                    _ = await waitFor(session, 60) {
+                        let quiet = gdtLastHost.map { Date().timeIntervalSince($0) >= 15 } ?? false
+                        let seen = (session.gdt?.statistics.packets ?? 0) > gdtBefore
+                        return fileServed >= files.count + 1 || protocolErrors > 0 || (seen && quiet)
+                    }
+                } else {
+                    _ = await waitFor(session, 30) { fileServed >= files.count + 1 || protocolErrors > 0 }
+                }
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                await screenshot("after paste")
+                let (requested, served) = await onSession(session) { (fileRequests, fileServed) }
+                note("E2 paste: \(requested) file-format requests from the host, \(served) served (descriptor + \(files.count) files expected)")
+                if let gdt = session.gdt {
+                    let stats = await onSession(session) { gdt.statistics }
+                    note("E2 GDT: \(stats.packets - gdtBefore) host GDT packets after Ctrl+V; run so far: \(stats.summary)")
+                }
+                pasted = served > 1
+                // 4. E3: session → Mac copy of the folder's contents, with SHA-256 compare.
+                await onSession(session) { hostGroup = nil; hostContents = []; clip.fetchFileContents = true }
+                try await keys("ctrl+a", wait: 1)
+                try await keys("ctrl+c", wait: 1)
+                _ = await waitFor(session, 30) { hostGroup != nil && hostContents.count >= (hostGroup?.filter { !$0.isDirectory }.count ?? 1) }
+                let (group, contents) = await onSession(session) { (hostGroup, hostContents) }
+                if let group {
+                    note("E3 descriptor: " + group.map { "\"\($0.name)\" \($0.size) B" }.joined(separator: ", "))
+                    for c in contents {
+                        let name = c.name ?? "?"
+                        let match = originals[name].map { $0 == c.sha } ?? false
+                        note("E3 FileContents index \(c.index) \"\(name)\" \(c.bytes) B: SHA-256 \(match ? "EQUALS" : "does NOT equal") the Mac original")
+                        if match { compared = true }
+                    }
+                } else {
+                    note("E3: no FileGroupDescriptorW from the host within 30 s")
+                }
+                // 5. Cleanup: up to %TEMP%, select this run's folder by name, check the selection, Shift+Del, confirm.
+                try await keys("backspace", wait: 2.5)
+                let up = await title()
+                if up.lowercased() != tempLeaf.lowercased() {
+                    try await abort("Explorer title is \"\(up)\" after Backspace, expected \"\(tempLeaf)\"; the test folder stays")
+                } else {
+                    try await type(folder)
+                    let selected = try await selectedName()
+                    if selected != folder {
+                        try await abort("the selected item is not \"\(folder)\" (\(selected == nil ? "no name copied" : "another name")); nothing deleted")
+                    } else {
+                        note("selected item checked: \"\(folder)\"")
+                        let before = await appWindowIDs()
+                        try await keys("shift+delete", wait: 2)
+                        let dialogs = await onSession(session) {
+                            seamless.model.windows.values.filter { $0.kind == .appWindow && !before.contains($0.id) }.map(\.title)
+                        }
+                        let confirm = dialogs.count == 1 && ["lösch", "delet", "entfern"].contains { dialogs[0].lowercased().contains($0) }
+                        if !confirm {
+                            try await abort("expected one delete confirmation, got \(dialogs.map { "\"\($0)\"" })")
+                        } else {
+                            note("confirmation \"\(dialogs[0])\": Enter (deletes only \(folder))")
+                            try await keys("enter", wait: 3)
+                            try await keys("f5", wait: 2)
+                            try await type(folder)
+                            let after = try await selectedName()
+                            deleted = after != folder
+                            note(deleted ? "the test folder is gone" : "the test folder is STILL there")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // End: log off only this run's fresh session; otherwise disconnect (CGP FINISH).
+    var ending: String
+    if session.isClosed {
+        ending = "session ended by the server" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+    } else if !fresh {
+        await session.close()
+        ending = "disconnected (CGP FINISH), not logged off"
+    } else {
+        let sent: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        if sent {
+            say("→ TWI LOGOFF")
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 250_000_000) }
+        }
+        if session.isClosed {
+            ending = "logged off" + (terminateReason.map { " (TERMINATE reason \($0))" } ?? "")
+        } else {
+            await session.close()
+            ending = sent ? "logoff sent but the session did not end; disconnected" : "TWI not ready; disconnected"
+        }
+    }
+    let version = await onSession(session) { clip.version }
+    say("\n=== cliptest-files summary (run \(runID)) ===")
+    say("clipboard ready: \(gotReady), version \(version), fresh logon: \(fresh), protocol errors: \(protocolErrors)")
+    for step in steps { say("  " + step) }
+    say("E2 pasted: \(pasted), E3 compared equal: \(compared), test folder deleted: \(deleted)")
+    if let gdt = session.gdt {
+        let (stats, sent) = await onSession(session) { (gdt.statistics, gdt.sentCount) }
+        say("CTXGDT: \(stats.summary); our GDT writes: \(sent)")
+        gdtLog?.write("summary: \(stats.summary); our GDT writes: \(sent)")
+        if let gdtLog { say("GDT log: \(gdtLog.url.path)") }
+    }
+    if let url = trace.url { say("trace: \(url.path)") }
     say("end: \(ending)")
 }
 
@@ -2248,8 +2732,9 @@ final class NotepadScratch {
 
 /// Framebuffer crop (0600) of `target` (plus the foreground window if another one is in front, e.g. a dialog
 /// it opened), after a full redraw request.
-func audioTestScreenshot(_ session: ICASession, target: UInt32, index: Int) async -> String {
-    let url = sessionDir.appendingPathComponent("audiotest-sound-\(index).png")
+func audioTestScreenshot(_ session: ICASession, target: UInt32, index: Int, file: String = "audiotest-sound",
+                         dir: URL = sessionDir) async -> String {
+    let url = dir.appendingPathComponent("\(file)-\(index).png")
     session.send { wd, _ in wd.redraw() }
     try? await Task.sleep(nanoseconds: 700_000_000)
     return await onSession(session) {
