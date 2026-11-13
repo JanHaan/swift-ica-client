@@ -6,17 +6,17 @@ import Testing
 /// docs/99 §12 phase 2: menu bar model, popups, local gestures, pointer shapes.
 @Suite struct HelperMenuTests {
     @Test func englishAndGermanMenus() {
-        let en = HelperMenu.sections(appName: "Notepad", german: false)
+        let en = HelperMenu.sections(appName: "Text App", german: false)
         #expect(en.map(\.role) == [.app, .edit, .window, .ica, .help])
-        #expect(en.map(\.title) == ["Notepad", "Edit", "Window", "ICA", "Help"])
+        #expect(en.map(\.title) == ["Text App", "Edit", "Window", "ICA", "Help"])
         #expect(en[0].items.filter { !$0.isSeparator }.map(\.title)
-            == ["About Notepad", "Hide Notepad", "Hide Others", "Show All", "Quit Notepad"])
+            == ["About Text App", "Hide Text App", "Hide Others", "Show All", "Quit Text App"])
         #expect(en[3].items.filter { !$0.isSeparator }.map(\.title)
             == ["Open Launcher", "Connection Center", "Settings…", "Report a Problem…", "Disconnect Session…", "Log Off Session…"])
-        let de = HelperMenu.sections(appName: "Calculator", german: true)
-        #expect(de.map(\.title) == ["Calculator", "Bearbeiten", "Fenster", "ICA", "Hilfe"])
-        #expect(de[0].items.first?.title == "Über Calculator")
-        #expect(de[0].items.last?.title == "Calculator beenden")
+        let de = HelperMenu.sections(appName: "Calc App", german: true)
+        #expect(de.map(\.title) == ["Calc App", "Bearbeiten", "Fenster", "ICA", "Hilfe"])
+        #expect(de[0].items.first?.title == "Über Calc App")
+        #expect(de[0].items.last?.title == "Calc App beenden")
         #expect(de[1].items.filter { !$0.isSeparator }.map(\.title) == ["Widerrufen", "Ausschneiden", "Kopieren", "Einsetzen", "Alles auswählen"])
         #expect(de[3].items.last?.title == "Sitzung abmelden…")
         // Same structure in both languages.
@@ -71,8 +71,8 @@ import Testing
     }
 
     @Test func popupsGoToARunningHelperOnly() {
-        #expect(HelperRouting.popupHelperKey(appKey: "app:Notepad", helperRunning: true) == "app:Notepad")
-        #expect(HelperRouting.popupHelperKey(appKey: "app:Notepad", helperRunning: false) == nil)
+        #expect(HelperRouting.popupHelperKey(appKey: "app:Text App", helperRunning: true) == "app:Text App")
+        #expect(HelperRouting.popupHelperKey(appKey: "app:Text App", helperRunning: false) == nil)
         #expect(HelperRouting.popupHelperKey(appKey: "session", helperRunning: true) == nil)
         #expect(HelperRouting.popupHelperKey(appKey: "_NONE_", helperRunning: true) == nil)
     }

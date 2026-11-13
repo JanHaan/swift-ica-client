@@ -55,19 +55,19 @@ import Testing
 
 @Suite struct HelperSessionSlotTests {
     @Test func firstSessionKeepsThePhaseOneKeyAndName() {
-        #expect(HelperSessionSlots.key(appKey: "app:Notepad", slot: 1) == "app:Notepad")
-        #expect(HelperSessionSlots.name("Notepad", slot: 1) == "Notepad")
+        #expect(HelperSessionSlots.key(appKey: "app:Text App", slot: 1) == "app:Text App")
+        #expect(HelperSessionSlots.name("Text App", slot: 1) == "Text App")
     }
 
     @Test func furtherSessionsGetTheirOwnKeyAndName() {
-        let k2 = HelperSessionSlots.key(appKey: "app:Notepad", slot: 2)
-        #expect(k2 != "app:Notepad" && k2.hasPrefix("app:Notepad"))
-        #expect(HelperSessionSlots.key(appKey: "app:Notepad", slot: 3) != k2)
-        #expect(HelperSessionSlots.name("Notepad", slot: 2) == "Notepad (2)")
+        let k2 = HelperSessionSlots.key(appKey: "app:Text App", slot: 2)
+        #expect(k2 != "app:Text App" && k2.hasPrefix("app:Text App"))
+        #expect(HelperSessionSlots.key(appKey: "app:Text App", slot: 3) != k2)
+        #expect(HelperSessionSlots.name("Text App", slot: 2) == "Text App (2)")
         // Own bundle id and directory, so LaunchServices starts a second instance.
-        let l1 = HelperLabel(key: "app:Notepad", name: "Notepad"), l2 = HelperLabel(key: k2, name: "Notepad (2)")
+        let l1 = HelperLabel(key: "app:Text App", name: "Text App"), l2 = HelperLabel(key: k2, name: "Text App (2)")
         #expect(HelperBundle.bundleIdentifier(for: l1) != HelperBundle.bundleIdentifier(for: l2))
-        #expect(HelperBundle.relativePath(for: l2).hasSuffix("/Notepad (2).app"))
+        #expect(HelperBundle.relativePath(for: l2).hasSuffix("/Text App (2).app"))
     }
 
     @Test func smallestFreeSlot() {
@@ -106,8 +106,8 @@ import Testing
     @Test func windowsThenLauncherItems() {
         let items = HelperDockMenu.items(windows: [.init(id: 7, title: "Notes.txt - Editor", isKey: false),
                                                    .init(id: 3, title: "  ", isKey: true)],
-                                         untitled: "Notepad", german: false)
-        #expect(items.map(\.title) == ["Notepad", "Notes.txt - Editor", "", "Show Launcher", "Connection Center"])
+                                         untitled: "Text App", german: false)
+        #expect(items.map(\.title) == ["Text App", "Notes.txt - Editor", "", "Show Launcher", "Connection Center"])
         #expect(items.map(\.action) == [.window(3), .window(7), nil, .host(.showLauncher), .host(.connectionCenter)])
         #expect(items.map(\.checked) == [true, false, false, false, false])
         #expect(items[2].isSeparator)
@@ -161,7 +161,7 @@ import Testing
         #expect(HelperAppsSwitch.resolve(environment: nil, stored: true, automated: true) == (false, .automated))
         #expect(HelperAppsSwitch.resolve(environment: "1", stored: false, automated: true) == (true, .environment))
         #expect(HelperAppsSwitch.resolve(environment: "0", stored: true, automated: true) == (false, .environment))
-        for env in [["ICAVIEWER_SELFTEST": "1"], ["ICAVIEWER_HOLD_SECONDS": "30"], ["ICAVIEWER_LAUNCH": "Calculator"],
+        for env in [["ICAVIEWER_SELFTEST": "1"], ["ICAVIEWER_HOLD_SECONDS": "30"], ["ICAVIEWER_LAUNCH": "Calc App"],
                     ["ICAVIEWER_PROBE_CLICK": "1"], ["ICAVIEWER_SCREENSHOT": "1"], ["ICAVIEWER_CAPTURE_TWI": "1"],
                     ["ICAVIEWER_DEMO": "1"], ["ICAVIEWER_LOGIN_AUTOFILL": "1"], ["ICAVIEWER_LOGIN_SCREENSHOT": "/tmp/x.png"]] {
             #expect(HelperAppsSwitch.isAutomated(env), "\(env)")

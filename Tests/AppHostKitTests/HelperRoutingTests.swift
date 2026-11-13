@@ -4,10 +4,10 @@ import Testing
 
 @Suite struct HelperRoutingTests {
     @Test func onlyAppWindowsWithARealAppKeyGetAHelper() {
-        #expect(HelperRouting.helperKey(appKey: "app:Notepad", isAppWindow: true) == "app:Notepad")
+        #expect(HelperRouting.helperKey(appKey: "app:Text App", isAppWindow: true) == "app:Text App")
         #expect(HelperRouting.helperKey(appKey: "exe:c:\\windows\\notepad.exe", isAppWindow: true) == "exe:c:\\windows\\notepad.exe")
         // Popups and menus stay in the main process in phase 1.
-        #expect(HelperRouting.helperKey(appKey: "app:Notepad", isAppWindow: false) == nil)
+        #expect(HelperRouting.helperKey(appKey: "app:Text App", isAppWindow: false) == nil)
         // No app behind the window (logon console, orphans): main process.
         #expect(HelperRouting.helperKey(appKey: "session", isAppWindow: true) == nil)
         #expect(HelperRouting.helperKey(appKey: "_NONE_", isAppWindow: true) == nil)
