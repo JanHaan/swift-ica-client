@@ -26,6 +26,9 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
         public var readyTimeout: TimeInterval = 90
         /// After our own launch (§5.3), shared launches wait this long for its response.
         public var ownResponseWait: TimeInterval = 5
+        /// Host capability ids we otherwise skip, echoed with the host's data (discovery only, docs/76 §7.2 V7:
+        /// `ICA_CTL_ACCEPT=09` in icactl). Empty by default.
+        public var acceptCapabilities: Set<UInt16> = []
 
         public init() {}
     }
@@ -267,7 +270,7 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
             state = .waiting
             commandLineLimit = ControlCapability.commandLineLimit(caps) ?? 0
             let hasLaunchData = !(config.own?.commandLine.isEmpty ?? true)
-            let (payload, answered) = ControlCapability.response(to: caps, hasLaunchData: hasLaunchData)
+            let (payload, answered) = ControlCapability.response(to: caps, hasLaunchData: hasLaunchData, echo: config.acceptCapabilities)
             answeredLaunchData = answered.contains { $0.id == ControlWire.Capability.launchData }
             diagnostics.answeredCapabilities = answered
             let reply = ControlWire.message(ControlWire.Command.capabilityResponse, payload)

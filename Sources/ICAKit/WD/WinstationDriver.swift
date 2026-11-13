@@ -14,6 +14,12 @@ public final class WinstationDriver {
         /// Bytes the transport adds per frame (CGP budget 7, docs/20 §8).
         public var transportOverhead = 7
         public var maxVirtualWrite = 5000
+        /// Channel numbers by VC name that win over the fixed table and the allocation (discovery only: the stock
+        /// client's numbers, docs/76 §7.4 V12). Ignored for a number that is taken or ≥ 0x3A. Empty by default.
+        public var channelOverrides: [String: UInt8] = [:]
+        /// Module-header name/versions per VC (`WDModuleOverride.key`, e.g. "CTXGDT"), applied to the built VD module
+        /// (discovery only, docs/76 §7.6). Empty by default.
+        public var moduleOverrides: [String: WDModuleOverride] = [:]
 
         public init() {}
     }
@@ -80,6 +86,8 @@ public final class WinstationDriver {
         let name = engine.channelName
         let number: UInt8
         if let existing = channelOrder.first(where: { $0.name == name }) { number = existing.number }
+        else if let forced = configuration.channelOverrides[name], forced < 0x3A,
+                !channelOrder.contains(where: { $0.number == forced }) { number = forced }
         else if let fixed = WDModules.fixedChannels[name] { number = fixed }
         else if let requested, requested >= 20, requested < 0x3A, !channelOrder.contains(where: { $0.number == requested }),
                 !WDModules.fixedChannels.values.contains(requested) { number = requested }
@@ -140,7 +148,19 @@ public final class WinstationDriver {
             }
             for output in outputs {
                 switch output {
-                case .data(let plain):
+                case .data(let frame):
+                    var plain = frame
+                    if highThroughput {
+                        guard let (payload, flags) = WDHighThroughput.strip(frame) else {
+                            onEvent(.failure("HT header: short frame (\(frame.count) B)"))
+                            continue
+                        }
+                        plain = payload
+                        if flags & WDHighThroughput.flagAnswer != 0 { send(WDHighThroughput.answer) }
+                        if flags & WDHighThroughput.flagInterrupted != 0 {
+                            onEvent(.failure("HT header flag 0x80 (interrupted VC write) is not supported"))
+                        }
+                    }
                     var stream = plain
                     if v3 {
                         do { stream = try expander.expand(plain) } catch {
@@ -254,6 +274,7 @@ public final class WinstationDriver {
                 modules.append(WDModules.vdHeader(vd.name == "CTXTWI\0" ? .twi : WDModuleIdentity(
                     moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA"), channel: vd.number, date: Date()).bytes())
             }
+            if let override = config.moduleOverrides[WDModuleOverride.key(vd.name)] { override.apply(to: &modules[modules.count - 1]) }
             names.append(vd.name.replacingOccurrences(of: "\0", with: ""))
         }
         let credentialsInModule = !negotiated.contains { $0.id == WDCapability.credentialRequest }
@@ -292,6 +313,7 @@ public final class WinstationDriver {
         if !sawEncryptionPD { onEvent(.failure("server did not confirm PDCRYPT1")) }
         sendNow(WDBuild.initConnectResponse)
         v3 = lastReducer.0 == 3
+        highThroughput = negotiated.contains { $0.id == WDCapability.highThroughput }
         expander = WDV3Expander()
         phase = .connected
         framer = WDFrameAssembler()
@@ -303,6 +325,9 @@ public final class WinstationDriver {
     private var lastReducer: (UInt16, UInt8, UInt8) = (0, 0, 0)
     /// V3 frame format in both directions once connected (reducer version 3, powers 0).
     public private(set) var v3 = false
+    /// HT header on every frame both ways once connected: only when cap 0x10 was negotiated (`policy.highThroughput`,
+    /// a discovery variant, docs/30 §8.3, docs/76 §7.1 V2).
+    public private(set) var highThroughput = false
     private var expander = WDV3Expander()
 
     // MARK: Send
@@ -363,16 +388,18 @@ public final class WinstationDriver {
     /// Packs queued packets into frames without splitting a packet unless it alone exceeds a frame.
     public func flush() {
         guard phase == .connected, !outQueue.isEmpty else { return }
-        let limit = frameBudget - crypto.overhead
+        // With HT a 1-byte header (flags 0: no bandwidth or RTT fields) leads each frame, inside encryption.
+        let header: [UInt8] = highThroughput ? [0x00] : []
+        let limit = frameBudget - crypto.overhead - header.count
         if v3 {
-            for frame in WDV3Reducer.frames(outQueue, budget: limit) { transmit(WDFraming.frame(crypto.send(frame))) }
+            for frame in WDV3Reducer.frames(outQueue, budget: limit) { transmit(WDFraming.frame(crypto.send(header + frame))) }
             outQueue = []
             return
         }
         var current: [UInt8] = []
         func emit() {
             guard !current.isEmpty else { return }
-            transmit(WDFraming.frame(crypto.send(current)))
+            transmit(WDFraming.frame(crypto.send(header + current)))
             current = []
         }
         for packet in outQueue {

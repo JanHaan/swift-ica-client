@@ -1,7 +1,8 @@
 import Foundation
 
 /// How the host tells a helper where to check in (docs/99 §4 rendezvous): launch arguments carry the
-/// broker's bootstrap name, a per-helper random token and the host's pid (the helper exits with it).
+/// broker's bootstrap name and the host's pid (the helper exits with it); the per-helper random token
+/// goes in the environment (`tokenVariable`), never in argv, where `ps` shows it to every user.
 public struct HelperLaunch: Equatable, Sendable {
     public var broker: String
     public var token: String
@@ -15,6 +16,9 @@ public struct HelperLaunch: Equatable, Sendable {
 
     public static func brokerName(hostPid: Int32) -> String { "local.alttab.ICAViewer.broker.\(hostPid)" }
 
+    /// Environment variable that carries the token.
+    public static let tokenVariable = "ICA_HELPER_TOKEN"
+
     /// 128 random bits, hex.
     public static func makeToken() -> String {
         var rng = SystemRandomNumberGenerator()
@@ -22,18 +26,22 @@ public struct HelperLaunch: Equatable, Sendable {
     }
 
     public var arguments: [String] {
-        ["--broker", broker, "--token", token, "--host-pid", String(hostPid)] + (headless ? ["--headless"] : [])
+        ["--broker", broker, "--host-pid", String(hostPid)] + (headless ? ["--headless"] : [])
     }
 
-    /// Parses `arguments`; ignores anything else (LaunchServices may add `-psn_…` or `-NS…` defaults).
-    public static func parse(_ args: [String]) -> HelperLaunch? {
-        var broker: String?, token: String?, pid: Int32?, headless = false
+    /// For `NSWorkspace.OpenConfiguration.environment` / `Process.environment` (added to the inherited one).
+    public var environment: [String: String] { [Self.tokenVariable: token] }
+
+    /// Parses `arguments` and the token from `environment`; ignores anything else (LaunchServices may add
+    /// `-psn_…` or `-NS…` defaults). A `--token` argument (older hosts) is still read when the variable is absent.
+    public static func parse(_ args: [String], environment: [String: String] = [:]) -> HelperLaunch? {
+        var broker: String?, token = environment[tokenVariable], pid: Int32?, headless = false
         var i = 0
         while i < args.count {
             let value = i + 1 < args.count ? args[i + 1] : nil
             switch args[i] {
             case "--broker": broker = value; i += 1
-            case "--token": token = value; i += 1
+            case "--token": if token == nil { token = value }; i += 1
             case "--host-pid": pid = value.flatMap { Int32($0) }; i += 1
             case "--headless": headless = true
             default: break

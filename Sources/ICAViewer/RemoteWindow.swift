@@ -55,6 +55,8 @@ final class SessionView: NSView {
     /// remote rect where the gesture started, or a snapshot of it once the size differs.
     func refresh() {
         guard let remote, let controller = remote.controller else { return }
+        // Shown by a helper app (docs/99 §12): this window stays hidden; the helper gets the new crop.
+        if let presenter = remote.presenter { return presenter.update(remote) }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         surfaceLayer.contents = nil
@@ -342,6 +344,18 @@ final class SeamlessPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// Shows a RemoteWindow somewhere else than in its own NSWindow: in a helper app (docs/99 §12 phase 1,
+/// `HelperManager`). The RemoteWindow keeps all its logic (geometry, scaling maps, local gestures, TWI
+/// requests) on a window that is never ordered in; the presenter mirrors its state.
+protocol RemotePresenter: AnyObject {
+    /// First show (`show(activate:)`).
+    func present(_ w: RemoteWindow, activate: Bool)
+    /// Geometry, crop, title, minimised or dim state may have changed.
+    func update(_ w: RemoteWindow)
+    /// The host removed the window.
+    func dismiss(_ w: RemoteWindow)
+}
+
 /// One remote window and its local NSWindow/NSPanel, kept in sync in both directions.
 final class RemoteWindow: NSObject, NSWindowDelegate {
     private(set) var info: TWIWindow
@@ -349,6 +363,8 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let view: SessionView
     var isApp: Bool { info.kind == .appWindow }
+    /// Set when a helper app shows this window (ICA_HELPER_APPS=1); nil = shown here, as always.
+    weak var presenter: RemotePresenter?
 
     /// Set while we apply a host change, so the delegate callbacks don't echo it back.
     private var applyingRemote = false
@@ -437,6 +453,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
     }
 
     func show(activate: Bool) {
+        if let presenter { return presenter.present(self, activate: activate) }
         applyingRemote = true
         defer { applyingRemote = false }
         if info.isMinimized, isApp {
@@ -456,8 +473,9 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         info = new
         applyingRemote = true
         defer { applyingRemote = false }
+        defer { presenter?.update(self) }
         if changes.contains(.title), isApp { window.title = displayName(new.title) }
-        if changes.contains(.style) {
+        if changes.contains(.style), presenter == nil {
             if new.isMinimized, !old.isMinimized, isApp, !window.isMiniaturized {
                 expectMiniaturize = true
                 window.miniaturize(nil)
@@ -630,9 +648,14 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
     }
 
     /// Dark overlay while the session is suspended (nil = off).
-    func setDimmed(_ alpha: CGFloat?) { view.setDim(alpha) }
+    func setDimmed(_ alpha: CGFloat?) {
+        view.setDim(alpha)
+        presenter?.update(self)
+    }
 
     func closeFromRemote() {
+        presenter?.dismiss(self)
+        presenter = nil
         closingFromRemote = true
         moveDebounce?.cancel()
         verifyWork?.cancel()
@@ -641,6 +664,29 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         window.close()
         window.delegate = nil
         view.remote = nil
+    }
+
+    // MARK: Helper apps (docs/99 §12 phase 1)
+
+    /// The helper could not take the window (no check-in, crash): show it here after all.
+    func adoptLocally(activate: Bool) {
+        guard presenter != nil, !closingFromRemote else { return }
+        presenter = nil
+        window.isExcludedFromWindowsMenu = false
+        show(activate: activate)
+        view.refresh()
+    }
+
+    /// The helper moved or resized its window (AX, Mission Control): mirror the frame here and commit it
+    /// like any other local move once it settles (D20).
+    func helperMoved(content: CGRect) {
+        guard presenter != nil, !closingFromRemote, !info.isMinimized else { return }
+        let frame = window.frameRect(forContentRect: content)
+        guard window.frame != frame else { return }
+        applyingRemote = true
+        window.setFrame(frame, display: false)
+        applyingRemote = false
+        localGeometryChanged()
     }
 
     // MARK: NSWindowDelegate (local → remote)

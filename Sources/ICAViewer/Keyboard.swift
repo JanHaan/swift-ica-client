@@ -2,6 +2,34 @@ import AppKit
 import Carbon.HIToolbox
 import ICAKit
 
+/// The parts of a key event the translator reads: from an NSEvent of this process, or from one a helper
+/// app forwarded (docs/99 §12 phase 1). `characters` are never read from a flagsChanged event (AppKit
+/// raises for them).
+struct KeyInput {
+    var keyCode: UInt16
+    var modifierFlags: NSEvent.ModifierFlags
+    var characters: String?
+    var charactersIgnoringModifiers: String?
+    var isARepeat: Bool
+
+    init(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags, characters: String? = nil,
+         charactersIgnoringModifiers: String? = nil, isARepeat: Bool = false) {
+        self.keyCode = keyCode
+        self.modifierFlags = modifierFlags
+        self.characters = characters
+        self.charactersIgnoringModifiers = charactersIgnoringModifiers
+        self.isARepeat = isARepeat
+    }
+
+    init(_ event: NSEvent) {
+        let keyEvent = event.type == .keyDown || event.type == .keyUp
+        self.init(keyCode: event.keyCode, modifierFlags: event.modifierFlags,
+                  characters: keyEvent ? event.characters : nil,
+                  charactersIgnoringModifiers: keyEvent ? event.charactersIgnoringModifiers : nil,
+                  isARepeat: event.type == .keyDown && event.isARepeat)
+    }
+}
+
 /// Turns AppKit key events into ICA keyboard input: scancodes for mapped keys (the server's German
 /// layout applies), Unicode for characters without a mapping and for Option-composed characters
 /// (the macOS layout's Option characters differ from the Windows AltGr ones). Cmd+key becomes Ctrl+key.
@@ -19,7 +47,7 @@ final class KeyboardTranslator {
     }
 
     /// Cmd-V or Ctrl-V, by character as the Edit menu matches it (so Dvorak's V counts too).
-    private func syncClipboardIfPaste(_ event: NSEvent, _ flags: NSEvent.ModifierFlags) {
+    private func syncClipboardIfPaste(_ event: KeyInput, _ flags: NSEvent.ModifierFlags) {
         guard flags.contains(.command) || flags.contains(.control) else { return }
         let key = event.charactersIgnoringModifiers?.lowercased()
         guard key == "v" || (key == nil && event.keyCode == UInt16(kVK_ANSI_V)) else { return }
@@ -48,7 +76,11 @@ final class KeyboardTranslator {
         if let alt = pendingAlt { send(alt, up: false); pendingAlt = nil }
     }
 
-    func keyDown(_ event: NSEvent) {
+    func keyDown(_ event: NSEvent) { keyDown(KeyInput(event)) }
+    func keyUp(_ event: NSEvent) { keyUp(KeyInput(event)) }
+    func flagsChanged(_ event: NSEvent) { flagsChanged(KeyInput(event)) }
+
+    func keyDown(_ event: KeyInput) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let code = KeyMap.scancode(event.keyCode)
         // The pasteboard goes to the host before the paste key does (docs/70 §5.4).
@@ -77,13 +109,13 @@ final class KeyboardTranslator {
         }
     }
 
-    func keyUp(_ event: NSEvent) {
+    func keyUp(_ event: KeyInput) {
         if event.modifierFlags.contains(.command) { return }
         guard let code = KeyMap.scancode(event.keyCode), down.contains(code) else { return }
         send(code, up: true)
     }
 
-    func flagsChanged(_ event: NSEvent) {
+    func flagsChanged(_ event: KeyInput) {
         let keyCode = Int(event.keyCode)
         guard let code = KeyMap.scancode(event.keyCode) else { return }
         let flags = event.modifierFlags

@@ -553,3 +553,61 @@ public enum WDModules {
         }
     }
 }
+
+/// Module-header name and versions for one VD, replacing what its builder wrote (discovery only, docs/76 §7.6:
+/// the stock client names its modules, e.g. "ClientGDT"; ours leave the name empty like the reference). The name
+/// goes into the 12+1-byte field at offset 6 (docs/30 §5.2): ASCII, zero padded, cut to 12 bytes like the
+/// reference's 14-character "UIModule.class", then NUL. Versions go to offsets 4/5.
+public struct WDModuleOverride: Equatable, Sendable {
+    public var name: String?
+    public var versionLow: UInt8?
+    public var versionHigh: UInt8?
+
+    public init(name: String? = nil, versionLow: UInt8? = nil, versionHigh: UInt8? = nil) {
+        self.name = name
+        self.versionLow = versionLow
+        self.versionHigh = versionHigh
+    }
+
+    /// The key for a VC name: without trailing spaces / NULs, upper case ("CTXGDT\0" → "CTXGDT").
+    public static func key(_ vcName: String) -> String {
+        vcName.trimmingCharacters(in: CharacterSet(charactersIn: " \0")).uppercased()
+    }
+
+    /// `ICA_MODNAME_<VC>=Name` and `ICA_MODVER_<VC>=A-B` (VC as `key`, e.g. CTXGDT). Malformed versions and names
+    /// that are not printable ASCII are reported in `errors` and skipped.
+    public static func fromEnvironment(_ env: [String: String]) -> (overrides: [String: WDModuleOverride], errors: [String]) {
+        var out: [String: WDModuleOverride] = [:]
+        var errors: [String] = []
+        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
+            if key.hasPrefix("ICA_MODNAME_") {
+                let vc = Self.key(String(key.dropFirst("ICA_MODNAME_".count)))
+                guard !vc.isEmpty, !value.isEmpty, value.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }) else {
+                    errors.append("\(key): name must be printable ASCII"); continue
+                }
+                out[vc, default: WDModuleOverride()].name = value
+            } else if key.hasPrefix("ICA_MODVER_") {
+                let vc = Self.key(String(key.dropFirst("ICA_MODVER_".count)))
+                let parts = value.split(separator: "-").map { UInt8($0.trimmingCharacters(in: .whitespaces)) }
+                guard !vc.isEmpty, parts.count == 2, let low = parts[0], let high = parts[1] else {
+                    errors.append("\(key): version must be A-B"); continue
+                }
+                out[vc, default: WDModuleOverride()].versionLow = low
+                out[vc, default: WDModuleOverride()].versionHigh = high
+            }
+        }
+        return (out, errors)
+    }
+
+    /// Patches a built module (36-byte header first).
+    public func apply(to module: inout [UInt8]) {
+        guard module.count >= 36 else { return }
+        if let versionLow { module[4] = versionLow }
+        if let versionHigh { module[5] = versionHigh }
+        if let name {
+            var field = Array(name.utf8.prefix(12))
+            field += [UInt8](repeating: 0, count: 13 - field.count)
+            module.replaceSubrange(6..<19, with: field)
+        }
+    }
+}

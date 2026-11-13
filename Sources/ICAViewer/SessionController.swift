@@ -445,6 +445,7 @@ final class SessionController: NSObject {
             vlog("warning: server session size differs from the screen; coordinates will be off")
         }
         windows.values.forEach { $0.view.refresh() }
+        if HelperManager.enabled { HelperManager.shared.surfaceChanged(self) }
     }
 
     private var pendingRects: [CGRect] = []
@@ -470,13 +471,16 @@ final class SessionController: NSObject {
             if seed == lastSeed { return }
             lastSeed = seed
         }
+        var shownByHelpers: [RemoteWindow] = []
         for w in windows.values {
             let wr = w.contentPixelRect
             if rects.contains(where: { $0.intersects(wr) }) {
+                if w.presenter != nil { shownByHelpers.append(w); continue }
                 w.view.refresh()
                 counters.add("refresh")
             }
         }
+        if !shownByHelpers.isEmpty { HelperManager.shared.framePresented(shownByHelpers, rects: rects) }
     }
 
     private var pointerCount = 0
@@ -558,6 +562,8 @@ final class SessionController: NSObject {
                     materialise(w)
                 } else {
                     existing.update(w, changes)
+                    // The app key can settle after the window exists (process info arrives later).
+                    if changes.contains(.app), HelperManager.enabled { HelperManager.shared.appKeyChanged(existing) }
                 }
             } else {
                 materialise(w)
@@ -587,7 +593,10 @@ final class SessionController: NSObject {
         case .windowActivated(let id):
             vlog("TWI host foreground: \(id.map { String($0, radix: 16) } ?? "none")")
             foreground = id
-            if let id, let w = windows[id], w.isApp, NSApp.isActive, !w.window.isKeyWindow, !w.window.isMiniaturized {
+            if let id, let w = windows[id], w.isApp, HelperManager.enabled, w.presenter != nil || HelperManager.shared.helperIsFrontmost {
+                // A window in a helper app, or ours while a helper is in front: hand activation over (docs/99 §12.5).
+                HelperManager.shared.hostActivated(w)
+            } else if let id, let w = windows[id], w.isApp, NSApp.isActive, !w.window.isKeyWindow, !w.window.isMiniaturized {
                 w.window.makeKeyAndOrderFront(nil)
             }
         case .appAdded(let app):
@@ -635,6 +644,7 @@ final class SessionController: NSObject {
         guard w.kind != .hidden, windows[w.id] == nil else { return }
         let remote = RemoteWindow(info: w, controller: self)
         windows[w.id] = remote
+        if HelperManager.enabled { HelperManager.shared.claim(remote) }
         if let dimAlpha { remote.setDimmed(dimAlpha) }
         remote.show(activate: w.kind == .appWindow && (foreground == w.id || appWindowCount == 1))
         if w.kind == .appWindow {
@@ -645,7 +655,7 @@ final class SessionController: NSObject {
             lastAppWindows.removeAll()
             logoffDeferred = false
             setParked(false)
-            if appWindowCount == 1 { NSApp.activate() }
+            if appWindowCount == 1, remote.presenter == nil { NSApp.activate() }
         }
         onWindowsChanged?(self)
     }
@@ -810,6 +820,7 @@ final class SessionController: NSObject {
     }
 
     func windowBecameKey(_ w: RemoteWindow) {
+        if HelperManager.enabled, w.presenter == nil { HelperManager.shared.localWindowBecameKey() }
         clipboardCheck("window key")
         guard w.isApp, foreground != w.info.id else { return }
         let id = w.info.id
@@ -931,6 +942,14 @@ final class SessionController: NSObject {
         onEnded?(self)
     }
 
+    /// A helper app's close button or Cmd-Q while the give-up prompt shows (the session has ended, its
+    /// windows are kept dimmed): the same as the prompt's Close (docs/99 §12.14).
+    func closeAfterGiveUp() {
+        guard ended, !windows.isEmpty, let close = hud.onClose else { return }
+        hud.hide()
+        close()
+    }
+
     /// Indicator and "Disable Microphone" while this session records (docs/98 §10.3). Main thread.
     private func microphoneRecording(_ on: Bool) {
         let session = self.session, title = displayName(name), recording = on && !ended
@@ -958,6 +977,7 @@ final class SessionController: NSObject {
         microphoneRecording(false)
         cameraInUse(false)
         for id in Array(windows.keys) { remove(id) }
+        if HelperManager.enabled { HelperManager.shared.sessionEnded(self) }
     }
 
     // MARK: Client drive mapping (docs/95 §A, D32)
@@ -1195,7 +1215,7 @@ final class SessionController: NSObject {
         sync.channelReady()
         guard clipboardTimer == nil else { return }
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard NSApp.isActive else { return }
+            guard NSApp.isActive || (HelperManager.enabled && HelperManager.shared.helperIsFrontmost) else { return }
             self?.clipboardCheck("poll")
         }
         RunLoop.main.add(timer, forMode: .common)

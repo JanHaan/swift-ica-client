@@ -60,6 +60,8 @@ public final class ICASession: @unchecked Sendable {
     /// icactl). Set `gdt.onEvent` before `start`; it is called on the session queue.
     public let gdt: GDTEngine?
     private let gdtChannel: UInt8?
+    /// Further engines registered after all others (discovery stubs, docs/76 §7.4), in the given order.
+    public let extraEngines: [VirtualChannelEngine]
     public let host: String
     public let port: UInt16
     public var onEvent: (Event) -> Void = { _ in }
@@ -93,7 +95,8 @@ public final class ICASession: @unchecked Sendable {
     /// session (docs/55 §1). `gdt` nil: no CTXGDT module and no bind entry (the default; docs/76 §6).
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
                 cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
-                webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil, gdt: GDTEngine.Config? = nil) throws {
+                webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil, gdt: GDTEngine.Config? = nil,
+                extraEngines: [VirtualChannelEngine] = []) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -135,6 +138,8 @@ public final class ICASession: @unchecked Sendable {
         self.gdt = gdtEngine
         let driver = wd
         gdtChannel = gdtEngine.map { driver.register($0, number: GDTWire.channelNumber) }
+        self.extraEngines = extraEngines
+        for engine in extraEngines { driver.register(engine) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)

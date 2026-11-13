@@ -4,7 +4,8 @@ import Foundation
 
 /// The helper's side of the channel (docs/99 §4–5): looks up the host's broker, checks in with the
 /// token and a send right to its own receive port, and reports the host's end three ways: a dead-name
-/// notification on the broker port, the host pid's exit, and a send that finds no receiver.
+/// notification on the broker port, the host pid's exit, and a send that finds no receiver. A `hello`
+/// that carries a port switches all later messages to that per-helper port.
 final class HostLink {
     let launch: HelperLaunch
     private var host = mach_port_t(MACH_PORT_NULL)
@@ -38,6 +39,16 @@ final class HostLink {
             case .message(let data, let port):
                 guard let message = try? WireCoding.decode(HostMessage.self, from: data) else {
                     MachChannel.deallocate(port)
+                    return
+                }
+                if case .hello = message, port != MACH_PORT_NULL {
+                    // ICAViewer gives each helper its own port (the host knows the sender by it); the spike
+                    // sends none and keeps receiving on the broker port.
+                    let broker = self.host
+                    self.host = port
+                    self.receiver?.notifyDeadName(of: port)
+                    MachChannel.deallocate(broker)      // the per-helper port and the pid watch report the host's end
+                    self.onMessage?(message, mach_port_t(MACH_PORT_NULL))
                     return
                 }
                 self.onMessage?(message, port)

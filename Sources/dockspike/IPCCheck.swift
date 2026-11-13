@@ -147,7 +147,9 @@ final class HeadlessHost {
         receiver.start(queue: queue) { [weak self] in self?.received($0) }
         let process = Process()
         process.executableURL = executable
-        process.arguments = HelperLaunch(broker: broker, token: token, hostPid: getpid(), headless: true).arguments
+        let launch = HelperLaunch(broker: broker, token: token, hostPid: getpid(), headless: true)
+        process.arguments = launch.arguments
+        process.environment = ProcessInfo.processInfo.environment.merging(launch.environment) { $1 }
         do { try process.run() } catch {
             print("  cannot run \(executable.path): \(error)")
             return nil

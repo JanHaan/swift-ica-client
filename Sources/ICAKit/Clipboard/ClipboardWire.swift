@@ -44,13 +44,14 @@ public enum ClipboardWire {
 
     // MARK: Client → host builders (§3.2)
 
-    /// CLIP_INIT_REPLY: `02 00 00 00 <u16 version> 00×6`.
-    public static func initReply(version: UInt16) -> Data {
+    /// CLIP_INIT_REPLY: `02 00 <u16 word2> <u16 version> <tail, 6 bytes>`, normally `word2` 0 and a zero tail. The
+    /// other values are only the docs/76 §7.1 V5 discovery variants (a file-support flag is guessed there).
+    public static func initReply(version: UInt16, word2: UInt16 = 0, tail: [UInt8] = [UInt8](repeating: 0, count: 6)) -> Data {
         var w = ByteWriter()
         w.u16(Command.initReply.rawValue)
-        w.u16(0)
+        w.u16(word2)
         w.u16(version)
-        w.raw([UInt8](repeating: 0, count: 6))
+        w.raw(Array((tail + [UInt8](repeating: 0, count: 6)).prefix(6)))
         return w.data
     }
 

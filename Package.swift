@@ -15,7 +15,8 @@ let package = Package(
     targets: [
         .target(name: "ICAKit"),
         .executableTarget(name: "icactl", dependencies: ["ICAKit"]),
-        .executableTarget(name: "ICAViewer", dependencies: ["ICAKit"]),
+        // AppHostKit: per-app helper apps (docs/99 §12), only used with ICA_HELPER_APPS=1.
+        .executableTarget(name: "ICAViewer", dependencies: ["ICAKit", "AppHostKit"]),
         .testTarget(name: "ICAKitTests", dependencies: ["ICAKit"], resources: [.copy("Fixtures")]),
         // docs/99 spike: bundle relabelling, helper IPC (Mach messages), shared by helper and host.
         .target(name: "CMachBootstrap"),

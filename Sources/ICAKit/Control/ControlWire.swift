@@ -133,8 +133,10 @@ public struct ControlCapability: Equatable, Sendable, CustomStringConvertible {
 
     /// The client capability response payload (§5.2): `u16 4 | u8 n | u8 0` and one answer per known host
     /// capability, each with the host's len byte; its data padded or cut to that length.
-    /// `hasLaunchData`: our own app holds a command line (cap 5).
-    public static func response(to host: [ControlCapability], hasLaunchData: Bool) -> (payload: [UInt8], answered: [ControlCapability]) {
+    /// `hasLaunchData`: our own app holds a command line (cap 5). `echo`: otherwise unanswered ids whose host data is
+    /// sent back unchanged (discovery, docs/76 §7.2 V7: cap 9; §7.4 V13: also 7); empty by default.
+    public static func response(to host: [ControlCapability], hasLaunchData: Bool,
+                                echo: Set<UInt16> = []) -> (payload: [UInt8], answered: [ControlCapability]) {
         var answered: [ControlCapability] = []
         for cap in host {
             var data: [UInt8]
@@ -148,7 +150,8 @@ public struct ControlCapability: Equatable, Sendable, CustomStringConvertible {
             case ControlWire.Capability.launchData: data = [hasLaunchData ? 1 : 0, 0, 0, 0]
             case ControlWire.Capability.sessionEvents: data = ControlWire.le32(ControlWire.u32(cap.data, 0) == 1 ? 1 : 0)
             case ControlWire.Capability.urlRedirection: data = []
-            default: continue   // 7 (webcam PnP) and unknown ids are not echoed
+            case let id where echo.contains(id): data = cap.data   // also 7 (webcam PnP) when listed (V13)
+            default: continue   // 7 (webcam PnP) and unknown ids are not echoed unless listed
             }
             let size = max(0, Int(cap.length) - 4)
             if data.count < size { data += [UInt8](repeating: 0, count: size - data.count) }
