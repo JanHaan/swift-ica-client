@@ -100,7 +100,8 @@ public enum HelperMenu {
         languages.first?.lowercased().hasPrefix("de") == true
     }
 
-    public static func sections(appName name: String, german: Bool) -> [HelperMenuSection] {
+    /// `launcher`: the Open Launcher item's key equivalent, the global shortcut chosen in Settings (nil = off).
+    public static func sections(appName name: String, german: Bool, launcher: HelperShortcut? = launcherShortcut) -> [HelperMenuSection] {
         func t(_ en: String, _ de: String) -> String { german ? de : en }
         let app = HelperMenuSection(role: .app, title: name, items: [
             HelperMenuItem(String(format: t("About %@", "Über %@"), name), .about),
@@ -130,7 +131,7 @@ public enum HelperMenu {
         // No ⌘, for Settings and no ⇧⌘C for the Connection Center here: those are Ctrl+, and Ctrl+Shift+C
         // for the remote app (Word: copy formatting).
         let ica = HelperMenuSection(role: .ica, title: "ICA", items: [
-            HelperMenuItem(t("Open Launcher", "Launcher öffnen"), .host(.showLauncher), launcherShortcut),
+            HelperMenuItem(t("Open Launcher", "Launcher öffnen"), .host(.showLauncher), launcher),
             HelperMenuItem(t("Connection Center", "Verbindungscenter"), .host(.connectionCenter)),
             HelperMenuItem(t("Settings…", "Einstellungen…"), .host(.settings)),
             .separator,

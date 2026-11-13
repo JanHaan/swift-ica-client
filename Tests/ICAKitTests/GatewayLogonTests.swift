@@ -189,6 +189,22 @@ private final class FakeGateway: @unchecked Sendable {
     #expect(gateway.requests.contains { $0.method == "POST" && $0.path == "/nf/auth/getAuthenticationRequirements.do" })
 }
 
+@Test func nativeLogonSkipsWebClientSelection() async throws {
+    // docs/15 §1.1: native clients don't call /cgi/setclient?wica (ICA_SKIP_SETCLIENT=1 / native mode).
+    let gateway = FakeGateway([
+        xml(field("login", "username", "dualauth_user_name") + field("passwd", "password", "dualauth_password", secret: true)
+            + submitButton, state: "S1"),
+        xml(result: "success"),
+    ])
+    var logon = gateway.logon()
+    logon.selectWebClient = false
+    let form = try await logon.begin()
+    guard case .success = try await logon.submit(form, values: ["login": "jan", "passwd": "pw"]) else {
+        Issue.record("expected success"); return
+    }
+    #expect(!gateway.requests.contains { $0.path == "/cgi/setclient" })
+}
+
 @Test func rePromptCarriesErrorLabels() async throws {
     let again = xml(label("errorMessageLabel4001", type: "error") + field("login", "username", "dualauth_user_name")
         + field("passwd", "password", "dualauth_password", secret: true) + submitButton)

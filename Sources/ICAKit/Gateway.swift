@@ -122,6 +122,10 @@ public struct GatewayLogon {
     public let base: URL
     /// Preferred UI languages, best first (BCP 47, e.g. `de-DE`).
     public let languages: [String]
+    /// After a successful logon, select the Workspace/ICA web client mode (`/cgi/setclient?wica`), which the
+    /// Receiver-for-Web store under /welcome/ needs (D11). Native clients don't call it (docs/15 §1.1).
+    /// Default: on, unless `ICA_SKIP_SETCLIENT=1`.
+    public var selectWebClient = ProcessInfo.processInfo.environment["ICA_SKIP_SETCLIENT"] != "1"
 
     typealias Transport = (_ method: String, _ url: URL, _ headers: [String: String], _ form: [(String, String)]?)
         async throws -> HTTPClient.Response
@@ -163,7 +167,7 @@ public struct GatewayLogon {
         let response = try await send("POST", form.postBack, headers: Self.headers, form: body)
         let posted = form.postedIDs.union(form.fields.filter(\.isCredential).map(\.id))
         let next = try step(response, strings: form.strings, postedIDs: posted)
-        if case .success = next {
+        if case .success = next, selectWebClient {
             // Select the Workspace/ICA client mode; without it the store under /welcome/ answers 404.
             _ = try await send("GET", "cgi/setclient?wica")
         }

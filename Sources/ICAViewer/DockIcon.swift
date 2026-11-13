@@ -1,3 +1,4 @@
+import AppHostKit
 import AppKit
 import ICAKit
 
@@ -53,8 +54,10 @@ final class DockIcon {
         DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: item)
     }
 
-    /// The store's resource list arrived (names → icon URLs); icons load when first needed.
-    func register(resources: [StoreClient.Resource]) {
+    /// The store's resource list arrived (names → icon URLs); icons load when first needed. `store` (its base
+    /// URL) selects the remembered app ↔ resource mappings (`RememberedAppResources`).
+    func register(resources: [StoreClient.Resource], store: URL? = nil) {
+        if let store { RememberedAppResources.shared.store = AppResourceMap.storeID(store) }
         guard Self.enabled else { return }
         self.resources = resources
         index = StoreIconIndex.index(resources)
@@ -117,5 +120,49 @@ final class DockIcon {
         shown = (key, icon.tag)
         NSApp.applicationIconImage = NSImage(cgImage: canvas, size: NSSize(width: 128, height: 128))
         vlog("dock icon: remote app (\(icon.tag == "store" ? "store" : "TWI") icon, \(icon.image.width) px)")
+    }
+}
+
+/// TWI app key → published resource learnt by session sharing, remembered per store across runs (`AppResourceMap`,
+/// 0600 in the app's support folder), so a later run names and icons that app right even when it is not launched
+/// by a shared launch (docs/99 §12.15). Main thread only.
+final class RememberedAppResources {
+    static let shared = RememberedAppResources()
+    /// The current store (`AppResourceMap.storeID`), set when its resource list arrives; nil = nothing is read or written.
+    var store: String?
+    private var map = AppResourceMap.load(from: AppResourceMap.defaultURL)
+
+    /// At start: an older or hand-edited file may hold system-process entries; `load` dropped them, the file follows.
+    init() {
+        let url = AppResourceMap.defaultURL
+        guard FileManager.default.fileExists(atPath: url.path), AppResourceMap.load(from: url) != rawMap(url) else { return }
+        save()
+    }
+
+    private func rawMap(_ url: URL) -> AppResourceMap? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AppResourceMap.self, from: data)
+    }
+
+    func resource(for key: String) -> String? {
+        guard let store else { return nil }
+        return map.resource(store: store, key: key)
+    }
+
+    /// Session sharing found that `key` is `resource`, and the app kept its window (confirmed).
+    func remember(_ key: String, is resource: String, executable: String?) {
+        guard let store, map.remember(store: store, key: key, resource: resource, executable: executable) else { return }
+        vlog("app resources: remembered \(logName(key)) as \(logName(resource))")
+        save()
+    }
+
+    /// The app named itself (TWI published name): other keys remembered for that resource are dropped.
+    func confirm(_ key: String, publishedName: String) {
+        guard let store, map.confirm(store: store, key: key, publishedName: publishedName) else { return }
+        save()
+    }
+
+    private func save() {
+        do { try map.save(to: AppResourceMap.defaultURL) } catch { vlog("app resources: not saved (\(error))") }
     }
 }

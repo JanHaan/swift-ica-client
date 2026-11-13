@@ -57,8 +57,8 @@ archs="arm64 x86_64"
 ICA_SWIFT_FLAGS="--arch arm64 --arch x86_64"
 export ICA_SWIFT_FLAGS
 if ! "$root/scripts/bundle.sh" release >/dev/null; then
-    [ ! -d "$app" ] || [ "$mode" = adhoc ] || die "signing failed"
-    echo "note: universal build failed; falling back to arm64 only" >&2
+    [ ! -d "$app/Contents/_CodeSignature" ] || [ "$mode" = adhoc ] || die "signing failed"
+    echo "note: universal build of the app or of its helper template failed (see above); falling back to arm64 only" >&2
     archs="arm64"
     ICA_SWIFT_FLAGS=""
     "$root/scripts/bundle.sh" release >/dev/null
@@ -67,12 +67,25 @@ fi
 codesign --verify --deep --strict "$app"
 actual="$(lipo -archs "$app/Contents/MacOS/ICAViewer")"
 echo "architectures: $actual (requested: $archs)"
+# The Dock-apps template (docs/99 §12.16): present, valid, same architectures, hardened runtime.
+helper="$app/Contents/Helpers/ICAViewerHelper.app"
+[ -d "$helper" ] || die "helper template missing: $helper"
+codesign --verify --strict "$helper"
+helper_archs="$(lipo -archs "$helper/Contents/MacOS/ICAViewerHelper")"
+[ "$helper_archs" = "$actual" ] || die "helper template architectures ($helper_archs) differ from the app's ($actual); rebuild with scripts/bundle-helper.sh and the same ICA_SWIFT_FLAGS to see why"
+codesign -dv "$helper" 2>&1 | grep -q 'flags=.*runtime' || die "hardened runtime missing on the helper template"
 if [ "$mode" = adhoc ] || [ -z "${ICA_RELEASE_PROFILE:-}" ]; then
     [ ! -e "$app/Contents/embedded.provisionprofile" ] || die "provisioning profile in bundle"
 fi
 if [ "$mode" = developer-id ]; then
     codesign -dv "$app" 2>&1 | grep -q 'flags=.*runtime' || die "hardened runtime missing"
     codesign -d --entitlements - "$app" 2>/dev/null | grep -q get-task-allow && die "get-task-allow in release entitlements"
+    # Notarization: the nested template needs the same Developer ID team, a secure timestamp, no get-task-allow.
+    team="$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    helper_team="$(codesign -dv "$helper" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [ -n "$team" ] && [ "$team" = "$helper_team" ] || die "helper template team ($helper_team) differs from the app's ($team)"
+    codesign -dv "$helper" 2>&1 | grep -q '^Timestamp=' || die "no secure timestamp on the helper template"
+    codesign -d --entitlements - "$helper" 2>/dev/null | grep -q get-task-allow && die "get-task-allow on the helper template"
 fi
 
 stage="$(mktemp -d "$dist/stage.XXXXXX")"
@@ -116,6 +129,8 @@ bin="$app/Contents/MacOS/ICAViewer"
 leaks="$(strings -a "$bin" | grep -c '/Users/' || true)"
 echo "strings with /Users/ in the binary: $leaks"
 [ "$leaks" -eq 0 ] || strings -a "$bin" | grep '/Users/' | sort -u | head -5
+helper_leaks="$(strings -a "$helper/Contents/MacOS/ICAViewerHelper" | grep -c '/Users/' || true)"
+echo "strings with /Users/ in the helper template: $helper_leaks"
 
 hdiutil create -volname "ICAViewer $version" -srcfolder "$stage" -ov -format UDZO "$dmg" >/dev/null
 
@@ -142,6 +157,7 @@ if [ -n "$notarize" ]; then
     mnt="$(mktemp -d "$dist/mnt.XXXXXX")"
     hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt" -quiet
     spctl -a -vv "$mnt/ICAViewer.app"
+    spctl -a -t exec -vv "$mnt/ICAViewer.app/Contents/Helpers/ICAViewerHelper.app"
     hdiutil detach "$mnt" -quiet && mnt=""
     status="Developer ID signed, notarized and stapled"
 elif [ "$mode" = developer-id ]; then

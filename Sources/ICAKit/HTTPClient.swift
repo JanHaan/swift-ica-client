@@ -17,6 +17,14 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     public var trace: (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+    /// User-Agent for every request of this client (gateway and store), unless a request sets its own.
+    /// nil: the system default. Defaults to `ICA_GATEWAY_UA` (docs/15 §1.1: NetScaler picks the session
+    /// policy by User-Agent, e.g. `CONTAINS("CitrixReceiver")` for native clients).
+    public var userAgent: String? = HTTPClient.environmentUserAgent
+    /// `ICA_GATEWAY_UA` if set and non-empty.
+    public static var environmentUserAgent: String? {
+        ProcessInfo.processInfo.environment["ICA_GATEWAY_UA"].flatMap { $0.isEmpty ? nil : $0 }
+    }
     private var session: URLSession!
     private let jar: HTTPCookieStorage
 
@@ -63,6 +71,7 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     ) async throws -> Response {
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if let userAgent { request.setValue(userAgent, forHTTPHeaderField: "User-Agent") }
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         request.httpBody = body

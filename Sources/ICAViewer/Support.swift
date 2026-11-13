@@ -386,7 +386,7 @@ final class StoreService: @unchecked Sendable {
         if let store {   // icons and menu title (docs/99 Phase 0)
             DispatchQueue.main.async {
                 StoreIconCache.shared.register(store: store)
-                DockIcon.shared.register(resources: list)
+                DockIcon.shared.register(resources: list, store: store.base)
             }
         }
         return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }

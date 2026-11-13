@@ -83,6 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchQueue: [StoreClient.Resource] = []
     /// ICAVIEWER_LAUNCH=<name>: launch this resource right after the list loads, without the launcher.
     private let autoLaunch = ProcessInfo.processInfo.environment["ICAVIEWER_LAUNCH"]
+    /// Phase 3 (docs/99 §12.13): the menu-bar item, and menu-bar only while helpers show the remote apps.
+    private var menuBarHost: MenuBarHost?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -93,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         startSystemHooks()
+        vlog("helper apps: \(HelperManager.enabled ? "on" : "off") (\(HelperManager.setting.source.rawValue))")
         if HelperManager.enabled {
             HelperManager.shared.onCommand = { [weak self] command, controller, cancelled in
                 // From a Mach receive handler (a main-queue block): the confirmation's modal loop must not run
@@ -100,6 +103,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 RunLoop.main.perform(inModes: [.common, .modalPanel]) {
                     MainActor.assumeIsolated { self?.helperCommand(command, controller, cancelled: cancelled) }
                 }
+            }
+            let host = MenuBarHost(actions: .init(
+                sessions: { [weak self] in self?.sessions ?? [] },
+                showLauncher: { [weak self] in self?.showLauncher() },
+                connectionCenter: { [weak self] in self?.showConnectionCenter() },
+                settings: { [weak self] in self?.showSettings() },
+                reportProblem: { FeedbackWindowController.show() },
+                endSession: { [weak self] command, c in self?.confirmEndSession(command, c, cancelled: {}) }))
+            menuBarHost = host
+            HelperManager.shared.onChange = { [weak host] in MainActor.assumeIsolated { host?.update() } }
+        }
+        // ⌃⌥⌘L (Settings: another letter, or off) opens the launcher from any app (docs/99 §12.13); never in
+        // automated runs (test instances must not take a system-wide key).
+        if !HelperManager.automated {
+            GlobalHotKey.shared.apply(GlobalHotKey.stored) { [weak self] in
+                MainActor.assumeIsolated { self?.launcherFromShortcut() }
             }
         }
         // The store's device id persists in the app's settings (docs/90 §8.6), not in .session/.
@@ -452,6 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logoff: { [weak c] in vlog("launcher: log off \(logName(c?.name ?? ""))"); c?.logoff() })
         })
         connectionCenter?.localChanged()
+        MainActor.assumeIsolated { menuBarHost?.update() }
     }
 
     /// Disconnect (docs/90 §9.2): CGP FINISH and close; the session keeps running on the VDA.
@@ -629,6 +649,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showLauncher() { launcher?.showWindow(nil) }
 
+    /// The global shortcut (docs/99 §12.13): the launcher comes to the front from any app. A helper in front
+    /// yields to this process first; another app's activation may be refused (cooperative activation), so the
+    /// launcher is also ordered front regardless.
+    @MainActor private func launcherFromShortcut() {
+        let show: () -> Void = { [weak self] in
+            guard let launcher = self?.launcher else { return }
+            launcher.showWindow(nil)
+            launcher.window?.orderFrontRegardless()
+            launcher.window?.makeKey()
+        }
+        if HelperManager.enabled { HelperManager.shared.activateHost(show) } else { NSApp.activate(); show() }
+    }
+
     /// An item of a helper app's ICA menu (docs/99 §12 phase 2). The helper has yielded activation to this
     /// process, so the window or prompt comes to the front. Disconnect and Log Off concern the whole session
     /// (all its apps, docs/55), so they are confirmed first; Cancel gives activation back to the helper.
@@ -641,32 +674,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .reportProblem: FeedbackWindowController.show()
         case .disconnect, .logoff:
             guard let c = controller, !c.ended else { return cancelled() }
-            let apps = c.appNames.map(displayName).joined(separator: ", ")
-            let alert = NSAlert()
-            let button: NSButton
-            if command == .disconnect {
-                alert.messageText = String(format: loc("Disconnect the session with %@?", "Sitzung mit %@ trennen?"), apps)
-                alert.informativeText = loc("All apps of this session close on this Mac. They keep running; the session can be reconnected later.",
-                                            "Alle Apps dieser Sitzung werden auf diesem Mac geschlossen. Sie laufen weiter; die Sitzung kann später wieder verbunden werden.")
-                button = alert.addButton(withTitle: loc("Disconnect", "Trennen"))
-            } else {
-                alert.messageText = String(format: loc("Log off the session with %@?", "Sitzung mit %@ abmelden?"), apps)
-                alert.informativeText = loc("All apps of this session are closed. Unsaved work in them is lost.",
-                                            "Alle Apps dieser Sitzung werden beendet. Nicht gesicherte Arbeit geht verloren.")
-                button = alert.addButton(withTitle: loc("Log Off", "Abmelden"))
-                button.hasDestructiveAction = true
-            }
-            alert.addButton(withTitle: loc("Cancel", "Abbrechen"))
-            guard alert.runModal() == .alertFirstButtonReturn, !c.ended else {
-                vlog("helper apps: \(command.rawValue) cancelled")
-                return cancelled()
-            }
-            if command == .disconnect {
-                disconnect(c)
-            } else {
-                vlog("helper apps: log off \(logName(c.name))")
-                c.logoff()
-            }
+            confirmEndSession(command, c, cancelled: cancelled)
+        }
+    }
+
+    /// Disconnect or Log Off one session, from a helper's ICA menu or the menu-bar item: confirmed first, naming
+    /// all its apps (docs/55). Runs a modal alert: never call it inside a main-queue block (D21).
+    @MainActor private func confirmEndSession(_ command: HelperCommand, _ c: SessionController, cancelled: @escaping () -> Void) {
+        guard command == .disconnect || command == .logoff, !c.ended else { return }
+        let apps = c.appNames.map(displayName).joined(separator: ", ")
+        let alert = NSAlert()
+        let button: NSButton
+        if command == .disconnect {
+            alert.messageText = String(format: loc("Disconnect the session with %@?", "Sitzung mit %@ trennen?"), apps)
+            alert.informativeText = loc("All apps of this session close on this Mac. They keep running; the session can be reconnected later.",
+                                        "Alle Apps dieser Sitzung werden auf diesem Mac geschlossen. Sie laufen weiter; die Sitzung kann später wieder verbunden werden.")
+            button = alert.addButton(withTitle: loc("Disconnect", "Trennen"))
+        } else {
+            alert.messageText = String(format: loc("Log off the session with %@?", "Sitzung mit %@ abmelden?"), apps)
+            alert.informativeText = loc("All apps of this session are closed. Unsaved work in them is lost.",
+                                        "Alle Apps dieser Sitzung werden beendet. Nicht gesicherte Arbeit geht verloren.")
+            button = alert.addButton(withTitle: loc("Log Off", "Abmelden"))
+            button.hasDestructiveAction = true
+        }
+        alert.addButton(withTitle: loc("Cancel", "Abbrechen"))
+        guard alert.runModal() == .alertFirstButtonReturn, !c.ended else {
+            vlog("helper apps: \(command.rawValue) cancelled")
+            return cancelled()
+        }
+        if command == .disconnect {
+            disconnect(c)
+        } else {
+            vlog("helper apps: log off \(logName(c.name))")
+            c.logoff()
         }
     }
 
