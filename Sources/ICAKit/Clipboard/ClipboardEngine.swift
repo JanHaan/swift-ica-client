@@ -47,13 +47,25 @@ public final class ClipboardEngine: VirtualChannelEngine {
         public var maxImageSide = 16384
         /// Pace our output while the transport holds more unacknowledged bytes than this (see `backlog`).
         public var backlogLimit = 2 << 20
+        /// Highest version we answer (docs/75 §4.1). 3 by default; 4 only for the discovery test
+        /// (`ICA_CLIP_VERSION=4` in icactl), which also reads the host's DATA_REQUEST with a u32 index.
+        public var maxVersion: UInt16 = ClipboardWire.maxClientVersion
+        /// Discovery trace (test builds only, it shows payload bytes): `.trace` lines with every VC write
+        /// both ways and every host message in hex (header + up to 64 payload bytes).
+        public var traceWire = false
+        /// Experimental file formats (docs/75 §6, §7): offer `ClipboardContent.files` as FileGroupDescriptorW +
+        /// FileContents, and fetch host file groups (descriptor, then contents per index when
+        /// `fetchFileContents`). Off by default.
+        public var files = false
+        /// At most this many file entries are fetched from the host (test cap).
+        public var maxFileEntries = 16
         public init() {}
     }
 
     public enum Phase: Sendable { case uninit, awaitingNames, ready }
 
     public enum Event: CustomStringConvertible {
-        case hostInit(flags: UInt16, hostVersion: UInt16, version: UInt16)
+        case hostInit(lowVersion: UInt16, hostVersion: UInt16, version: UInt16)
         /// The host's registered formats (FORMAT_NAMES): ids and names, no data.
         case formatNames([ClipboardFormatName])
         case ready(version: UInt16)
@@ -81,11 +93,19 @@ public final class ClipboardEngine: VirtualChannelEngine {
         case padding(bytes: Int, after: String)
         /// Unknown command or untrustworthy layout: buffered bytes dropped, host list cleared (§2.1 [P]).
         case protocolError(String)
+        /// Every field of a host DATA_REQUEST for a file format (discovery, docs/75 §10 E2).
+        case hostFileRequest(format: UInt16, flags: UInt16, index: UInt32?, served: Bool, bytes: Int, detail: String)
+        /// The host's FILEGROUPDESCRIPTORW (names and sizes, no contents).
+        case hostFileGroup([ClipboardFileEntry])
+        /// FileContents for one index (test only: the data is for comparison, never logged).
+        case hostFileContents(index: UInt32, name: String?, data: Data)
+        /// Discovery trace line (`Config.traceWire`); may contain payload bytes of test data.
+        case trace(String)
 
         public var description: String {
             func list(_ ids: [UInt16]) -> String { ids.isEmpty ? "(none)" : ids.map { ClipboardFormat.label($0) }.joined(separator: ", ") }
             switch self {
-            case .hostInit(let flags, let v, let n): return String(format: "← CLIP_INIT flags 0x%04x, host version %d → CLIP_INIT_REPLY version %d", flags, v, n)
+            case .hostInit(let low, let v, let n): return String(format: "← CLIP_INIT host versions %d…%d → CLIP_INIT_REPLY version %d", low, v, n)
             case .formatNames(let e): return "← FORMAT_NAMES \(e.count) entries → FORMAT_NAMES_REPLY: " + e.map { String(format: "0x%04X \"%@\" (%ld B)", $0.id, $0.name, $0.raw.count) }.joined(separator: ", ")
             case .ready(let v): return "ready (version \(v)); → FORMAT_LIST empty"
             case .hostFormats(let ids): return "← FORMAT_LIST \(list(ids))"
@@ -103,6 +123,15 @@ public final class ClipboardEngine: VirtualChannelEngine {
             case .lateResponse(let f, let n, let r): return "← late DATA_RESPONSE \(f.map { ClipboardFormat.label($0) } ?? "failure") \(n) B for an earlier request of \(ClipboardFormat.label(r)) (discarded)"
             case .padding(let n, let after): return "skipped \(n) zero bytes after [\(after)]"
             case .protocolError(let why): return "protocol error: \(why)"
+            case .hostFileRequest(let f, let flags, let index, let ok, let n, let detail):
+                return String(format: "← DATA_REQUEST %@ flags 0x%04x index %@ → %@%@", ClipboardFormat.label(f), flags,
+                              index.map { String($0) } ?? "-", ok ? "DATA_RESPONSE \(n) B" : "failure", detail.isEmpty ? "" : " (\(detail))")
+            case .hostFileGroup(let entries):
+                return "← FileGroupDescriptorW \(entries.count) entries: " + entries.map {
+                    "\"\($0.name)\" \($0.isDirectory ? "dir" : "\($0.size) B") attrs 0x\(String($0.attributes, radix: 16)) flags 0x\(String($0.flags, radix: 16))"
+                }.joined(separator: ", ")
+            case .hostFileContents(let i, let name, let data): return "← FileContents index \(i) \(name.map { "\"\($0)\"" } ?? "?"): \(data.count) B"
+            case .trace(let line): return "trace " + line
             }
         }
     }
@@ -131,7 +160,10 @@ public final class ClipboardEngine: VirtualChannelEngine {
     public var pendingRequest: UInt16? { pending?.format }
 
     private var parser: ClipboardStreamParser
+    /// One of our DATA_REQUESTs: a format, and at version 4 the index (FileContents: the file).
+    private struct Request: Equatable { var format: UInt16; var index: UInt32? }
     private var pending: (format: UInt16, token: Int)?
+    private var pendingIndex: UInt32?
     /// Every DATA_REQUEST we sent that has no response yet, oldest first. The current `pending` request is
     /// the last one; older entries were cancelled or timed out, and their late responses are discarded
     /// (a failure response has no format, so it can only be matched by order).
@@ -141,7 +173,11 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private var lastInboundAt: UInt64 = 0
     private var token = 0
     private var fetching = false
-    private var fetchQueue: [UInt16] = []
+    private var fetchQueue: [Request] = []
+    /// The host's file group of the current fetch (FileContents results are matched to it by index).
+    private var hostFileEntries: [ClipboardFileEntry] = []
+    /// Fetch FileContents after the descriptor (`Config.files`); off = descriptor only (e.g. to check a selection).
+    public var fetchFileContents = true
     private var fetched = ClipboardContent()
     private var fetchedFormats: [UInt16] = []
     private var echoCandidate = false
@@ -150,6 +186,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
 
     private enum LocalData { case bytes(Data), image(ClipboardImage) }
     private var localData: [UInt16: LocalData] = [:]
+    private var localFiles: [ClipboardLocalFile] = []
     private var localText: String?
     private var localOwns = false
     private var lastAnnouncedEmpty = false
@@ -167,6 +204,8 @@ public final class ClipboardEngine: VirtualChannelEngine {
     public init(config: Config = Config()) {
         self.config = config
         parser = ClipboardStreamParser(dataCap: config.dataCap)
+        parser.maxVersion = max(1, config.maxVersion)
+        parser.keepRaw = config.traceWire
     }
 
     public func registeredId(_ name: String) -> UInt16? { formatNames.first { $0.name == name }?.id }
@@ -207,7 +246,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
             let (kind, message, offset) = current!
             let end = min(message.endIndex, offset + ClipboardWire.writeSplit)
             current = end < message.endIndex ? (kind, message, end) : nil
-            output?(.channel(message.subdata(in: offset..<end)))
+            let chunk = message.subdata(in: offset..<end)
+            if config.traceWire { emit(.trace("→ VC \(chunk.count) B: " + Self.hex(chunk.prefix(96)) + (chunk.count > 96 ? " …" : ""))) }
+            output?(.channel(chunk))
         }
     }
 
@@ -224,15 +265,21 @@ public final class ClipboardEngine: VirtualChannelEngine {
 
     public func receive(_ data: Data) {
         lastInboundAt = now()
-        for message in parser.feed(data) { handle(message) }
+        if config.traceWire { emit(.trace("← VC \(data.count) B: " + Self.hex(data.prefix(96)) + (data.count > 96 ? " …" : ""))) }
+        let messages = parser.feed(data)
+        let raw = parser.raw
+        for (i, message) in messages.enumerated() {
+            if config.traceWire, i < raw.count { emit(.trace("← msg \(Self.hex(raw[i]))")) }
+            handle(message)
+        }
     }
 
     private static func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined(separator: " ") }
 
     private func handle(_ message: ClipboardHostMessage) {
         switch message {
-        case .initRequest(let flags, let hostVersion):
-            version = min(ClipboardWire.maxClientVersion, hostVersion)
+        case .initRequest(let lowVersion, let hostVersion):
+            version = min(max(1, config.maxVersion), hostVersion)
             cancelFetch()
             outstanding = []
             formatNames = []
@@ -244,7 +291,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
             localData = [:]
             phase = .uninit
             write(ClipboardWire.initReply(version: version))
-            emit(.hostInit(flags: flags, hostVersion: hostVersion, version: version))
+            emit(.hostInit(lowVersion: lowVersion, hostVersion: hostVersion, version: version))
             if version < ClipboardWire.namesVersion { becomeReady() } else { phase = .awaitingNames }
         case .formatNames(_, let entries):
             // The id → name map holds registered ids only (§3.2.3); the reply echoes every id.
@@ -257,8 +304,8 @@ public final class ClipboardEngine: VirtualChannelEngine {
             if phase == .awaitingNames { becomeReady() }
         case .formatList(let flags, let formats):
             hostList(flags: flags, formats: formats)
-        case .dataRequest(_, let format):
-            serve(format)
+        case .dataRequest(let flags, let format, let index):
+            serve(format, flags: flags, index: index)
         case .dataResponse(let format, let length, let data):
             response(format: format, length: length, data: data)
         case .dataFailure:
@@ -335,6 +382,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
         fetchQueue = []
         fetched = ClipboardContent()
         fetchedFormats = []
+        hostFileEntries = []
     }
 
     private func startFetch() {
@@ -347,9 +395,11 @@ public final class ClipboardEngine: VirtualChannelEngine {
         if config.images, hostFormats.contains(ClipboardFormat.bitmap), !hostFormats.contains(ClipboardFormat.unicodeText) {
             want.append(ClipboardFormat.bitmap)
         }
+        // Files (experimental): the descriptor first; FileContents per index are queued once it is parsed.
+        if config.files, let id = registeredId(ClipboardFileFormat.groupDescriptorName), hostFormats.contains(id) { want.append(id) }
         guard !want.isEmpty else { return emit(.hostNothingUsable(hostFormats)) }
         fetching = true
-        fetchQueue = want
+        fetchQueue = want.map { Request(format: $0, index: version >= ClipboardWire.filesVersion ? 0 : nil) }
         fetched = ClipboardContent()
         fetchedFormats = []
         emit(.fetchStarted(want))
@@ -359,12 +409,14 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private func requestNext() {
         guard fetching else { return }
         guard !fetchQueue.isEmpty else { return finishFetch() }
-        let format = fetchQueue.removeFirst()
+        let request = fetchQueue.removeFirst()
+        let format = request.format
         token += 1
         let current = token
         pending = (format, current)
+        pendingIndex = request.index
         outstanding.append((format, current, now()))
-        write(ClipboardWire.dataRequest(format: format))
+        write(ClipboardWire.dataRequest(format: format, index: request.index))
         armTimeout(current)
     }
 
@@ -420,15 +472,32 @@ public final class ClipboardEngine: VirtualChannelEngine {
         pending = nil
         if let data {
             emit(.fetched(format: format, bytes: data.count))
-            store(format: format, data: data)
+            store(format: format, index: pendingIndex, data: data)
         } else {
             emit(.fetchFailed(format: format, reason: "\(length) B is over the \(config.dataCap) B cap (discarded)"))
         }
         requestNext()
     }
 
-    private func store(format: UInt16, data: Data) {
+    private func store(format: UInt16, index: UInt32?, data: Data) {
         switch format {
+        case registeredId(ClipboardFileFormat.groupDescriptorName) where config.files:
+            let entries: [ClipboardFileEntry]
+            do { entries = try ClipboardFileGroup.parse(data, maxEntries: 1000) } catch {
+                return emit(.fetchFailed(format: format, reason: "FILEGROUPDESCRIPTORW not usable: \(error)"))
+            }
+            hostFileEntries = entries
+            emit(.hostFileGroup(entries))
+            guard fetchFileContents, let contents = registeredId(ClipboardFileFormat.contentsName), hostFormats.contains(contents) else { return }
+            // One request per file (directories have no contents), by zero-based index (docs/75 §5).
+            for (i, e) in entries.enumerated().prefix(config.maxFileEntries) where !e.isDirectory && e.size <= UInt64(config.dataCap) {
+                fetchQueue.append(Request(format: contents, index: UInt32(i)))
+            }
+            return
+        case registeredId(ClipboardFileFormat.contentsName) where config.files:
+            let i = index ?? 0
+            let name = Int(i) < hostFileEntries.count ? hostFileEntries[Int(i)].name : nil
+            return emit(.hostFileContents(index: i, name: name, data: data))
         case ClipboardFormat.unicodeText:
             fetched.text = ClipboardText.decodeHost(data)
         case ClipboardFormat.bitmap:
@@ -511,9 +580,19 @@ public final class ClipboardEngine: VirtualChannelEngine {
             formats.append(ClipboardFormat.bitmap)
             data[ClipboardFormat.bitmap] = .image(image)
         }
+        // Files (experimental): only under the ids the host gave both shell names (docs/75 §7.1).
+        var files: [ClipboardLocalFile] = []
+        if config.files, let list = content.files, !list.isEmpty,
+           let group = registeredId(ClipboardFileFormat.groupDescriptorName), let contents = registeredId(ClipboardFileFormat.contentsName),
+           let descriptor = try? ClipboardFileGroup.build(list.map(\.entry)) {
+            formats += [group, contents]
+            data[group] = .bytes(descriptor)
+            files = list
+        }
         guard !formats.isEmpty else { return announceEmpty() }
         localFormats = formats
         localData = data
+        localFiles = files
         localText = content.text
         localOwns = true
         lastAnnouncedEmpty = false
@@ -525,6 +604,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private func announceEmpty() {
         localFormats = []
         localData = [:]
+        localFiles = []
         localText = nil
         localOwns = false
         guard !lastAnnouncedEmpty else { return }
@@ -533,13 +613,42 @@ public final class ClipboardEngine: VirtualChannelEngine {
         emit(.announced([]))
     }
 
-    private func serve(_ format: UInt16) {
+    private func serve(_ format: UInt16, flags: UInt16 = 0, index: UInt32? = nil) {
+        if config.files, let contents = registeredId(ClipboardFileFormat.contentsName), format == contents {
+            return serveFile(format: format, flags: flags, index: index)
+        }
+        if config.files, let group = registeredId(ClipboardFileFormat.groupDescriptorName), format == group {
+            let data = localFormats.contains(format) ? resolve(format) : nil
+            if let data { write(ClipboardWire.dataResponse(format: format, data: data), .data) } else { write(ClipboardWire.dataFailure, .data) }
+            return emit(.hostFileRequest(format: format, flags: flags, index: index, served: data != nil, bytes: data?.count ?? 0,
+                                         detail: "\(localFiles.count) entries"))
+        }
         guard config.macToHost, localFormats.contains(format), let data = resolve(format), data.count <= config.dataCap else {
             write(ClipboardWire.dataFailure, .data)
             return emit(.hostRequest(format: format, served: false, bytes: 0))
         }
         write(ClipboardWire.dataResponse(format: format, data: data), .data)
         emit(.hostRequest(format: format, served: true, bytes: data.count))
+    }
+
+    /// FileContents: the whole file of entry `index` (whole-file hypothesis; ranges unknown, docs/75 §4.3). Without
+    /// an index (version ≤ 3) entry 0 is served and that is logged.
+    private func serveFile(format: UInt16, flags: UInt16, index: UInt32?) {
+        let i = Int(index ?? 0)
+        var detail = index == nil ? "no index at version \(version): entry 0" : ""
+        guard config.macToHost, localFormats.contains(format), i < localFiles.count else {
+            write(ClipboardWire.dataFailure, .data)
+            if detail.isEmpty { detail = i >= localFiles.count ? "index out of range (\(localFiles.count) files)" : "no files announced" }
+            return emit(.hostFileRequest(format: format, flags: flags, index: index, served: false, bytes: 0, detail: detail))
+        }
+        let file = localFiles[i]
+        guard !file.entry.isDirectory, file.entry.size <= UInt64(config.dataCap), let data = file.read() else {
+            write(ClipboardWire.dataFailure, .data)
+            return emit(.hostFileRequest(format: format, flags: flags, index: index, served: false, bytes: 0, detail: "entry \(i) not readable"))
+        }
+        write(ClipboardWire.dataResponse(format: format, data: data), .data)
+        let name = "\"\(file.entry.name)\""
+        emit(.hostFileRequest(format: format, flags: flags, index: index, served: true, bytes: data.count, detail: detail.isEmpty ? name : detail + ", " + name))
     }
 
     /// Snapshot data for a format; an image is converted on its first request and kept.

@@ -75,7 +75,7 @@ final class SessionController: NSObject {
 
     var appWindowCount: Int { windows.values.filter(\.isApp).count }
 
-    /// The INIT_RESPONSE carried the CTXCAM module (main thread; for the one-shot fallback, `AudioFallback`).
+    /// The INIT_RESPONSE carried the CTXCAM module (main thread; logged with an early drop).
     private(set) var announcedAudio = false
     /// Reached the first Thinwire INIT or the seamless channel. Main thread.
     var wasEstablished: Bool { reachedSeamless || session.isEstablished }
@@ -104,8 +104,7 @@ final class SessionController: NSObject {
     /// windows are over by then); with several apps all must have ended before a last-window logoff. nil before.
     private var appWindowProcesses: Set<UInt32>?
 
-    /// `omitAudio`: announce no CTXCAM this time (the previous session with it dropped before it was established).
-    init(name: String, ica: ICAFile, omitAudio: Bool = false) throws {
+    init(name: String, ica: ICAFile) throws {
         self.name = name
         appNames = [name]
         shareKey = SessionShareKey(ica: ica)
@@ -127,7 +126,7 @@ final class SessionController: NSObject {
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
-                                 printing: Self.printingConfig(), audio: omitAudio ? nil : Self.audioConfig(),
+                                 printing: Self.printingConfig(), audio: Self.audioConfig(),
                                  webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless))
         super.init()
         keyboard.controller = self
@@ -260,8 +259,14 @@ final class SessionController: NSObject {
                 case .connected:
                     DispatchQueue.main.async { self?.connected = true }
                     vlog("WD connected")
-                    // NumLock on, so the Mac keypad (always numeric) types digits.
-                    self?.session.send { wd, _ in wd.setLED(0x20) }
+                    // NumLock on, so the Mac keypad (always numeric) types digits, but only after the
+                    // host's first framed packet: never right behind INIT_CONNECT_RESPONSE
+                    // (notes/early-drop-analysis.md H1).
+                    self?.ledGate.connectResponseSent()
+                case .packet(let p) where self?.ledGate.hostPacket(type: p.type) == true:
+                    self?.sendNumLock(after: self?.ledGate.sentAfter)
+                    if p.channel == 9 { self?.repeats.record(p.payload) }
+                    if p.channel == 12 { self?.twiCapture?.record(p.payload) }
                 case .terminate(let reason): vlog("WD TERMINATE reason \(reason)")
                 case .failure(let text): vlog("WD failure: \(text)")
                 case .initRequest(let r): vlog("INIT_REQUEST level \(r.level), \(r.capabilities.count) caps")
@@ -272,6 +277,20 @@ final class SessionController: NSObject {
                 default: break
                 }
             default: break
+            }
+        }
+    }
+
+    /// SET_LED gate (session queue).
+    private var ledGate = LEDGate()
+
+    /// Queued behind the packet being handled (the credential reply goes first), on the session queue.
+    private func sendNumLock(after trigger: LEDGate.Trigger?) {
+        let session = self.session
+        Self.timerQueue.async {
+            session.send { wd, _ in
+                wd.setLED(0x20)
+                vlog("led: sent after \(trigger?.description ?? "?")")
             }
         }
     }

@@ -28,7 +28,10 @@ public enum ClipboardWire {
     /// FORMAT_LIST (with 0x0004): the clipboard is empty.
     public static let flagEmpty: UInt16 = 0x0008
 
+    /// Our default maximum (docs/70). 4 only in the discovery build (`ClipboardEngine.Config.maxVersion`, docs/75 §4.1).
     public static let maxClientVersion: UInt16 = 3
+    /// Version 4: the host's DATA_REQUEST is read with a u32 index (hypothesis H1, docs/75 §4.2).
+    public static let filesVersion: UInt16 = 4
     /// Versions ≥ 2 exchange FORMAT_NAMES before READY (§3.2.2).
     public static let namesVersion: UInt16 = 2
     /// Client → host VC write size (§2.2). 4996 needs WD cap 0x10, which we never negotiate.
@@ -82,13 +85,14 @@ public enum ClipboardWire {
         return w.data
     }
 
-    /// DATA_REQUEST: `04 00 00 00 <u16 format> 00 00`.
-    public static func dataRequest(format: UInt16) -> Data {
+    /// DATA_REQUEST: `04 00 00 00 <u16 format> 00 00`; with `index` (version 4, hypothesis H1 of docs/75
+    /// §4.2) `04 00 00 00 <u16 format> <u32 index>`, 10 bytes.
+    public static func dataRequest(format: UInt16, index: UInt32? = nil) -> Data {
         var w = ByteWriter()
         w.u16(Command.dataRequest.rawValue)
         w.u16(0)
         w.u16(format)
-        w.u16(0)
+        if let index { w.u32(index) } else { w.u16(0) }
         return w.data
     }
 
@@ -145,11 +149,13 @@ public struct ClipboardFormatName: Equatable, Sendable {
 
 /// A parsed host → client message.
 public enum ClipboardHostMessage: Equatable, Sendable {
-    case initRequest(flags: UInt16, version: UInt16)
+    /// Offset 2 is the host's lowest version, offset 4 its highest (docs/75 §4.1; live `01 00 04 00`).
+    case initRequest(lowVersion: UInt16, highVersion: UInt16)
     case formatNames(flags: UInt16, entries: [ClipboardFormatName])
     /// `formats` is empty for the "no list" form (flags 0x0004); 0x0008 then means "clipboard empty".
     case formatList(flags: UInt16, formats: [UInt16])
-    case dataRequest(flags: UInt16, format: UInt16)
+    /// `index`: the u32 after the format at version 4 (hypothesis H1, docs/75 §4.2); nil at version ≤ 3.
+    case dataRequest(flags: UInt16, format: UInt16, index: UInt32? = nil)
     /// `data` is nil when `length` was over the parser's cap: the bytes were consumed and discarded.
     case dataResponse(format: UInt16, length: Int, data: Data?)
     case dataFailure(flags: UInt16)
@@ -161,7 +167,8 @@ public enum ClipboardHostMessage: Equatable, Sendable {
     case malformed(command: UInt16, flags: UInt16, reason: String, head: Data, previous: Data)
     /// u16 zero words where a command should start, skipped. Command 0 does not exist; live (host version
     /// 4), a DATA_REQUEST was followed by such bytes, so the host's request is longer than §3.2.6 says or
-    /// padded. `previous` is the header of the message they followed.
+    /// padded. `previous` is the header of the message they followed. At version 4 only right after a
+    /// DATA_REQUEST (anything else is a protocol error), so a non-zero field is never skipped silently.
     case padding(bytes: Int, previous: Data)
 }
 
@@ -179,16 +186,28 @@ public struct ClipboardStreamParser {
     /// Bytes of a message header kept for diagnostics.
     public static let headLength = 16
 
+    /// Highest version we answer; with the host's CLIP_INIT it sets `version` (and so the request layout).
+    public var maxVersion: UInt16 = ClipboardWire.maxClientVersion
+    /// Negotiated version as seen by the parser (0 before CLIP_INIT).
+    public private(set) var version: UInt16 = 0
+    /// Discovery trace: keep the raw bytes of each message (`raw`, aligned with the last `feed` result):
+    /// the whole message, but for DATA_RESPONSE only the 10 header bytes and up to `rawPayload` payload bytes.
+    public var keepRaw = false
+    public static let rawPayload = 64
+    public private(set) var raw: [Data] = []
+
     private var buffer = Data()
     private var payload: Payload?
     /// Header bytes of the last message parsed (never payload bytes).
     private var previous = Data()
+    private var previousCommand: UInt16 = 0
 
     private struct Payload {
         let format: UInt16
         let length: Int
         var remaining: Int
         var data: Data?
+        var preview: Data?
     }
 
     public init(dataCap: Int = 64 << 20) { self.dataCap = dataCap }
@@ -205,6 +224,7 @@ public struct ClipboardStreamParser {
 
     public mutating func feed(_ data: Data) -> [ClipboardHostMessage] {
         buffer.append(data)
+        raw = []
         var out: [ClipboardHostMessage] = []
         var position = buffer.startIndex
         while position < buffer.endIndex {
@@ -214,36 +234,52 @@ public struct ClipboardStreamParser {
                 payload = nil
                 let take = min(p.remaining, buffer.endIndex - position)
                 p.data?.append(buffer[position..<(position + take)])
+                if var preview = p.preview, preview.count < 10 + Self.rawPayload {
+                    preview.append(buffer[position..<(position + min(take, 10 + Self.rawPayload - preview.count))])
+                    p.preview = preview
+                }
                 position += take
                 p.remaining -= take
                 if p.remaining > 0 { payload = p; break }
                 out.append(.dataResponse(format: p.format, length: p.length, data: p.data))
+                if keepRaw { raw.append(p.preview ?? Data()) }
                 continue
             }
             let rest = buffer[position...]
-            guard let (parsed, used) = Self.parseOne(rest, previous: previous) else { break }
+            guard let (parsed, used) = Self.parseOne(rest, previous: previous, version: version, previousCommand: previousCommand)
+            else { break }
             position += used
             switch parsed {
             case .message(let message):
                 out.append(message)
+                if keepRaw { raw.append(Data(rest.prefix(used))) }
                 switch message {
                 case .unknown, .malformed:
+                    if keepRaw { raw[raw.count - 1] = Data(rest.prefix(Self.headLength)) }
                     // No way to find the next message: drop everything buffered (§2.1 [P]).
                     buffer = Data()
+                    previousCommand = 0
                     return out
                 case .padding:
                     break
+                case .initRequest(_, let high):
+                    version = min(maxVersion, high)
+                    fallthrough
                 default:
                     previous = Data(rest.prefix(min(used, Self.headLength)))
+                    previousCommand = UInt16(rest[rest.startIndex]) | UInt16(rest[rest.startIndex + 1]) << 8
                 }
             case .responseHeader(let format, let length):
                 previous = Data(rest.prefix(10))
+                previousCommand = ClipboardWire.Command.dataResponse.rawValue
                 if length == 0 {
                     out.append(.dataResponse(format: format, length: 0, data: Data()))
+                    if keepRaw { raw.append(previous) }
                 } else {
                     let keep = length <= dataCap
                     payload = Payload(format: format, length: length, remaining: length,
-                                      data: keep ? Data(capacity: min(length, 1 << 20)) : nil)
+                                      data: keep ? Data(capacity: min(length, 1 << 20)) : nil,
+                                      preview: keepRaw ? previous : nil)
                 }
             }
         }
@@ -257,12 +293,18 @@ public struct ClipboardStreamParser {
     }
 
     /// One message from the start of `bytes`, or nil if more bytes are needed.
-    private static func parseOne(_ bytes: Data, previous: Data) -> (Parsed, Int)? {
+    private static func parseOne(_ bytes: Data, previous: Data, version: UInt16, previousCommand: UInt16) -> (Parsed, Int)? {
         var r = ByteReader(bytes)
         func used() -> Int { r.offset - bytes.startIndex }
         func head() -> Data { Data(bytes.prefix(headLength)) }
+        let v4 = version >= ClipboardWire.filesVersion
         do {
             let command = try r.u16()
+            if command == 0, v4, previousCommand != ClipboardWire.Command.dataRequest.rawValue {
+                // At version 4 zeros are skipped only right after a DATA_REQUEST (docs/75 §4.2).
+                return (.message(.unknown(command: 0, flags: bytes.count >= 4 ? UInt16(bytes[bytes.startIndex + 2]) | UInt16(bytes[bytes.startIndex + 3]) << 8 : nil,
+                                          head: head(), previous: previous)), used())
+            }
             if command == 0 {
                 // Zero words where a command should start: skip all of them that are here.
                 var n = 2
@@ -280,8 +322,8 @@ public struct ClipboardStreamParser {
             }
             switch known {
             case .initRequest:
-                let version = try r.u16()
-                return (.message(.initRequest(flags: flags, version: version)), used())
+                let high = try r.u16()
+                return (.message(.initRequest(lowVersion: flags, highVersion: high)), used())
             case .formatNames:
                 var entries: [ClipboardFormatName] = []
                 while true {
@@ -312,6 +354,11 @@ public struct ClipboardStreamParser {
                 return (.message(.formatList(flags: flags, formats: formats)), used())
             case .dataRequest:
                 let format = try r.u16()
+                if v4 {
+                    // Hypothesis H1 (docs/75 §4.2): u32 index after the format, 10 bytes in all.
+                    let index = try r.u32()
+                    return (.message(.dataRequest(flags: flags, format: format, index: index)), used())
+                }
                 _ = try r.u16()
                 return (.message(.dataRequest(flags: flags, format: format)), used())
             case .dataResponse:

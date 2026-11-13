@@ -62,15 +62,21 @@ public struct ClipboardContent: @unchecked Sendable {
     /// RTF bytes without a trailing NUL (Mac `public.rtf`).
     public var rtf: Data?
     public var image: ClipboardImage?
+    /// Mac files offered as FileGroupDescriptorW + FileContents (experimental, `Config.files`; docs/75 §7).
+    public var files: [ClipboardLocalFile]?
 
-    public init(text: String? = nil, html: String? = nil, rtf: Data? = nil, image: ClipboardImage? = nil) {
+    public init(text: String? = nil, html: String? = nil, rtf: Data? = nil, image: ClipboardImage? = nil,
+                files: [ClipboardLocalFile]? = nil) {
         self.text = text
         self.html = html
         self.rtf = rtf
         self.image = image
+        self.files = files
     }
 
-    public var isEmpty: Bool { (text?.isEmpty ?? true) && (html?.isEmpty ?? true) && (rtf?.isEmpty ?? true) && image == nil }
+    public var isEmpty: Bool {
+        (text?.isEmpty ?? true) && (html?.isEmpty ?? true) && (rtf?.isEmpty ?? true) && image == nil && (files?.isEmpty ?? true)
+    }
 
     /// Sizes and kinds only.
     public var summary: String {
@@ -79,6 +85,7 @@ public struct ClipboardContent: @unchecked Sendable {
         if let html { parts.append("html \(html.utf8.count) B") }
         if let rtf { parts.append("rtf \(rtf.count) B") }
         if let image { parts.append("image \(image.width)x\(image.height)") }
+        if let files { parts.append("files \(files.count) (\(files.reduce(0) { $0 + $1.entry.size }) B)") }
         return parts.isEmpty ? "empty" : parts.joined(separator: ", ")
     }
 }

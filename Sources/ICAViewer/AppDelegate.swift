@@ -168,8 +168,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Relaunch counters per resource for sessions that ended before they were established.
     private var retries: [String: LaunchRetry] = [:]
-    /// A relaunch after a session with CTXCAM dropped before it was established omits CTXCAM once (docs/98 §13 D1).
-    private var audioFallback = AudioFallback()
 
     /// `interactive`: the user chose the resource in the launcher. Automated launches (see `LaunchPolicy`)
     /// are limited to the test resources.
@@ -228,9 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          + (shareKey.sharingKey == nil ? "no SessionsharingKey" : "TWIMode \(shareKey.twiMode)") + ")") + "; new connection")
                     sharedFallbacks.remove(resource.name)
                 }
-                let omitAudio = audioFallback.takeOmission(resource.name)
-                if omitAudio { vlog("audio: CTXCAM omitted for this relaunch of \(logName(resource.name)) (the previous session with it dropped before it was established)") }
-                let controller = try SessionController(name: resource.name, ica: ica, omitAudio: omitAudio)
+                // No CTXCAM omission on relaunch any more: its premise did not hold (notes/early-drop-analysis.md §4.2).
+                let controller = try SessionController(name: resource.name, ica: ica)
                 clientNames[ObjectIdentifier(controller)] = WDLogon(ica: ica).clientName
                 controller.onEnded = { [weak self] c in
                     guard let self else { return }
@@ -239,9 +236,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if !c.reachedSeamless, let running = self.runningSession(sharing: c.shareKey.sharingKey, except: c) {
                         vlog("launch: \(logName(resource.name)) dropped; its SessionsharingKey equals that of \(logName(running.name)): not an early drop, no relaunch")
                         self.retries[resource.name] = nil
-                        self.audioFallback.clear(resource.name)
                         self.sessionEnded(c)
                         self.refuseSharedLaunch(resource.name, running: running.name)
+                        return
+                    }
+                    if let drop = c.session.earlyDrop {
+                        vlog("launch: \(logName(resource.name)): \(drop.summary)" + (c.announcedAudio ? " (CTXCAM was announced)" : ""))
+                    }
+                    // Pattern B: the host refused another (or a held) session for this user. A retry
+                    // cannot help; it would only collide again.
+                    if !c.reachedSeamless, let drop = c.session.earlyDrop, drop.pattern == .b, !self.terminating {
+                        vlog("launch: \(logName(resource.name)): pattern B (TERMINATE before the first Thinwire INIT): no relaunch")
+                        self.retries[resource.name] = nil
+                        self.sessionEnded(c)
+                        self.refuseSecondSession(resource.name)
                         return
                     }
                     // Live: the VDA once closed the connection ~20 ms after INIT_CONNECT_RESPONSE, before
@@ -254,9 +262,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Counters restart once a session was established (next() resets) or retries are exhausted.
                     self.retries[resource.name] = decision == .giveUp ? nil : retry
                     if case let .relaunch(attempt, total, delay) = decision {
-                        if self.audioFallback.relaunching(resource.name, announcedAudio: c.announcedAudio, established: c.wasEstablished) {
-                            vlog("audio: the session announced CTXCAM and dropped before it was established; the relaunch omits CTXCAM once")
-                        }
                         self.sessions.removeAll { $0 === c }
                         vlog("session dropped before the seamless channel came up (\(c.endReason)); relaunching "
                              + "(attempt \(attempt)/\(total), in \(Int(delay)) s)")
@@ -267,7 +272,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                         return
                     }
-                    self.audioFallback.clear(resource.name)
                     self.sessionEnded(c)
                 }
                 controller.onRelaunch = { [weak self] c in
@@ -388,6 +392,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// A session started without CTXCTL (e.g. by an older build) cannot take the app: status and a sheet on the
     /// launcher; nothing is launched (D51 safeguard).
+    private func refuseSecondSession(_ app: String) {
+        let a = displayName(app)
+        let text = loc("The server refused another session for this user.", "Der Server hat eine weitere Sitzung für diesen Benutzer abgelehnt.")
+        launcher?.setStatus("\(a): " + text)
+        guard let launcher, let window = launcher.window else { return }
+        launcher.showWindow(nil)
+        let alert = NSAlert()
+        alert.messageText = String(format: loc("%@ could not start", "%@ konnte nicht starten"), a)
+        alert.informativeText = text + " " + loc(
+            "Another session of yours may still be open, or held for a few minutes after a lost connection. Try again later, or end that session in the Connection Center.",
+            "Eine andere Sitzung von Ihnen ist vielleicht noch offen oder wird nach einem Verbindungsabbruch einige Minuten gehalten. Später erneut versuchen oder die Sitzung im Verbindungscenter beenden.")
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
+    }
+
     private func refuseSharedLaunch(_ app: String, running: String) {
         let a = displayName(app), r = displayName(running)
         showLaunchAlert(String(format: loc("%@ runs in the same session as %@", "%@ läuft in derselben Sitzung wie %@"), a, r),
