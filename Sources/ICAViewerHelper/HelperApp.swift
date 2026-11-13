@@ -9,7 +9,8 @@ import os
 ///
 /// Phase 2 (docs/99 §12): also the app's popups, menus and tooltips (`SurfacePanel`), local caption drags and
 /// edge resizes (D20), the remote pointer shape, and a menu bar of its own (`HelperMenu`) whose Edit, Zoom
-/// and ICA items act in the host.
+/// and ICA items act in the host. Phase 3: a Dock menu (windows, Show Launcher, Connection Center), the Dock
+/// tile restoring a minimised window, and icon updates without a relaunch.
 final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private let link: HostLink
     private let logger = Logger(subsystem: "local.alttab.ICAViewer.helper", category: "helper")
@@ -22,6 +23,10 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
     private var hostQuit = false
     private var greeted = false
     private var windowlessCheck: DispatchWorkItem?
+    /// The window that was key last (the Dock tile brings it back when all are minimised).
+    private var lastKeyWindow: UInt32?
+    /// Open Launcher's key equivalent: the host's global shortcut (`launcherShortcut` message), nil = none.
+    private var launcherShortcut: HelperShortcut? = HelperMenu.launcherShortcut
     private var latencies: [Double] = []
     /// Session pixels per point for specs without a scale (the spike does not follow screen changes).
     private let defaultScale = NSScreen.main?.backingScaleFactor ?? 2
@@ -86,6 +91,53 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
     ]
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // MARK: Dock tile (phase 3, docs/99 §12.11, §12.5)
+
+    /// The app's windows (choosing one brings it to the front and so activates it on the host), then Show
+    /// Launcher and Connection Center in the main process. macOS adds Hide and Quit (= quit this remote app).
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let key = keySurfaceWindow?.spec.id
+        let list = windows.values.filter(\.isSeamless).map { HelperDockMenu.Window(id: $0.spec.id, title: $0.spec.title, isKey: $0.spec.id == key) }
+        let menu = NSMenu()
+        for model in HelperDockMenu.items(windows: list, untitled: appName, german: german) {
+            guard let action = model.action else { menu.addItem(.separator()); continue }
+            let item = NSMenuItem(title: model.title, action: nil, keyEquivalent: "")
+            item.target = self
+            item.state = model.checked ? .on : .off
+            switch action {
+            case .window(let id):
+                item.action = #selector(dockWindow(_:))
+                item.tag = Int(id)
+            case .host(let command):
+                item.action = #selector(hostCommand(_:))
+                item.representedObject = command.rawValue
+            }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func dockWindow(_ sender: NSMenuItem) {
+        guard let window = windows[UInt32(truncatingIfNeeded: sender.tag)] else { return }
+        bringForward(window)
+    }
+
+    /// A click on the Dock tile with no window on screen (all minimised): the last key window, else the first,
+    /// comes back; the host hears the restore (`minimized false`) and the focus as for any other restore.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !flag else { return true }
+        let candidates = windows.values.filter(\.isSeamless).sorted { $0.spec.id < $1.spec.id }
+        guard let window = candidates.first(where: { $0.spec.id == lastKeyWindow }) ?? candidates.first else { return false }
+        bringForward(window)
+        return false
+    }
+
+    private func bringForward(_ window: SurfaceWindow) {
+        NSApp.activate()
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+    }
 
     private func send(_ message: HelperMessage) {
         link.send(message, timeoutMs: message.mayDrop ? 0 : 200)
@@ -175,6 +227,16 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
             pointerChanged(shape)
         case .gestureDone(let id):
             windows[id]?.gestureDone(surface: surface)
+        case .icon(let png):
+            // Phase 3: the store icon arrived after the bundle was generated (docs/99 §12.15).
+            guard let image = NSImage(data: png), image.isValid else { return note("app icon not readable; keeping the current one") }
+            NSApp.applicationIconImage = image
+        case .launcherShortcut(let raw):
+            // The global shortcut chosen in Settings (or none): the ICA menu shows and takes that one.
+            let shortcut = LauncherHotKey.stored(raw).shortcut
+            guard shortcut != launcherShortcut else { return }
+            launcherShortcut = shortcut
+            if greeted { NSApp.mainMenu = menu(appName: appName) }
         }
     }
 
@@ -281,7 +343,9 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
     // MARK: NSWindowDelegate
 
     func windowDidBecomeKey(_ notification: Notification) {
-        if let window = notification.object as? SurfaceWindow { link.send(.focus(windowId: window.spec.id)) }
+        guard let window = notification.object as? SurfaceWindow else { return }
+        lastKeyWindow = window.spec.id
+        link.send(.focus(windowId: window.spec.id))
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -335,7 +399,7 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
     /// App menu (the bold title is CFBundleName), Edit, Window (AppKit lists the windows), ICA and Help.
     private func menu(appName: String) -> NSMenu {
         let main = NSMenu()
-        menuSections = HelperMenu.sections(appName: appName, german: german)
+        menuSections = HelperMenu.sections(appName: appName, german: german, launcher: launcherShortcut)
         for section in menuSections {
             let menu = NSMenu(title: section.title)
             for item in section.items { menu.addItem(menuItem(item)) }

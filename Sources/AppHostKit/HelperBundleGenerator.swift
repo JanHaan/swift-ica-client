@@ -76,14 +76,33 @@ public struct HelperBundleGenerator {
         try Self.sign(built, identity: signIdentity, hardenedRuntime: hardenedRuntime)
         try Self.verify(built)
 
-        // Exactly one bundle per key: an old name of the same app goes.
+        // Exactly one bundle per key: an old name of the same app goes, and with it its LaunchServices record
+        // (docs/99 §12.19: the database would otherwise keep every name an app ever had).
         for item in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         where item.pathExtension == "app" {
+            if registerWithLaunchServices, item.lastPathComponent != target.lastPathComponent { Self.unregister(item) }
             try fm.removeItem(at: item)
         }
         try fm.moveItem(at: built, to: target)
         if registerWithLaunchServices { _ = LSRegisterURL(target as CFURL, true) }
         return (target, existed ? .updated : .created)
+    }
+
+    static let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+    /// `lsregister -u <bundle>`; best effort (the tool is part of macOS, but not API), at most `timeout` seconds
+    /// (a busy LaunchServices daemon must not hold up the bundle queue).
+    public static func unregister(_ bundle: URL, timeout: TimeInterval = 5) {
+        guard FileManager.default.isExecutableFile(atPath: lsregister) else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: lsregister)
+        process.arguments = ["-u", bundle.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
+        guard (try? process.run()) != nil else { return }
+        if done.wait(timeout: .now() + timeout) == .timedOut { process.terminate() }
     }
 
     public static func readInfo(_ bundle: URL) -> [String: Any]? {

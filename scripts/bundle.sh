@@ -1,6 +1,10 @@
 #!/bin/sh
 # Builds ICAViewer and wraps the executable into ICAViewer.app (bundle identity, Info.plist,
 # ad-hoc signature) so it runs as a regular app: Dock icon, AX application, window switchers.
+# The Dock-apps template (docs/99 §12.16) is built by scripts/bundle-helper.sh into
+# ICAViewer.app/Contents/Helpers/ICAViewerHelper.app and signed inside-out with the same identity as the
+# app (hardened runtime, no entitlements; Developer ID with a secure timestamp in release, ad-hoc otherwise).
+# The app copies it per remote app at runtime and re-signs each copy ad-hoc.
 # Usage: scripts/bundle.sh [release|debug]   → .build/ICAViewer.app (release by default: the
 # Thinwire pixel loops are far too slow unoptimised for a session that repaints ~20 times a second)
 # Environment (all optional; scripts/make-dmg.sh sets them for release builds):
@@ -29,6 +33,11 @@ app="$(cd "$out" && pwd)/ICAViewer.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/ICAViewer"
+# The helper template, unsigned here; every signing path below signs it before the app.
+mkdir -p "$app/Contents/Helpers"
+ICA_BUNDLE_OUT="$app/Contents/Helpers" ICA_HELPER_NO_SIGN=1 "$root/scripts/bundle-helper.sh" "$config" >/dev/null ||
+    { echo "error: building the helper template failed (scripts/bundle-helper.sh, ICA_SWIFT_FLAGS=${ICA_SWIFT_FLAGS:-})" >&2; exit 1; }
+helper="$app/Contents/Helpers/ICAViewerHelper.app"
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -103,13 +112,18 @@ ENT
         while IFS= read -r nested; do
             codesign --force --options runtime --timestamp --sign "$identity" "$nested"
         done
+    # The helper template: Developer ID, hardened runtime, secure timestamp, no entitlements (notarization).
+    codesign --force --options runtime --timestamp --sign "$identity" "$helper" ||
+        { echo "error: Developer ID signing of the helper template failed" >&2; exit 1; }
     codesign --force --options runtime --timestamp --entitlements "$ent" --sign "$identity" "$app" ||
         { echo "error: Developer ID signing failed" >&2; exit 1; }
     echo "signed with Developer ID ($identity), hardened runtime${ICA_RELEASE_PROFILE:+, profile $ICA_RELEASE_PROFILE}" >&2
 }
 adhoc() {
     echo "note: $1; signing ad-hoc (saved secrets use the app-enforced Touch ID check)" >&2
-    codesign --force --deep --sign - "$app" >/dev/null 2>&1 || echo "warning: ad-hoc signing failed" >&2
+    # Inside-out, no --deep: --deep would re-sign the helper template without the hardened runtime.
+    codesign --force --options runtime --sign - "$helper" >/dev/null 2>&1 || echo "warning: ad-hoc signing of the helper template failed" >&2
+    codesign --force --sign - "$app" >/dev/null 2>&1 || echo "warning: ad-hoc signing failed" >&2
 }
 if [ "${ICA_SIGN:-}" = adhoc ]; then
     adhoc "ICA_SIGN=adhoc"
@@ -146,7 +160,8 @@ else
 </dict>
 </plist>
 ENT
-        if codesign --force --options runtime --timestamp=none --entitlements "$decoded.ent" --sign "$identity" "$app" >/dev/null 2>&1; then
+        if codesign --force --options runtime --timestamp=none --sign "$identity" "$helper" >/dev/null 2>&1 &&
+            codesign --force --options runtime --timestamp=none --entitlements "$decoded.ent" --sign "$identity" "$app" >/dev/null 2>&1; then
             echo "signed with the development identity for team $team (profile expires $expires)" >&2
         else
             rm -f "$app/Contents/embedded.provisionprofile"

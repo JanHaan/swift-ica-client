@@ -1,13 +1,15 @@
 #!/bin/sh
 # Builds the template helper app for per-app Dock identity (docs/99 phase 1 spike): ICAViewerHelper.app.
 # The host copies it per remote app, relabels it (CFBundleName, CFBundleIdentifier, icon) and re-signs
-# the copy ad-hoc at runtime (AppHostKit/HelperBundleGenerator.swift). Not embedded in ICAViewer.app yet
-# (phase 3); scripts/bundle.sh is unchanged.
+# the copy ad-hoc at runtime (AppHostKit/HelperBundleGenerator.swift). scripts/bundle.sh calls this script to
+# embed the template as ICAViewer.app/Contents/Helpers/ICAViewerHelper.app (docs/99 §12.16) and signs it
+# itself with the app's identity; run alone, it builds the development template the app finds in .build.
 # Usage: scripts/bundle-helper.sh [release|debug]   → .build/ICAViewerHelper.app (release by default)
 # Environment (all optional):
 #   ICA_BUNDLE_OUT=<dir>      directory to put ICAViewerHelper.app in (default .build)
 #   ICA_SIGN_IDENTITY=<name>  sign the template with this identity (hardened runtime, secure timestamp),
 #                             as a release build would; default: ad-hoc with hardened runtime
+#   ICA_HELPER_NO_SIGN=1      leave it unsigned (scripts/bundle.sh signs it, inside-out, with the app's identity)
 #   ICA_VERSION=<x.y>         CFBundleShortVersionString (default 0.1)
 #   ICA_SWIFT_FLAGS=<...>     extra swift build flags (word-split), e.g. "--arch arm64 --arch x86_64"
 set -eu
@@ -48,6 +50,10 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+if [ "${ICA_HELPER_NO_SIGN:-}" = 1 ]; then
+    echo "$app"
+    exit 0
+fi
 if [ -n "${ICA_SIGN_IDENTITY:-}" ]; then
     codesign --force --options runtime --timestamp --sign "$ICA_SIGN_IDENTITY" "$app"
     echo "signed with $ICA_SIGN_IDENTITY, hardened runtime" >&2

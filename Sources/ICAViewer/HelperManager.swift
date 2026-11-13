@@ -18,13 +18,26 @@ import ImageIO
 /// `TWILocalGesture` path; pointer shapes go to every helper of the session; each helper has a menu bar
 /// whose Edit, Zoom and ICA items act here (`onCommand`).
 ///
-/// Limits: one session per helper (another session's windows of the same app stay here); a helper that
-/// fails or crashes hands its windows back to this process for the rest of the run; name and icon are fixed
-/// at launch; this process keeps its own Dock tile. Main thread only, like the session controller.
+/// Phase 3 (§12.4): one helper per app and session (the same app in a second session gets its own helper
+/// "App (2)", `HelperSessionSlots`); a helper that dies on its own is launched again once per minute and gets
+/// every window again (window numbers change), a second death within the minute hands its windows back here;
+/// a store icon that arrives later goes to the running helper (`icon`); `onChange` tells the app delegate when
+/// the set of helper-shown and local app windows changes (menu-bar-only main app, `MenuBarHost`).
+///
+/// Limits: a helper that fails (no bundle, no check-in, hung, or died twice in a minute) hands its windows back
+/// to this process for the rest of the run; a new name takes effect at the next launch of that app. Main thread
+/// only, like the session controller.
 final class HelperManager: NSObject, RemotePresenter {
     static let shared = HelperManager()
-    /// Off by default until GA: the single-process model stays unchanged (docs/99 §12.2).
-    static let enabled = ProcessInfo.processInfo.environment["ICA_HELPER_APPS"] == "1"
+    /// The Settings switch "One Dock entry per app" (default on, D63), overridden both ways by ICA_HELPER_APPS=0/1;
+    /// read once at launch, so a change applies at the next start of ICA Viewer (docs/99 §12.2).
+    /// Automated runs (self test, hold, launch, probe, screenshot, capture, demo) keep one process unless
+    /// ICA_HELPER_APPS=1 asks for helpers: their tools expect the main app's windows and activation.
+    static let automated = HelperAppsSwitch.isAutomated(ProcessInfo.processInfo.environment)
+    static let setting = HelperAppsSwitch.resolve(environment: ProcessInfo.processInfo.environment[HelperAppsSwitch.environmentVariable],
+                                                  stored: UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool,
+                                                  automated: automated)
+    static let enabled = !Demo.enabled && setting.enabled
     /// From the first window to the helper's check-in: bundle generation (copy, re-sign) + LaunchServices.
     static let checkInTimeout: TimeInterval = 5
     /// After an app's last window: splash-then-main-window apps would make the Dock tile flicker.
@@ -39,7 +52,10 @@ final class HelperManager: NSObject, RemotePresenter {
 
     private final class Helper {
         enum State { case preparing, launching, ready, failed }
+        /// The helper key: the TWI app key in slot 1, with the slot appended for further sessions (§12.4 phase 3).
         let key: String
+        let appKey: String
+        let slot: Int
         let label: HelperLabel
         let token = HelperLaunch.makeToken()
         /// The session whose surface the helper shows (phase 1: one per helper).
@@ -66,9 +82,22 @@ final class HelperManager: NSObject, RemotePresenter {
         var frameDrops = 0
         /// The window that last became key in the helper (activated again after a cancelled ICA menu prompt).
         var lastFocus: UInt32?
+        /// A relaunch after a crash: the old process, which must be gone before LaunchServices starts the new one.
+        var replacesPid: pid_t?
+        /// Started by `crashed`: counts as showing its windows until it checks in or fails (no Dock tile flash).
+        var relaunching = false
+        /// Relaunched once under a name learnt later (`identityChanged`): never again in this run.
+        var renamed = false
+        /// The crashed process it replaces, and one more launch if LaunchServices still answers with that one.
+        var relaunchedFrom: pid_t?
+        var launchRetries = 0
+        /// Hash of the icon PNG the helper shows (bundle icon at generation, or the last `icon` message).
+        var iconHash: String?
 
-        init(key: String, label: HelperLabel, controller: SessionController) {
+        init(key: String, appKey: String, slot: Int, label: HelperLabel, controller: SessionController) {
             self.key = key
+            self.appKey = appKey
+            self.slot = slot
             self.label = label
             self.controller = controller
         }
@@ -102,7 +131,8 @@ final class HelperManager: NSObject, RemotePresenter {
     /// `focus` and `resignedKey` of two helpers arrive on two ports, in no fixed order).
     private var keyHandle: UInt32?
     private var loggedNoTemplate = false
-    private var loggedOtherSession: Set<String> = []
+    private var relaunches = HelperRelaunchPolicy()
+    private var iconObserver: NSObjectProtocol?
     /// Bundle generation (copy, codesign) off the main thread, one at a time.
     private let bundleQueue = DispatchQueue(label: "ica.viewer.helper-bundles", qos: .userInitiated)
     /// The last pointer shape of each session, encoded for the helpers (sent again at a check-in).
@@ -111,23 +141,33 @@ final class HelperManager: NSObject, RemotePresenter {
     /// An ICA menu item of a helper (the helper has yielded activation to this process): the app delegate
     /// shows the window or asks; `cancelled` gives activation back to the helper (a prompt was cancelled).
     var onCommand: ((_ command: HelperCommand, _ controller: SessionController?, _ cancelled: @escaping () -> Void) -> Void)?
+    /// Helpers became ready or went, or windows moved between a helper and this process (phase 3: the app
+    /// delegate decides whether this process keeps its Dock tile).
+    var onChange: (() -> Void)?
 
     // MARK: Routing (SessionController)
 
+    /// The helper key of an app (TWI app key) in a session: the helper this session already has for it (also a
+    /// failed one, which keeps the app's windows here), else the smallest slot no other session's helper uses.
+    private func helperKey(appKey: String, controller: SessionController) -> String? {
+        guard HelperRouting.helperKey(appKey: appKey, isAppWindow: true) != nil else { return nil }
+        // The logon console (UsrLogon.cmd in cmd.exe), the logon UI and other system processes are no app of their
+        // own: their windows stay here, never in a helper named after anything (docs/99 §12.15).
+        if AppNaming.isSystemProcess(AppNaming.executableName(key: appKey, executablePath: nil)) { return nil }
+        if let own = helpers.values.first(where: { $0.appKey == appKey && $0.controller === controller }) { return own.key }
+        let taken = Set(helpers.values.filter { $0.appKey == appKey && $0.controller != nil }.map(\.slot))
+        return HelperSessionSlots.key(appKey: appKey, slot: HelperSessionSlots.freeSlot(taken: taken))
+    }
+
     /// A new RemoteWindow: if a helper is to show it, `presenter` is set before its first `show`.
     func claim(_ remote: RemoteWindow) {
+        defer { onChange?() }
         guard let controller = remote.controller else { return }
         guard remote.isApp else { return claimPopup(remote, controller) }
-        guard let key = HelperRouting.helperKey(appKey: remote.info.appKey, isAppWindow: true) else { return }
+        guard let key = helperKey(appKey: remote.info.appKey, controller: controller) else { return }
         let helper: Helper
-        if let existing = helpers[key] {
+        if let existing = helpers[key], existing.controller === controller {
             guard existing.state != .failed else { return }
-            guard existing.controller === controller else {
-                if loggedOtherSession.insert(key).inserted {
-                    vlog("helper apps: \(existing.logLabel) already runs for another session; this session's windows stay here")
-                }
-                return
-            }
             helper = existing
         } else {
             guard let created = start(key: key, remote: remote, controller: controller) else { return }
@@ -152,16 +192,19 @@ final class HelperManager: NSObject, RemotePresenter {
     }
 
     private func popupKey(_ remote: RemoteWindow, _ controller: SessionController?) -> String? {
-        let helper = helpers[remote.info.appKey]
-        let running = helper.map { $0.state == .ready && $0.controller === controller && !$0.quitting && hasWindows($0) } ?? false
-        return HelperRouting.popupHelperKey(appKey: remote.info.appKey, helperRunning: running)
+        let appKey = remote.info.appKey
+        let helper = controller.flatMap { c in helpers.values.first { $0.appKey == appKey && $0.controller === c } }
+        let running = helper.map { $0.state == .ready && !$0.quitting && hasWindows($0) } ?? false
+        guard let helper, HelperRouting.popupHelperKey(appKey: appKey, helperRunning: running) != nil else { return nil }
+        return helper.key
     }
 
     /// The window's app key changed after it was created (process info arrived later, e.g. `exe:` →
     /// `app:`): it moves into the helper of its new key; one whose new key has no helper (or whose helper
     /// cannot take it) is shown here.
     func appKeyChanged(_ w: RemoteWindow) {
-        let wanted = w.isApp ? HelperRouting.helperKey(appKey: w.info.appKey, isAppWindow: true) : popupKey(w, w.controller)
+        defer { onChange?() }
+        let wanted = w.isApp ? w.controller.flatMap { helperKey(appKey: w.info.appKey, controller: $0) } : popupKey(w, w.controller)
         let handle = handles.existing(for: ObjectIdentifier(w))
         let current = handle.flatMap { bindings[$0]?.helperKey }
         guard wanted != current else { return }
@@ -198,6 +241,53 @@ final class HelperManager: NSObject, RemotePresenter {
         return helpers.values.contains { $0.state == .ready && $0.pid == pid }
     }
 
+    /// At least one helper shows app windows (phase 3: then this process may go menu-bar only).
+    var hasReadyHelpers: Bool {
+        helpers.values.contains {
+            MenuBarPolicy.helperShowsWindows(ready: $0.state == .ready, quitting: $0.quitting,
+                                             relaunching: $0.relaunching && ($0.state == .preparing || $0.state == .launching),
+                                             hasWindows: hasWindows($0))
+        }
+    }
+
+    /// This process comes to the front (global shortcut, menu-bar item): a helper in front yields to it first
+    /// (cooperative activation), then `work` runs (shows the launcher, …).
+    func activateHost(_ work: @escaping () -> Void) {
+        guard helperIsFrontmost else {
+            NSApp.activate()
+            return work()
+        }
+        handOver(to: getpid(), work: work)
+    }
+
+    /// The menu-bar item chose a window: its helper becomes the active app (this process, active for the menu,
+    /// yields to it), or this process shows it.
+    func activate(_ w: RemoteWindow) {
+        if let (handle, helper) = lookup(w) {
+            // Not checked in yet: activated right after the check-in (its hidden window here never shows).
+            guard helper.state == .ready else { return helper.pendingActivation = handle }
+            // The menu click is this process's: it becomes active first, then the usual handover (this process
+            // yields, or a helper still in front yields), so the target helper may activate.
+            NSApp.activate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak helper] in
+                guard let self, let helper, helper.state == .ready, self.bindings[handle] != nil else { return }
+                let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                let ours = Set(self.helpers.values.filter { $0.state == .ready }.map(\.pid))
+                if ActivationHandover.plan(frontmost: front, host: getpid(), helpers: ours, target: helper.pid) != nil {
+                    return self.requestActivation(handle)
+                }
+                // This process was not let in front: yield anyway and let the helper ask.
+                if let app = NSRunningApplication(processIdentifier: helper.pid) { NSApp.yieldActivation(to: app) }
+                self.send(helper, .activate(windowId: handle))
+            }
+            return
+        }
+        guard w.presenter == nil else { return }
+        NSApp.activate()
+        if w.window.isMiniaturized { w.window.deminiaturize(nil) }
+        w.window.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: RemotePresenter
 
     func present(_ w: RemoteWindow, activate: Bool) {
@@ -223,6 +313,7 @@ final class HelperManager: NSObject, RemotePresenter {
         if helper.pendingActivation == handle { helper.pendingActivation = nil }
         if helper.state == .ready { send(helper, .windowRemoved(id: handle)) }
         if !hasWindows(helper) { scheduleQuit(helper, immediately: helper.controller?.ended ?? true) }
+        onChange?()
     }
 
     // MARK: Frames and surface (SessionController)
@@ -374,6 +465,9 @@ final class HelperManager: NSObject, RemotePresenter {
             helper.quitWork?.cancel()
             quit(helper)
         }
+        // A failed helper only kept this session's windows here: its slot is free for the next session.
+        for (key, helper) in helpers where helper.controller === controller && helper.state == .failed { helpers[key] = nil }
+        onChange?()
     }
 
     /// The main process quits.
@@ -390,18 +484,79 @@ final class HelperManager: NSObject, RemotePresenter {
             return nil
         }
         guard startBroker() else { return nil }
+        let slot = Self.slot(of: key, appKey: remote.info.appKey)
+        let (name, icon) = identity(remote, controller, appKey: remote.info.appKey, slot: slot)
+        let label = HelperLabel(key: key, name: name)
+        let helper = Helper(key: key, appKey: remote.info.appKey, slot: slot, label: label, controller: controller)
+        helpers[key] = helper
+        observeIcons()
+        prepare(helper, template: template, icon: icon)
+        return helper
+    }
+
+    /// Name and icon of an app's helper: `AppNaming` via the window's Dock source, the session slot, and never the
+    /// name of another app's helper (docs/99 §12.15: "Name (2)" for the later one).
+    private func identity(_ remote: RemoteWindow, _ controller: SessionController, appKey: String, slot: Int) -> (String, CGImage?) {
         let source = controller.dockSource(for: remote)
         let identity = source.map { DockIcon.shared.identity(for: $0) }
-        let name = displayName(identity?.name ?? source?.names.first ?? "Remote App")
-        let label = HelperLabel(key: key, name: name)
-        let helper = Helper(key: key, label: label, controller: controller)
-        helpers[key] = helper
-        loggedOtherSession.remove(key)
-        let icon = identity?.icon.flatMap { IconCanvas.render($0) }
+        let base = HelperSessionSlots.name(displayName(identity?.name ?? source?.names.first ?? "Remote App"), slot: slot)
+        let taken = Set(helpers.values.filter { $0.appKey != appKey && $0.controller != nil && $0.state != .failed }.map(\.label.name))
+        let name = AppNaming.unique(base, taken: taken)
+        if name != base { vlog("helper apps: \(logName(base)) is taken by another app; this one is \(logName(name))") }
+        return (name, identity?.icon.flatMap { IconCanvas.render($0) })
+    }
+
+    /// The session learnt which resource an app is after its helper was prepared (a launch mapping): the icon goes to
+    /// the running helper at once; a new name needs a new bundle, so a checked-in helper is relaunched once under it
+    /// (its windows move over as after a crash). A helper still starting keeps its name until its next launch.
+    func identityChanged(_ controller: SessionController, appKey: String) {
+        guard let helper = helpers.values.first(where: { $0.appKey == appKey && $0.controller === controller }),
+              helper.state != .failed, !helper.quitting,
+              let remote = bindings.values.lazy.compactMap({ b -> RemoteWindow? in
+                  b.helperKey == helper.key && b.remote?.isApp == true ? b.remote : nil
+              }).first else { return }
+        let (name, icon) = identity(remote, controller, appKey: appKey, slot: helper.slot)
+        guard name != helper.label.name else { return refreshIcon(helper) }
+        guard helper.state == .ready, !helper.renamed, let template = Self.templateURL() else {
+            refreshIcon(helper)
+            return vlog("helper apps: \(helper.logLabel) is \(logName(name)); the name follows at its next launch")
+        }
+        vlog("helper apps: \(helper.logLabel) is \(logName(name)); relaunching it once under that name")
+        let next = Helper(key: helper.key, appKey: appKey, slot: helper.slot, label: HelperLabel(key: helper.key, name: name), controller: controller)
+        next.relaunching = true
+        next.renamed = true
+        if let focus = helper.lastFocus, bindings[focus]?.isKey == true { next.pendingActivation = focus }
+        next.lastFocus = helper.lastFocus
+        for (handle, b) in bindings where b.helperKey == helper.key {
+            bindings[handle]?.sent = nil
+            bindings[handle]?.isKey = false
+        }
+        if let key = keyHandle, bindings[key]?.helperKey == helper.key {
+            keyHandle = nil
+            controller.keyboard.releaseAll()
+        }
+        // The old instance quits; LaunchServices starts the new bundle once it is gone (`exiting`, `waitingLaunch`).
+        helper.quitWork?.cancel()
+        helper.quitting = true
+        exiting[helper.key] = helper
+        send(helper, .quit)
+        helpers[helper.key] = next
+        prepare(next, template: template, icon: icon)
+        onChange?()
+    }
+
+    private static func slot(of key: String, appKey: String) -> Int {
+        (1...64).first { HelperSessionSlots.key(appKey: appKey, slot: $0) == key } ?? 1
+    }
+
+    /// Bundle generation off the main thread, then the launch; the check-in timeout starts here.
+    private func prepare(_ helper: Helper, template: URL, icon: CGImage?) {
         let env = ProcessInfo.processInfo.environment
         let generator = HelperBundleGenerator(template: template, appsDirectory: HelperBundleGenerator.defaultAppsDirectory,
                                               signIdentity: env["ICA_HELPER_SIGN_IDENTITY"] ?? "-")
-        vlog("helper apps: preparing \(helper.logLabel) (\(icon == nil ? "generic" : "app") icon)")
+        let label = helper.label
+        helper.iconHash = icon.flatMap(Self.png).map(HelperBundle.hash)
+        vlog("helper apps: preparing \(helper.logLabel) (\(icon == nil ? "generic" : "app") icon\(helper.slot > 1 ? ", session slot \(helper.slot)" : ""))")
         bundleQueue.async { [weak self] in
             let result = Result { () throws -> Generated in
                 let (url, outcome) = try generator.generate(label, icon: icon)
@@ -414,10 +569,12 @@ final class HelperManager: NSObject, RemotePresenter {
             guard let self, let helper, helper.state == .preparing || helper.state == .launching else { return }
             self.fail(helper, "no check-in within \(Int(Self.checkInTimeout)) s")
         }
-        return helper
     }
 
-    /// Template helper: ICA_HELPER_TEMPLATE, else inside this app (release, phase 3), else the
+    /// A template was found at launch (without one, helpers never start and the menu-bar item is not needed).
+    static let hasTemplate = templateURL() != nil
+
+    /// Template helper: ICA_HELPER_TEMPLATE, else inside this app (scripts/bundle.sh, phase 3), else the
     /// development build of scripts/bundle-helper.sh.
     static func templateURL() -> URL? {
         var candidates: [URL] = []
@@ -449,6 +606,10 @@ final class HelperManager: NSObject, RemotePresenter {
             waitingLaunch[helper.key] = (helper, url)      // launched once the old instance is gone
             return
         }
+        if let old = helper.replacesPid {
+            helper.replacesPid = nil
+            if kill(old, 0) == 0 { return launchAfterExit(of: old, helper, url) }
+        }
         // The bundle must still be the code we generated (nothing swapped or edited it since).
         guard let cdhash = CodeIdentity.cdhash(bundle: url), cdhash == helper.cdhash else {
             return fail(helper, "bundle changed since it was generated")
@@ -466,6 +627,17 @@ final class HelperManager: NSObject, RemotePresenter {
             let text = error?.localizedDescription
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // A relaunch: LaunchServices may still hold the crashed instance and answer with it (or fail on
+                // it). Launch once more shortly instead of taking that for a second death.
+                if let old = helper.relaunchedFrom, helper.state == .launching, text != nil || pid == old, helper.launchRetries > 0 {
+                    helper.launchRetries -= 1
+                    vlog("helper apps: \(helper.logLabel): LaunchServices still answered with the crashed instance; launching again")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        guard let self, helper.state == .launching else { return }
+                        self.launch(helper, url)
+                    }
+                    return
+                }
                 if let text, helper.state == .launching {
                     return self.fail(helper, "launch failed: " + text.replacingOccurrences(of: helper.label.name, with: helper.logLabel))
                 }
@@ -475,6 +647,24 @@ final class HelperManager: NSObject, RemotePresenter {
                 }
             }
         }
+    }
+
+    /// A relaunch while the crashed process is still being torn down: LaunchServices would hand the launch to
+    /// it. Launch when it has exited (at most 1 s; the check-in timeout still applies).
+    private func launchAfterExit(of pid: pid_t, _ helper: Helper, _ url: URL) {
+        var done = false
+        let watch = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+        let go: () -> Void = { [weak self, weak helper] in
+            guard !done else { return }
+            done = true
+            watch.cancel()
+            guard let self, let helper, helper.state == .launching else { return }
+            self.launch(helper, url)
+        }
+        watch.setEventHandler(handler: go)
+        watch.resume()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: go)
+        if kill(pid, 0) != 0 { go() }       // exited before the watch was armed
     }
 
     private func startBroker() -> Bool {
@@ -546,6 +736,7 @@ final class HelperManager: NSObject, RemotePresenter {
                                   disposition: mach_msg_type_name_t(MACH_MSG_TYPE_MAKE_SEND))
         noteSend(helper, kr, frame: false)
         guard helper.state == .ready else { return }
+        sendLauncherShortcut(helper)
         sendSurface(helper)
         if let controller = helper.controller, let cursor = cursor(for: controller) { send(helper, .cursor(cursor)) }
         for (handle, binding) in bindings.sorted(by: { $0.key < $1.key })
@@ -556,7 +747,9 @@ final class HelperManager: NSObject, RemotePresenter {
             helper.pendingActivation = nil
             requestActivation(pending)
         }
+        refreshIcon(helper)         // a store icon that arrived during the generation
         if !hasWindows(helper) { scheduleQuit(helper, immediately: helper.controller?.ended ?? true) }
+        onChange?()
     }
 
     /// The check-in must come from the process LaunchServices started for this helper, running the code
@@ -729,14 +922,60 @@ final class HelperManager: NSObject, RemotePresenter {
             return
         }
         guard helper.state == .ready else { return }
-        fail(helper, reason)
+        crashed(helper, reason)
     }
 
-    /// The helper is unusable (no bundle, no launch, no check-in, crash): its windows come back here for
-    /// the rest of the run (relaunching once is phase 3).
+    /// The helper died on its own (crash, kill; not told to quit, not hung): launched again with the same
+    /// bundle, and every window it showed goes to the new process (window numbers change, accepted after a
+    /// crash). Once per minute and helper key; a second death within the minute → this process (§12.14).
+    private func crashed(_ helper: Helper, _ reason: String) {
+        guard let controller = helper.controller, !controller.ended, hasWindows(helper),
+              relaunches.shouldRelaunch(helper.key, at: Date()), let template = Self.templateURL() else {
+            return fail(helper, reason)
+        }
+        vlog("helper apps: \(helper.logLabel): \(reason); launching it again (once per minute)")
+        let oldPid = helper.pid
+        helper.state = .failed      // the old object is done; its late messages and timers find it failed
+        helper.quitWork?.cancel()
+        helper.exitWatch?.cancel()
+        helper.exitWatch = nil
+        helper.receiver?.cancel()
+        helper.receiver = nil
+        MachChannel.deallocate(helper.port)
+        helper.port = mach_port_t(MACH_PORT_NULL)
+        let next = Helper(key: helper.key, appKey: helper.appKey, slot: helper.slot, label: helper.label, controller: controller)
+        next.replacesPid = oldPid
+        next.relaunching = true
+        next.relaunchedFrom = oldPid
+        next.launchRetries = 1
+        next.lastFocus = helper.lastFocus
+        if let focus = helper.lastFocus, bindings[focus]?.isKey == true, keyHandle == focus {
+            // It had the keys: release them (no resignedKey will come) and give the focus back after the check-in.
+            keyHandle = nil
+            controller.keyboard.releaseAll()
+            next.pendingActivation = focus
+        }
+        for (handle, b) in bindings where b.helperKey == helper.key {
+            bindings[handle]?.sent = nil
+            bindings[handle]?.isKey = false
+        }
+        helpers[helper.key] = next
+        let source = bindings.values.lazy.compactMap { b -> RemoteWindow? in
+            guard b.helperKey == helper.key, let w = b.remote, w.isApp else { return nil }
+            return w
+        }.first.flatMap { controller.dockSource(for: $0) }
+        let icon = source.flatMap { DockIcon.shared.identity(for: $0).icon }.flatMap { IconCanvas.render($0) }
+        prepare(next, template: template, icon: icon)
+        onChange?()
+    }
+
+    /// The helper is unusable (no bundle, no launch, no check-in, hung, a second crash within a minute): its
+    /// windows come back here for the rest of the run.
     private func fail(_ helper: Helper, _ reason: String) {
         guard helper.state != .failed else { return }
-        vlog("helper apps: \(helper.logLabel): \(reason); its windows stay in this process")
+        defer { onChange?() }
+        let after = helper.relaunching && helper.state != .ready ? "relaunch after a crash failed: " : ""
+        vlog("helper apps: \(helper.logLabel): \(after)\(reason); its windows stay in this process")
         if helper.state == .ready, helper.port != MACH_PORT_NULL { MachChannel.send(HostMessage.quit, to: helper.port, timeoutMs: 0) }
         helper.state = .failed
         helper.exitWatch?.cancel()
@@ -768,6 +1007,7 @@ final class HelperManager: NSObject, RemotePresenter {
 
     private func quit(_ helper: Helper) {
         guard !helper.quitting else { return }
+        defer { onChange?() }
         if helpers[helper.key] === helper { helpers[helper.key] = nil }
         switch helper.state {
         case .ready:
@@ -781,6 +1021,54 @@ final class HelperManager: NSObject, RemotePresenter {
         case .failed:
             break
         }
+    }
+
+    // MARK: Launcher shortcut (phase 3)
+
+    /// Settings chose another global shortcut (or none): every helper's ICA menu shows it.
+    func launcherShortcutChanged() {
+        for helper in helpers.values where helper.state == .ready { sendLauncherShortcut(helper) }
+    }
+
+    private func sendLauncherShortcut(_ helper: Helper) {
+        send(helper, .launcherShortcut(raw: GlobalHotKey.stored.raw))
+    }
+
+    // MARK: Icon updates (phase 3, §12.15)
+
+    private func observeIcons() {
+        guard iconObserver == nil else { return }
+        iconObserver = NotificationCenter.default.addObserver(forName: .storeIconsChanged, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            for helper in self.helpers.values where helper.state == .ready { self.refreshIcon(helper) }
+        }
+    }
+
+    /// The app's icon now (store icon unless the TWI icon is larger, as at generation): sent to the running
+    /// helper when it differs from what it shows, as PNG halved until the message fits the channel.
+    private func refreshIcon(_ helper: Helper) {
+        guard helper.state == .ready, let controller = helper.controller,
+              let remote = bindings.values.lazy.compactMap({ b -> RemoteWindow? in
+                  b.helperKey == helper.key && b.remote?.isApp == true ? b.remote : nil
+              }).first,
+              let source = controller.dockSource(for: remote),
+              let image = DockIcon.shared.identity(for: source).icon.flatMap({ IconCanvas.render($0) }),
+              let full = Self.png(image) else { return }
+        let hash = HelperBundle.hash(full)
+        guard hash != helper.iconHash else { return }
+        var bitmap: CGImage? = image
+        var png: Data? = full
+        for _ in 0..<4 {
+            guard let data = png else { break }
+            if let size = try? WireCoding.encode(HostMessage.icon(png: data)).count, size <= MachChannel.maxPayload {
+                helper.iconHash = hash
+                vlog("helper apps: \(helper.logLabel): icon updated (\(bitmap?.width ?? 0) px)")
+                return send(helper, .icon(png: data))
+            }
+            bitmap = bitmap.flatMap(Self.halved)
+            png = bitmap.flatMap(Self.png)
+        }
+        helper.iconHash = hash      // too large even at 64 px (512 halved three times): keep the bundle's icon, no retry
     }
 
     // MARK: Messages

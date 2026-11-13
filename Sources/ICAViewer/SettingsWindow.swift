@@ -1,3 +1,4 @@
+import AppHostKit
 import AppKit
 import ICAKit
 
@@ -10,6 +11,9 @@ import ICAKit
 /// default on; the volume follows macOS; the microphone, default off per §10.4, opens only while the host records) and
 /// the camera (docs/98b §10.5: default off; opens only between the host's PLAY and STOP; which camera, by unique id,
 /// "Automatic" = the system default; listing the devices never opens one or asks for permission).
+/// Dock apps (docs/99 §12.2, D63): "One Dock entry per app" (default on; applies at the next start of ICA Viewer;
+/// ICA_HELPER_APPS=0/1 overrides it) and the launcher's global shortcut (⌃⌥⌘L, two other letters, or off;
+/// applies at once).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -42,6 +46,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let cameraAutomatic = Text(en: "Automatic (system default)", de: "Automatisch (Systemstandard)")
     static let cameraHint = Text(en: "Only while a session app uses it; 32-bit apps only.",
                                  de: "Nur während eine Sitzungs-App sie nutzt; nur 32-Bit-Apps.")
+    static let dockTitle = Text(en: "One Dock entry per app", de: "Ein Dock-Eintrag pro App")
+    static let dockHint = Text(en: "Each remote app gets its own Dock icon and Cmd-Tab entry; ICA Viewer then waits in the menu bar. Applies the next time ICA Viewer starts.",
+                               de: "Jede Remote-App erhält ein eigenes Dock-Symbol und einen eigenen Cmd-Tab-Eintrag; ICA Viewer wartet dann in der Menüleiste. Gilt ab dem nächsten Start von ICA Viewer.")
+    static let dockOverride = Text(en: "ICA_HELPER_APPS overrides this setting in this run.",
+                                   de: "ICA_HELPER_APPS hat in diesem Lauf Vorrang vor dieser Einstellung.")
+    static let shortcutOff = Text(en: "Off", de: "Aus")
+    static let shortcutHint = Text(en: "Global shortcut: opens the launcher from any app.",
+                                   de: "Globaler Kurzbefehl: öffnet den Launcher aus jeder App.")
+    static let shortcutTaken = Text(en: "Another app already uses this shortcut; choose another one.",
+                                    de: "Eine andere App nutzt diesen Kurzbefehl bereits; bitte einen anderen wählen.")
     /// Row labels (column 0), in grid order.
     static let rowLabels: [String: Text] = [
         "gateway": Text(en: "Gateway:", de: "Gateway:"), "user": Text(en: "User name:", de: "Benutzername:"),
@@ -50,6 +64,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         "windows": Text(en: "Windows scaling:", de: "Windows-Skalierung:"), "client": Text(en: "Client scaling:", de: "Client-Skalierung:"),
         "share": Text(en: "Shared folder:", de: "Freigabe:"), "print": Text(en: "Printing:", de: "Drucken:"),
         "audio": Text(en: "Audio:", de: "Audio:"), "camera": Text(en: "Camera:", de: "Kamera:"),
+        "dock": Text(en: "Dock:", de: "Dock:"), "shortcut": Text(en: "Launcher:", de: "Launcher:"),
     ]
 
     private let protectBox = NSButton(checkboxWithTitle: T.protectTitle.shown, target: nil, action: nil)
@@ -80,6 +95,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let micBox = NSButton(checkboxWithTitle: T.micTitle.shown, target: nil, action: nil)
     private let cameraBox = NSButton(checkboxWithTitle: T.cameraTitle.shown, target: nil, action: nil)
     private let cameraPopup = NSPopUpButton()
+    private let dockBox = NSButton(checkboxWithTitle: T.dockTitle.shown, target: nil, action: nil)
+    private let dockHint = NSTextField(wrappingLabelWithString: "")
+    private let shortcutPopup = NSPopUpButton()
+    private let shortcutHint = NSTextField(wrappingLabelWithString: "")
     /// One per popup item: nil = automatic, else the device (possibly a stored one that is not connected).
     private var cameraChoices: [CameraDevices.Device?] = [nil]
     private let cameraAccessNote = NSTextField(wrappingLabelWithString: "")
@@ -194,6 +213,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         (cameraPopup.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
         printActionPopup.addItems(withTitles: [loc("Show the print dialog first", "Zuerst den Druckdialog zeigen"),
                                                loc("Open in Preview first", "Zuerst in Vorschau öffnen")])
+        for choice in LauncherHotKey.choices { shortcutPopup.addItem(withTitle: choice.shortcut == nil ? T.shortcutOff.shown : choice.title) }
         folderPath.lineBreakMode = .byTruncatingMiddle
         folderPath.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
         status.textColor = .secondaryLabelColor
@@ -204,7 +224,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             l.alignment = .right
             return l
         }
-        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup])
+        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup, shortcutPopup])
         func hint(_ text: Text) -> NSTextField {
             let l = NSTextField(wrappingLabelWithString: text.shown)
             l.textColor = .secondaryLabelColor
@@ -215,6 +235,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         cameraAccessNote.textColor = .secondaryLabelColor
         cameraAccessNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         cameraAccessNote.preferredMaxLayoutWidth = widths.column1
+        for note in [dockHint, shortcutHint] {
+            note.textColor = .secondaryLabelColor
+            note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            note.preferredMaxLayoutWidth = widths.column1
+            note.maximumNumberOfLines = 0
+            note.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
         cameraPopup.widthAnchor.constraint(lessThanOrEqualToConstant: widths.column1).isActive = true
         scalingNote.preferredMaxLayoutWidth = widths.column1
         scalingNote.widthAnchor.constraint(equalToConstant: widths.column1).isActive = true
@@ -252,6 +279,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, cameraPopup],
             [NSGridCell.emptyContentView, hint(T.cameraHint)],
             [NSGridCell.emptyContentView, cameraAccessNote],
+            [label("dock"), dockBox],
+            [NSGridCell.emptyContentView, dockHint],
+            [label("shortcut"), shortcutPopup],
+            [NSGridCell.emptyContentView, shortcutHint],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 8
@@ -273,6 +304,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 24).topPadding = 0
         grid.row(at: 25).topPadding = 0
         grid.row(at: 25).isHidden = true   // shown only when the camera list needs an access hint
+        grid.row(at: 26).topPadding = 12
+        grid.row(at: 27).topPadding = 0
+        grid.row(at: 28).topPadding = 12
+        grid.row(at: 29).topPadding = 0
         cameraGrid = grid
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
@@ -306,7 +341,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// popup (at least 360 pt), each measured in English and German. Logged in demo mode.
     static func columnWidths(popups: [NSPopUpButton]) -> (column0: CGFloat, column1: CGFloat) {
         let labels = rowLabels.values.flatMap(\.both).map { ($0, NSTextField(labelWithString: $0).fittingSize.width) }
-        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle].flatMap(\.both)
+        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle, dockTitle].flatMap(\.both)
             .map { ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil).fittingSize.width) }
         let radios = [promptTitle, totpTitle].flatMap(\.both)
             .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
@@ -346,6 +381,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         digitsPopup.selectItem(withTitle: "6")
         periodField.stringValue = "30"
         algorithmPopup.selectItem(withTitle: "SHA1")
+        selectDockApps()
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
         selectScaling(ScalingSettings())
@@ -453,6 +489,31 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         guard settings != WebcamSettings.load(env: [:]) else { return }
         settings.save()
         vlog("webcam: saved (\(settings.enabled ? "on" : "off"), \(choice.map { "camera \"\($0.name)\"" } ?? "automatic camera")); applies at the next connect")
+    }
+
+    // MARK: Dock apps (docs/99 §12.2, §12.13)
+
+    private func selectDockApps() {
+        let stored = demo ? nil : UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
+        dockBox.state = (stored ?? HelperAppsSwitch.defaultOn) ? .on : .off
+        let overridden = !demo && HelperManager.setting.source == .environment
+        dockHint.stringValue = T.dockHint.shown + (overridden ? " " + T.dockOverride.shown : "")
+        let hotKey = demo ? LauncherHotKey.standard : GlobalHotKey.stored
+        shortcutPopup.selectItem(at: LauncherHotKey.choices.firstIndex(of: hotKey) ?? 0)
+        let taken = !demo && GlobalHotKey.shared.state == .taken
+        shortcutHint.stringValue = T.shortcutHint.shown + (taken ? " " + T.shortcutTaken.shown : "")
+    }
+
+    private func saveDockApps() {
+        let on = dockBox.state == .on
+        let stored = UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
+        if (stored ?? HelperAppsSwitch.defaultOn) != on {
+            UserDefaults.standard.set(on, forKey: HelperAppsSwitch.defaultsKey)
+            vlog("helper apps: saved \(on ? "on" : "off"); applies at the next start of ICA Viewer")
+        }
+        let index = shortcutPopup.indexOfSelectedItem
+        guard LauncherHotKey.choices.indices.contains(index) else { return }
+        GlobalHotKey.shared.change(to: LauncherHotKey.choices[index])
     }
 
     // MARK: Camera choice (docs/98b §10.5)
@@ -605,6 +666,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let webcam = WebcamSettings.load(env: [:])
         cameraBox.state = webcam.enabled ? .on : .off
         selectCamera(webcam, devices: CameraDevices.list())
+        selectDockApps()
         status.stringValue = loc("Secrets are stored only in the Keychain (this Mac, no iCloud). ",
                                  "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud). ")
             + (service.usesEnvCredentials ? loc("Note: .env credentials override these settings.",
@@ -735,6 +797,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                 savePrinting()
                 saveAudio()
                 saveCamera()
+                saveDockApps()
                 saveScaling()
             } catch CredentialError.invalidTOTPSecret {
                 status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",

@@ -158,6 +158,12 @@ public enum HostMessage: Codable, Equatable, Sendable {
     /// Phase 2: the local move/resize the helper reported with `gestureEnded` is settled (the host confirmed
     /// it and presented a covering frame, refused it, or 500 ms passed): show the live crop again (D20).
     case gestureDone(windowId: UInt32)
+    /// Phase 3: the app's icon changed (the store icon arrived after the bundle was generated): PNG for
+    /// `NSApp.applicationIconImage`, without a relaunch. The bundle on disk follows at the next launch.
+    case icon(png: Data)
+    /// Phase 3: the launcher shortcut the helper's ICA menu shows (`LauncherHotKey.raw`; "off" = none), sent after
+    /// `hello` and when Settings changes it.
+    case launcherShortcut(raw: String)
 }
 
 public enum MouseKind: String, Codable, Sendable { case down, up, dragged, moved }

@@ -61,6 +61,11 @@ if ProcessInfo.processInfo.environment["ICA_NO_DEVICE_ID"] != "1" {
 var args = Array(CommandLine.arguments.dropFirst())
 let command = args.isEmpty ? "help" : args.removeFirst()
 
+/// Native store mode (docs/15): `icactl native …`, or ICA_STORE_MODE=native for login and cliptest-files.
+/// It implies a native User-Agent for every gateway and store request unless ICA_GATEWAY_UA sets one.
+let nativeMode = command == "native" || ProcessInfo.processInfo.environment["ICA_STORE_MODE"] == "native"
+if nativeMode && http.userAgent == nil { http.userAgent = NativeStoreClient.defaultUserAgent }
+
 switch command {
 case "login":
     guard let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
@@ -80,8 +85,12 @@ case "login":
         return readLine()
     }
     do {
-        try await GatewayLogon(http: http, base: gateway).logon(
-            .init(username: username, password: password, passcode: passcode))
+        var logon = GatewayLogon(http: http, base: gateway)
+        // Native clients don't select the web client mode (docs/15 §1.1); ICA_SKIP_SETCLIENT=0 forces it.
+        if nativeMode && ProcessInfo.processInfo.environment["ICA_SKIP_SETCLIENT"] != "0" { logon.selectWebClient = false }
+        print("gateway logon: User-Agent \(http.userAgent == nil ? "system default" : "set")"
+            + ", setclient \(logon.selectWebClient ? "on" : "skipped")")
+        try await logon.logon(.init(username: username, password: password, passcode: passcode))
         try http.saveCookies(to: cookiePath)
         print("logged on; cookies: \(http.cookieNames.joined(separator: ", "))")
     } catch {
@@ -221,9 +230,22 @@ case "cliptest-files":
     // announces CTXGDT (ch 29, docs/76 §6) and hex-logs every host GDT write to .session/gdt/<run>.log.
     guard (args.first ?? "Explorer Citrix ABC") == "Explorer Citrix ABC" else { fail("cliptest-files is limited to \"Explorer Citrix ABC\"") }
     do {
-        let resources = try await storeClient().resources()
-        guard let resource = resources.first(where: { $0.name == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
-        guard let ica = ICAFile(text: try await storeClient().launchICA(resource)) else { fail("not an ICA file") }
+        let text: String
+        if ProcessInfo.processInfo.environment["ICA_STORE_MODE"] == "native" {
+            // Native store launch (docs/15 §7.4 T3); the ICA file is also kept as .session/last-native.ica.
+            let store = nativeStoreClient()
+            let resources = try await store.resources()
+            guard let resource = resources.first(where: { $0.title == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
+            text = try await store.launchICA(resource)
+            saveICA(text, as: "last-native.ica")
+            say("store mode native (protocol \(store.lastProtocol ?? "cached"), launcher \(store.launcher ?? "not sent"))")
+        } else {
+            let resources = try await storeClient().resources()
+            guard let resource = resources.first(where: { $0.name == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
+            text = try await storeClient().launchICA(resource)
+        }
+        say("User-Agent \(http.userAgent == nil ? "system default" : "set"); Launcher key \(ICAFile(text: text)?["Launcher"] ?? "absent")")
+        guard let ica = ICAFile(text: text) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         try await runClipFilesTest(ica: ica)
     } catch {
@@ -368,6 +390,56 @@ case "resources":
 case "cookies":
     print(http.cookieNames.joined(separator: "\n"))
 
+case "native":
+    // icactl native discover|list|launch <name>|keys — Store Services API through the gateway (docs/15).
+    // Needs a gateway logon with the same User-Agent (ICA_STORE_MODE=native icactl login). Never prints tokens.
+    let sub = args.isEmpty ? "discover" : args.removeFirst()
+    let store = nativeStoreClient()
+    do {
+        switch sub {
+        case "discover":
+            let urls = try await store.discover()
+            print("store \(store.storePath ?? "?")  (User-Agent \(http.userAgent == nil ? "system default" : "set"))")
+            print("discovery URLs (paths):")
+            urls.forEach { print("  \($0.path)") }
+            print("endpoints (\(store.endpoints.count)):")
+            store.endpoints.sorted { $0.key < $1.key }.forEach { print("  \($0.key)  \($0.value.path)") }
+            print("auth: protocol \(store.lastProtocol ?? "none needed"); offered \(store.offeredProtocols.joined(separator: ", "))")
+        case "list":
+            let resources = try await store.resources()
+            for resource in resources.sorted(by: { $0.title < $1.title }) {
+                print(resource.title + (resource.enabled ? "" : " (disabled)")
+                    + (resource.clientTypes.isEmpty ? "" : " [\(resource.clientTypes.joined(separator: ","))]"))
+            }
+            print("\(resources.count) resources; auth protocol \(store.lastProtocol ?? "?")")
+        case "launch":
+            // Saves .session/last-native.ica (0600) without connecting, like `icactl launch` (D3c).
+            guard let name = args.first else { fail("usage: icactl native launch <resource name>") }
+            let resources = try await store.resources()
+            guard let resource = resources.first(where: { $0.title == name })
+                ?? resources.first(where: { $0.title.localizedCaseInsensitiveContains(name) }) else { fail("no resource named \(name)") }
+            let text = try await store.launchICA(resource)
+            saveICA(text, as: "last-native.ica")
+            print("saved .session/last-native.ica for \(resource.title)")
+            print(ICAFile(text: text)?.redactedDescription ?? "(not an ICA file)")
+        case "keys":
+            // Offline: key names of the last web (.session/last.ica) and native (.session/last-native.ica) files.
+            func load(_ file: String) -> ICAFile {
+                let path = sessionDir.appendingPathComponent(file).path
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8), let ica = ICAFile(text: text) else {
+                    fail("no ICA file at .session/\(file)")
+                }
+                return ica
+            }
+            ICAKeyDiff.lines(web: load("last.ica"), native: load("last-native.ica")).forEach { print($0) }
+        default:
+            fail("usage: icactl native discover|list|launch <name>|keys")
+        }
+        try http.saveCookies(to: cookiePath)
+    } catch {
+        fail("\(error)")
+    }
+
 default:
     print("""
     usage:
@@ -385,6 +457,14 @@ default:
                                          ICA_GDT_VDDATA=<hex>, ICA_WD_HT=1, ICA_CLIP_REPLY_WORD2/_TAIL, ICA_CTXCTL=1,
                                          ICA_CTL_ACCEPT=09[,..], ICA_GDT_CDM=1, ICA_STUB_VCS=NAME[:l-h],..,
                                          ICA_STOCK_VCS=1; docs/76 §6-7)
+                                         (ICA_STORE_MODE=native: launch through the native store API, docs/15)
+      icactl native discover|list        native Store Services API through the gateway (docs/15); log on first with
+                                         ICA_STORE_MODE=native icactl login (native User-Agent, no setclient)
+      icactl native launch <name>        native launch, saves .session/last-native.ica (no connect)
+      icactl native keys                 offline key-name diff .session/last.ica (web) vs last-native.ica
+                                         ICA_NATIVE_STORE=/Citrix/<Store>/, ICA_NATIVE_LAUNCHER=<s> (launcher param)
+    ICA_GATEWAY_UA=<string>              User-Agent for all gateway and store requests of the run
+    ICA_SKIP_SETCLIENT=1                 login: skip /cgi/setclient?wica (=0 forces it in native mode)
       icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
@@ -1520,6 +1600,25 @@ func runClipFilesTest(ica: ICAFile) async throws {
 }
 
 // MARK: - Sessions command (docs/90)
+
+/// Native store client (docs/15 §7.2): our own device id in .session/native-device-id, the WD client name,
+/// store path from ICA_NATIVE_STORE or CITRIX_STORE_PATH (else found via /Citrix/Roaming/Accounts),
+/// optional `launcher` launch parameter from ICA_NATIVE_LAUNCHER (T4 bisection).
+func nativeStoreClient() -> NativeStoreClient {
+    let environment = ProcessInfo.processInfo.environment
+    let store = NativeStoreClient(
+        http: http, gateway: gateway, clientName: SessionDirectory.defaultClientName,
+        deviceId: NativeDeviceId.loadOrCreate(path: sessionDir.appendingPathComponent("native-device-id").path),
+        storePath: environment["ICA_NATIVE_STORE"].flatMap { $0.isEmpty ? nil : $0 } ?? env["CITRIX_STORE_PATH"])
+    store.launcher = environment["ICA_NATIVE_LAUNCHER"].flatMap { $0.isEmpty ? nil : $0 }
+    return store
+}
+
+/// Writes an ICA file into .session/ with 0600.
+func saveICA(_ text: String, as name: String) {
+    let path = sessionDir.appendingPathComponent(name).path
+    FileManager.default.createFile(atPath: path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
+}
 
 func storeClient() -> StoreClient { StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL) }
 
