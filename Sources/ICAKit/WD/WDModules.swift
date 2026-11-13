@@ -562,11 +562,14 @@ public struct WDModuleOverride: Equatable, Sendable {
     public var name: String?
     public var versionLow: UInt8?
     public var versionHigh: UInt8?
+    /// Host module name (offset 19, 8 bytes zero padded + NUL); "" clears it.
+    public var hostName: String?
 
-    public init(name: String? = nil, versionLow: UInt8? = nil, versionHigh: UInt8? = nil) {
+    public init(name: String? = nil, versionLow: UInt8? = nil, versionHigh: UInt8? = nil, hostName: String? = nil) {
         self.name = name
         self.versionLow = versionLow
         self.versionHigh = versionHigh
+        self.hostName = hostName
     }
 
     /// The key for a VC name: without trailing spaces / NULs, upper case ("CTXGDT\0" → "CTXGDT").
@@ -574,8 +577,9 @@ public struct WDModuleOverride: Equatable, Sendable {
         vcName.trimmingCharacters(in: CharacterSet(charactersIn: " \0")).uppercased()
     }
 
-    /// `ICA_MODNAME_<VC>=Name` and `ICA_MODVER_<VC>=A-B` (VC as `key`, e.g. CTXGDT). Malformed versions and names
-    /// that are not printable ASCII are reported in `errors` and skipped.
+    /// `ICA_MODNAME_<VC>=Name`, `ICA_MODVER_<VC>=A-B` and `ICA_MODHOST_<VC>=Host` (VC as `key`, e.g. CTXGDT, or one
+    /// of the module names WD, TD, PDRFRAME, PDCRYPT1, UI). Malformed versions and names that are not printable ASCII
+    /// are reported in `errors` and skipped. `ICA_MODHOST_<VC>=-` clears the host name.
     public static func fromEnvironment(_ env: [String: String]) -> (overrides: [String: WDModuleOverride], errors: [String]) {
         var out: [String: WDModuleOverride] = [:]
         var errors: [String] = []
@@ -586,6 +590,12 @@ public struct WDModuleOverride: Equatable, Sendable {
                     errors.append("\(key): name must be printable ASCII"); continue
                 }
                 out[vc, default: WDModuleOverride()].name = value
+            } else if key.hasPrefix("ICA_MODHOST_") {
+                let vc = Self.key(String(key.dropFirst("ICA_MODHOST_".count)))
+                guard !vc.isEmpty, value.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }) else {
+                    errors.append("\(key): host name must be printable ASCII"); continue
+                }
+                out[vc, default: WDModuleOverride()].hostName = value == "-" ? "" : value
             } else if key.hasPrefix("ICA_MODVER_") {
                 let vc = Self.key(String(key.dropFirst("ICA_MODVER_".count)))
                 let parts = value.split(separator: "-").map { UInt8($0.trimmingCharacters(in: .whitespaces)) }
@@ -608,6 +618,11 @@ public struct WDModuleOverride: Equatable, Sendable {
             var field = Array(name.utf8.prefix(12))
             field += [UInt8](repeating: 0, count: 13 - field.count)
             module.replaceSubrange(6..<19, with: field)
+        }
+        if let hostName {
+            var field = Array(hostName.utf8.prefix(8))
+            field += [UInt8](repeating: 0, count: 9 - field.count)
+            module.replaceSubrange(19..<28, with: field)
         }
     }
 }

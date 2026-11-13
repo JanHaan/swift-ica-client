@@ -1,6 +1,7 @@
 import AppHostKit
 import AppKit
 import ICAKit
+import ImageIO
 
 /// Per-app Dock identity, phase 1 (docs/99 §12): with ICA_HELPER_APPS=1 each remote app (TWI app key) gets
 /// its own generated helper app (AppHostKit) with its own Dock tile, Cmd-Tab entry, name and icon, and the
@@ -12,11 +13,14 @@ import ICAKit
 /// `HelperWindowSpec`. The helper renders the shared IOSurface with the same crop and sends raw input
 /// back; the mapping to session pixels and scancodes stays here (`KeyboardTranslator`, `ScalingLayout`).
 ///
-/// Phase 1 limits (§12.4): popups and menus stay in this process; no local caption drag or edge resize in
-/// helpers (the host moves and sizes); no cursor shapes in helpers; one session per helper (another
-/// session's windows of the same app stay here); a helper that fails or crashes hands its windows back to
-/// this process for the rest of the run; name and icon are fixed at launch; this process keeps its own
-/// Dock tile. Main thread only, like the session controller.
+/// Phase 2 (§12.4): popups, menus and tooltips of an app go to its helper once it runs; the helper runs D20
+/// caption drags and edge resizes locally and reports one `gestureEnded`, committed here through the same
+/// `TWILocalGesture` path; pointer shapes go to every helper of the session; each helper has a menu bar
+/// whose Edit, Zoom and ICA items act here (`onCommand`).
+///
+/// Limits: one session per helper (another session's windows of the same app stay here); a helper that
+/// fails or crashes hands its windows back to this process for the rest of the run; name and icon are fixed
+/// at launch; this process keeps its own Dock tile. Main thread only, like the session controller.
 final class HelperManager: NSObject, RemotePresenter {
     static let shared = HelperManager()
     /// Off by default until GA: the single-process model stays unchanged (docs/99 §12.2).
@@ -60,6 +64,8 @@ final class HelperManager: NSObject, RemotePresenter {
         /// Control messages that timed out in a row, and frames dropped in a row (the helper's queue is full).
         var timeouts = 0
         var frameDrops = 0
+        /// The window that last became key in the helper (activated again after a cancelled ICA menu prompt).
+        var lastFocus: UInt32?
 
         init(key: String, label: HelperLabel, controller: SessionController) {
             self.key = key
@@ -99,13 +105,20 @@ final class HelperManager: NSObject, RemotePresenter {
     private var loggedOtherSession: Set<String> = []
     /// Bundle generation (copy, codesign) off the main thread, one at a time.
     private let bundleQueue = DispatchQueue(label: "ica.viewer.helper-bundles", qos: .userInitiated)
+    /// The last pointer shape of each session, encoded for the helpers (sent again at a check-in).
+    private var cursors: [ObjectIdentifier: HelperCursor] = [:]
+    private var loggedLargeCursor = false
+    /// An ICA menu item of a helper (the helper has yielded activation to this process): the app delegate
+    /// shows the window or asks; `cancelled` gives activation back to the helper (a prompt was cancelled).
+    var onCommand: ((_ command: HelperCommand, _ controller: SessionController?, _ cancelled: @escaping () -> Void) -> Void)?
 
     // MARK: Routing (SessionController)
 
     /// A new RemoteWindow: if a helper is to show it, `presenter` is set before its first `show`.
     func claim(_ remote: RemoteWindow) {
-        guard let controller = remote.controller,
-              let key = HelperRouting.helperKey(appKey: remote.info.appKey, isAppWindow: remote.isApp) else { return }
+        guard let controller = remote.controller else { return }
+        guard remote.isApp else { return claimPopup(remote, controller) }
+        guard let key = HelperRouting.helperKey(appKey: remote.info.appKey, isAppWindow: true) else { return }
         let helper: Helper
         if let existing = helpers[key] {
             guard existing.state != .failed else { return }
@@ -128,11 +141,27 @@ final class HelperManager: NSObject, RemotePresenter {
         remote.presenter = self
     }
 
+    /// Phase 2: a popup, menu or tooltip is shown by its app's helper when that runs for this session and has
+    /// checked in; otherwise here, as before (a popup never starts a helper).
+    private func claimPopup(_ remote: RemoteWindow, _ controller: SessionController) {
+        guard let key = popupKey(remote, controller) else { return }
+        let handle = handles.handle(for: ObjectIdentifier(remote))
+        bindings[handle] = Binding(remote: remote, helperKey: key)
+        remote.window.isExcludedFromWindowsMenu = true
+        remote.presenter = self
+    }
+
+    private func popupKey(_ remote: RemoteWindow, _ controller: SessionController?) -> String? {
+        let helper = helpers[remote.info.appKey]
+        let running = helper.map { $0.state == .ready && $0.controller === controller && !$0.quitting && hasWindows($0) } ?? false
+        return HelperRouting.popupHelperKey(appKey: remote.info.appKey, helperRunning: running)
+    }
+
     /// The window's app key changed after it was created (process info arrived later, e.g. `exe:` →
     /// `app:`): it moves into the helper of its new key; one whose new key has no helper (or whose helper
     /// cannot take it) is shown here.
     func appKeyChanged(_ w: RemoteWindow) {
-        let wanted = HelperRouting.helperKey(appKey: w.info.appKey, isAppWindow: w.isApp)
+        let wanted = w.isApp ? HelperRouting.helperKey(appKey: w.info.appKey, isAppWindow: true) : popupKey(w, w.controller)
         let handle = handles.existing(for: ObjectIdentifier(w))
         let current = handle.flatMap { bindings[$0]?.helperKey }
         guard wanted != current else { return }
@@ -183,6 +212,11 @@ final class HelperManager: NSObject, RemotePresenter {
         sendSpec(handle, w, added: false)
     }
 
+    func gestureDone(_ w: RemoteWindow) {
+        guard let (handle, helper) = lookup(w), helper.state == .ready else { return }
+        send(helper, .gestureDone(windowId: handle))
+    }
+
     func dismiss(_ w: RemoteWindow) {
         guard let handle = handles.remove(ObjectIdentifier(w)), let binding = bindings.removeValue(forKey: handle),
               let helper = helpers[binding.helperKey] else { return }
@@ -211,6 +245,63 @@ final class HelperManager: NSObject, RemotePresenter {
                                       to: helper.port, timeoutMs: 0)
             noteSend(helper, kr, frame: true)
         }
+    }
+
+    /// The session's pointer shape changed (docs/99 §12 phase 2): to every ready helper of the session, as
+    /// PNG; each helper window shows it at its own k (as `SessionController.buildCursor`). Encoded only when
+    /// a helper is ready (a check-in encodes the current shape itself).
+    func pointerChanged(_ controller: SessionController) {
+        cursors[ObjectIdentifier(controller)] = nil
+        let ready = helpers.values.filter { $0.controller === controller && $0.state == .ready }
+        guard !ready.isEmpty, let cursor = cursor(for: controller) else { return }
+        for helper in ready { send(helper, .cursor(cursor)) }
+    }
+
+    /// The encoded current shape (cached until the next change): downscaled by halves until the message fits
+    /// the channel (drawn at the same point size, only less sharp), else the arrow, never a stale shape.
+    private func cursor(for controller: SessionController) -> HelperCursor? {
+        if let cached = cursors[ObjectIdentifier(controller)] { return cached }
+        guard let shape = controller.pointerShape else { return nil }
+        var cursor = HelperCursor.hidden
+        if let image = shape.image {
+            cursor = .systemArrow
+            var bitmap: CGImage? = image
+            var halvings = 0
+            for _ in 0..<4 {
+                guard let current = bitmap, let png = Self.png(current) else { break }
+                let candidate = HelperCursor(png: png, pixelWidth: image.width, pixelHeight: image.height,
+                                             hotX: Double(shape.hotspot.x), hotY: Double(shape.hotspot.y))
+                if let size = try? WireCoding.encode(HostMessage.cursor(candidate)).count, size <= MachChannel.maxPayload {
+                    cursor = candidate
+                    break
+                }
+                bitmap = Self.halved(current)
+                halvings += 1
+            }
+            if cursor.arrow == true || halvings > 0, !loggedLargeCursor {
+                loggedLargeCursor = true
+                vlog("helper apps: pointer shape \(image.width)x\(image.height) too large for the channel: \(cursor.arrow == true ? "arrow" : "downscaled")")
+            }
+        }
+        cursors[ObjectIdentifier(controller)] = cursor
+        return cursor
+    }
+
+    private static func png(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    private static func halved(_ image: CGImage) -> CGImage? {
+        let w = max(1, image.width / 2), h = max(1, image.height / 2)
+        guard w < image.width || h < image.height,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
     }
 
     /// Thinwire INIT: a new front surface (also after a resize).
@@ -278,6 +369,7 @@ final class HelperManager: NSObject, RemotePresenter {
 
     /// The session ended: helpers without windows go now (the last windows were just removed).
     func sessionEnded(_ controller: SessionController) {
+        cursors[ObjectIdentifier(controller)] = nil
         for helper in Array(helpers.values) where helper.controller === controller && !hasWindows(helper) {
             helper.quitWork?.cancel()
             quit(helper)
@@ -455,6 +547,7 @@ final class HelperManager: NSObject, RemotePresenter {
         noteSend(helper, kr, frame: false)
         guard helper.state == .ready else { return }
         sendSurface(helper)
+        if let controller = helper.controller, let cursor = cursor(for: controller) { send(helper, .cursor(cursor)) }
         for (handle, binding) in bindings.sorted(by: { $0.key < $1.key })
         where binding.helperKey == helper.key && binding.presented {
             if let remote = binding.remote { sendSpec(handle, remote, added: true) }
@@ -516,18 +609,17 @@ final class HelperManager: NSObject, RemotePresenter {
             case .flags: c.keyboard.flagsChanged(input)
             }
         case .mouse(let id, let kind, let button, let x, let y, let sx, let sy, _, let modifiers, _):
-            guard let (w, _) = remote(id) else { return }
-            w.helperMouse(kind, button: button, view: CGPoint(x: x, y: y), screen: CGPoint(x: sx, y: sy),
-                          modifiers: NSEvent.ModifierFlags(rawValue: modifiers))
+            guard let (w, _) = remote(id), let (view, screen) = Self.validPoints(x, y, sx, sy) else { return }
+            w.helperMouse(kind, button: button, view: view, screen: screen, modifiers: NSEvent.ModifierFlags(rawValue: modifiers))
         case .scroll(let id, _, let dy, let precise, let x, let y, let sx, let sy, _):
-            guard let (w, c) = remote(id), var b = bindings[id] else { return }
+            guard let (w, c) = remote(id), var b = bindings[id], dy.isFinite, let (view, screen) = Self.validPoints(x, y, sx, sy) else { return }
             // As SessionView.scrollWheel: Windows wants 120 per notch, positive = away from the user.
-            b.scroll += precise ? CGFloat(dy) * 4 : CGFloat(dy) * 120
+            b.scroll = min(max(b.scroll + (precise ? CGFloat(dy) * 4 : CGFloat(dy) * 120), -12_000), 12_000)
             defer { bindings[id] = b }
             guard abs(b.scroll) >= 1 else { return }
             let amount = Int16(clamping: Int(b.scroll))
             b.scroll -= CGFloat(amount)
-            let s = w.helperSessionPoint(view: CGPoint(x: x, y: y), screen: CGPoint(x: sx, y: sy))
+            let s = w.helperSessionPoint(view: view, screen: screen)
             c.wheel(x: s.x, y: s.y, delta: amount)
         case .focus(let id):
             for (handle, b) in bindings where b.helperKey == helper.key { bindings[handle]?.isKey = handle == id }
@@ -535,6 +627,7 @@ final class HelperManager: NSObject, RemotePresenter {
             // now, before this window's keys (they follow on this port) arrive.
             if let old = keyHandle, old != id { bindings[old]?.remote?.controller?.keyboard.releaseAll() }
             keyHandle = id
+            helper.lastFocus = id
             guard let (w, c) = remote(id) else { return }
             c.windowBecameKey(w)
         case .resignedKey(let id):
@@ -553,7 +646,8 @@ final class HelperManager: NSObject, RemotePresenter {
             guard let (w, c) = remote(id) else { return }
             if minimized { c.minimize(id: w.info.id) } else { c.restore(id: w.info.id) }
         case .moved(let id, let frame):
-            remote(id)?.0.helperMoved(content: frame.cgRect)
+            guard let content = HelperRouting.validFrame(frame, limit: Self.screensUnion()) else { return }
+            remote(id)?.0.helperMoved(content: content)
         case .frameStats(let count, let mean, let p95, let max):
             // The latency budget (§12.18): logged every 30 s at most.
             guard Date().timeIntervalSince(helper.lastStatsLog) >= 30 else { return }
@@ -574,9 +668,50 @@ final class HelperManager: NSObject, RemotePresenter {
             for (handle, b) in bindings where b.helperKey == helper.key {
                 if let (w, c) = remote(handle) { c.requestClose(id: w.info.id) }
             }
+        case .gestureEnded(let id, let frame):
+            // One TWI move/resize through the D20 path; the helper stays frozen until gestureDone.
+            guard let (w, _) = remote(id), let content = HelperRouting.validFrame(frame, limit: Self.screensUnion()) else {
+                return send(helper, .gestureDone(windowId: id))
+            }
+            w.helperGestureEnded(content: content)
+        case .edit(let id, let command):
+            guard let (_, c) = remote(id), !c.inputBlocked else { return }
+            vlog("helper apps: \(helper.logLabel): Edit menu \(command.rawValue) → remote Ctrl-\(command.letter.uppercased())")
+            c.keyboard.menuShortcut(command.letter)
+        case .zoom(let id):
+            guard let (w, c) = remote(id) else { return }
+            c.toggleMaximize(id: w.info.id)
+        case .command(let command):
+            vlog("helper apps: \(helper.logLabel): ICA menu \(command.rawValue)")
+            guard let onCommand else { return reactivate(helper) }
+            onCommand(command, helper.controller) { [weak self, weak helper] in
+                guard let self, let helper else { return }
+                self.reactivate(helper)
+            }
         case .checkIn, .probeResult:
             break
         }
+    }
+
+    /// Every screen in global points: frames and points from helpers are clamped to it before the integer
+    /// session maths (a helper is our code, but a bug there must not trap this process).
+    static func screensUnion() -> CGRect {
+        NSScreen.screens.map(\.frame).reduce(CGRect.null) { $0.union($1) }
+    }
+
+    private static func validPoints(_ x: Double, _ y: Double, _ sx: Double, _ sy: Double) -> (CGPoint, CGPoint)? {
+        let screens = screensUnion()
+        guard let view = HelperRouting.validPoint(x: x, y: y, limit: CGRect(origin: .zero, size: screens.size)),
+              let screen = HelperRouting.validPoint(x: sx, y: sy, limit: screens) else { return nil }
+        return (view, screen)
+    }
+
+    /// Gives activation back to a helper after its ICA menu item was cancelled here: its last key window.
+    private func reactivate(_ helper: Helper) {
+        guard helper.state == .ready else { return }
+        let mine = bindings.filter { $0.value.helperKey == helper.key && $0.value.remote?.isApp == true }
+        guard let handle = helper.lastFocus.flatMap({ mine[$0] != nil ? $0 : nil }) ?? mine.keys.sorted().first else { return }
+        requestActivation(handle)
     }
 
     private func helperGone(_ helper: Helper, _ reason: String) {
@@ -637,6 +772,7 @@ final class HelperManager: NSObject, RemotePresenter {
         switch helper.state {
         case .ready:
             vlog("helper apps: \(helper.logLabel): no windows left; quitting it")
+            handBackPopups(helper)
             helper.quitting = true
             exiting[helper.key] = helper
             send(helper, .quit)
@@ -654,16 +790,54 @@ final class HelperManager: NSObject, RemotePresenter {
         return (handle, helper)
     }
 
+    /// App windows only: popups never keep a helper (its own windowless rule counts only app windows).
     private func hasWindows(_ helper: Helper) -> Bool {
-        bindings.values.contains { $0.helperKey == helper.key && $0.remote != nil }
+        HelperRouting.popupsToHandBack(windowsOf(helper)) == nil
+    }
+
+    private func windowsOf(_ helper: Helper) -> [(id: UInt32, isApp: Bool)] {
+        bindings.compactMap { handle, b in
+            guard b.helperKey == helper.key, let remote = b.remote else { return nil }
+            return (handle, remote.isApp)
+        }
+    }
+
+    /// The helper quits: popups it still shows come back to this process (the host closes them soon).
+    private func handBackPopups(_ helper: Helper) {
+        guard let popups = HelperRouting.popupsToHandBack(windowsOf(helper)) else { return }
+        for handle in popups.sorted() {
+            guard let binding = bindings.removeValue(forKey: handle), let remote = binding.remote else { continue }
+            handles.remove(ObjectIdentifier(remote))
+            remote.adoptLocally(activate: false)
+        }
     }
 
     private func spec(_ handle: UInt32, _ w: RemoteWindow) -> HelperWindowSpec {
         let content = w.window.contentRect(forFrameRect: w.window.frame)
-        return HelperWindowSpec(id: handle, title: String(displayName(w.info.title).prefix(512)),
-                                rect: HelperRouting.wireRect(w.contentPixelRect), frame: WirePointRect(content),
-                                scale: Double(w.displayScale), seamless: true, minimized: w.info.isMinimized,
-                                topmost: w.info.isTopmost, dim: w.controller?.dimAlpha.map(Double.init))
+        var spec = HelperWindowSpec(id: handle, title: String(displayName(w.info.title).prefix(512)),
+                                    rect: HelperRouting.wireRect(w.contentPixelRect), frame: WirePointRect(content),
+                                    scale: Double(w.displayScale), seamless: true, minimized: w.info.isMinimized,
+                                    topmost: w.info.isTopmost, dim: w.controller?.dimAlpha.map(Double.init))
+        if w.isApp {
+            let controls = TWIWindowControls(style: w.info.style)
+            spec.resizable = controls.resizable
+            spec.zoomable = controls.zoomable
+            let bands = Self.points(w.hitBands, scale: w.displayScale)
+            spec.bands = bands.isEmpty ? nil : bands
+        } else {
+            spec.popup = true
+            spec.menu = w.info.isMenu
+            spec.minimized = nil
+        }
+        return spec
+    }
+
+    /// The hit bands in view points for the helper (it compares view points; the bands are session pixels).
+    static func points(_ bands: TWIHitBands, scale k: CGFloat) -> HelperHitBands {
+        let k = max(k, 1)
+        func p(_ v: CGFloat) -> Double { Double(v / k) }
+        return HelperHitBands(resizeEdge: bands.resizeEdge.map(p),
+                              caption: bands.caption.map { .init(top: p($0.top), bottom: p($0.bottom), left: p($0.left), right: p($0.right)) })
     }
 
     private func sendSpec(_ handle: UInt32, _ w: RemoteWindow, added: Bool) {
@@ -711,7 +885,7 @@ final class HelperManager: NSObject, RemotePresenter {
     }
 }
 
-// MARK: Input from helpers (the same mapping as SessionView, on the hidden window's state)
+// MARK: Input from helpers (the same mapping as SessionView, on the hidden window's state; popups too)
 
 extension RemoteWindow {
     /// Session pixel for a helper's event: the helper's window has this window's frame (mirrored), so the

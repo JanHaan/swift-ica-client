@@ -1077,6 +1077,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     for (key, value) in modEnv.overrides {
         var merged = moduleOverrides[key] ?? WDModuleOverride()
         if let name = value.name { merged.name = name }
+        if let host = value.hostName { merged.hostName = host }
         if value.versionLow != nil { merged.versionLow = value.versionLow; merged.versionHigh = value.versionHigh }
         moduleOverrides[key] = merged
     }
@@ -1086,10 +1087,34 @@ func runClipFilesTest(ica: ICAFile) async throws {
             "\(key)=\"\(o.name.map { String($0.utf8.prefix(12))! } ?? "")\" \(o.versionLow.map(String.init) ?? "-")-\(o.versionHigh.map(String.init) ?? "-")"
         }.joined(separator: ", "))
     }
+    // §7.8 V18: client identity as the stock client reports it (UI module version string and build; product name, "-"
+    // = empty; cap 0x0D with a client OS value).
+    if let v = env["ICA_UI_VERSION"] { config.logon.clientVersion = v }
+    if let text = env["ICA_UI_BUILD"] {
+        guard let b = UInt16(text) else { fail("ICA_UI_BUILD must be a u16") }
+        config.logon.clientBuild = b
+    }
+    if let p = env["ICA_UI_PRODUCT"] { config.logon.productName = p == "-" ? "" : p }
+    if let text = env["ICA_WD_OSCAP"] {
+        guard let os = UInt16(text) else { fail("ICA_WD_OSCAP must be a u16") }
+        config.policy.hostOSReply = os
+    }
+    // §7.9 V21: no cap 0x21, so every VD module carries `1 << channel` (docs/30 §5.5 mask form); V22: echo the
+    // server's caps 0x2A and 0x2C (12 × ff, purpose unknown) verbatim (ICA_WD_ECHO_CAPS=2a,2c).
+    config.policy.vcCountCapability = env["ICA_WD_VCMASK"] != "1"
+    for item in (env["ICA_WD_ECHO_CAPS"] ?? "").split(separator: ",") {
+        let text = item.trimmingCharacters(in: .whitespaces)
+        guard let id = UInt16(text.hasPrefix("0x") ? String(text.dropFirst(2)) : text, radix: 16) else { fail("ICA_WD_ECHO_CAPS: \(text) is not a hex id") }
+        config.policy.echoCapabilities.insert(id)
+    }
+    say("identity: version \"\(config.logon.clientVersion)\" build \(config.logon.clientBuild) product \"\(config.logon.productName)\" " +
+        "cap 0x0D \(config.policy.hostOSReply.map(String.init) ?? "not sent")")
     let announceAudio = stock || env["ICA_GDT_AUDIO"] == "1"
-    let variant = ["ICA_GDT", "ICA_GDT_VERSION", "ICA_GDT_VDDATA", "ICA_GDT_ECHO_INIT", "ICA_GDT_HELLO", "ICA_WD_HT", "ICA_CLIP_VERSION",
+    let variant = (["ICA_GDT", "ICA_GDT_VERSION", "ICA_GDT_VDDATA", "ICA_GDT_ECHO_INIT", "ICA_GDT_HELLO", "ICA_WD_HT", "ICA_CLIP_VERSION",
                    "ICA_CLIP_REPLY_WORD2", "ICA_CLIP_REPLY_TAIL", "ICA_CTXCTL", "ICA_CTL_ACCEPT", "ICA_GDT_CDM", "ICA_STUB_VCS", "ICA_STOCK_VCS",
-        "ICA_STOCK_NAMES", "ICA_GDT_AUDIO"] + env.keys.filter { $0.hasPrefix("ICA_MODNAME_") || $0.hasPrefix("ICA_MODVER_") }.sorted().compactMap { key in env[key].map { "\(key)=\($0)" } }
+        "ICA_STOCK_NAMES", "ICA_GDT_AUDIO", "ICA_UI_VERSION", "ICA_UI_BUILD", "ICA_UI_PRODUCT", "ICA_WD_OSCAP", "ICA_WD_VCMASK",
+        "ICA_WD_ECHO_CAPS"]
+        + env.keys.filter { $0.hasPrefix("ICA_MODNAME_") || $0.hasPrefix("ICA_MODVER_") || $0.hasPrefix("ICA_MODHOST_") }.sorted()).compactMap { key in env[key].map { "\(key)=\($0)" } }
     say("variant: " + (variant.isEmpty ? "(defaults)" : variant.joined(separator: " ")) +
         String(format: "; CLIP_INIT_REPLY word2 0x%04x tail %@", clipConfig.initReplyWord2, GDTHexLog.hex(clipConfig.initReplyTail)))
     let session = try ICASession(ica: ica, configuration: config, clipboard: clipConfig, cdm: cdmConfig,

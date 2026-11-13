@@ -476,12 +476,92 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
     }
 
     @Test func stockNamesCoverEveryNamedStockChannel() {
-        #expect(StockChannels.moduleNames.count == 17)
-        let keys = Set(StockChannels.all.map { WDModuleOverride.key($0.name) })
+        #expect(StockChannels.moduleNames.count == 26)
+        let keys = Set(StockChannels.all.map { WDModuleOverride.key($0.name) }).union(["WD", "TD", "PDRFRAME", "PDCRYPT1", "UI"])
         #expect(Set(StockChannels.moduleNames.keys).isSubset(of: keys))
         for entry in StockChannels.all {
             guard let o = StockChannels.moduleNames[WDModuleOverride.key(entry.name)], let low = entry.versionLow else { continue }
             #expect(o.versionLow == low && o.versionHigh == entry.versionHigh, "\(entry.name)")
         }
+    }
+}
+
+/// docs/76 §7.8: identity fields (V18) and overrides on non-VD modules.
+@Suite struct IdentityVariantTests {
+    @Test func hostNameOverrideAndEnvironment() {
+        var m = GDTEngine().module(channel: 29, date: GDTModuleTests.exampleDate)
+        WDModuleOverride(hostName: "vdtw30").apply(to: &m)
+        #expect(Array(m[19..<28]) == Array("vdtw30".utf8) + zeros(3))
+        WDModuleOverride(hostName: "").apply(to: &m)
+        #expect(Array(m[19..<28]) == zeros(9))
+        let (o, errors) = WDModuleOverride.fromEnvironment(["ICA_MODHOST_CTXTWI": "-", "ICA_MODHOST_CTXTW": "vdtw30"])
+        #expect(errors.isEmpty && o["CTXTWI"]?.hostName == "" && o["CTXTW"]?.hostName == "vdtw30")
+    }
+
+    @Test func stockNamesApplyToEveryModuleIncludingUI() throws {
+        var c = WinstationDriver.Configuration()
+        c.logon.initialProgram = "#Explorer Citrix ABC"
+        c.moduleOverrides = StockChannels.moduleNames
+        let wd = WinstationDriver(configuration: c)
+        wd.register(ThinwireEngine())
+        wd.register(SeamlessEngine(config: SeamlessEngine.Config()))
+        let (modules, names) = try wd.buildModules()
+        #expect(names == ["WD", "TD", "PDRFRAME", "PDCRYPT1", "CTXTW  ", "CTXTWI", "UI"])
+        func field(_ m: [UInt8], _ r: Range<Int>) -> String { String(decoding: m[r].prefix { $0 != 0 }, as: UTF8.self) }
+        let expected: [(String, UInt8, UInt8, String)] = [("ICA 3.0", 1, 9, "WDICA"), ("TCP", 1, 2, ""), ("RFrame", 1, 2, "PDRFRAME"),
+                                                          ("Encrypt", 1, 1, "PDCRYPT1"), ("Thinwire3.0", 4, 5, "vdtw30"),
+                                                          ("TWI", 1, 1, ""), ("ui", 1, 8, "")]
+        for (m, e) in zip(modules, expected) {
+            #expect(field(m, 6..<19) == e.0 && m[4] == e.1 && m[5] == e.2 && field(m, 19..<28) == e.3, "\(e.0)")
+        }
+        // The UI module's string pool is untouched (same length as without overrides).
+        let plain = try WinstationDriver(configuration: { var p = c; p.moduleOverrides = [:]; return p }()).buildModules()
+        #expect(plain.0.last?.count == modules.last?.count)
+    }
+
+    @Test func hostOSCapabilityOnlyWhenSet() throws {
+        let server = try WDInitRequest(payload: Array(bytes(hex: liveInitRequestHex).dropFirst(3))).capabilities
+        #expect(!WDCapabilityPolicy().negotiate(server: server).contains { $0.id == WDCapability.hostOS })
+        var policy = WDCapabilityPolicy()
+        policy.hostOSReply = 3
+        let cap = try #require(policy.negotiate(server: server).first { $0.id == WDCapability.hostOS })
+        #expect(cap.body == hex("03 00 00 00 00 00"))
+    }
+}
+
+/// docs/76 §7.9: V21 (VD channel as bit mask, no cap 0x21) and V22 (echo of server caps 0x2A/0x2C).
+@Suite struct ChannelMaskVariantTests {
+    static func server() throws -> [WDCapability] {
+        try WDInitRequest(payload: Array(bytes(hex: liveInitRequestHex).dropFirst(3))).capabilities
+    }
+
+    @Test func maskModeDropsVCCountAndWritesBitMasks() throws {
+        var policy = WDCapabilityPolicy()
+        #expect(policy.negotiate(server: try Self.server()).contains { $0.id == WDCapability.vcCount })
+        policy.vcCountCapability = false
+        #expect(!policy.negotiate(server: try Self.server()).contains { $0.id == WDCapability.vcCount })
+        var c = WinstationDriver.Configuration()
+        c.logon.initialProgram = "#Explorer Citrix ABC"
+        c.policy = policy
+        let wd = WinstationDriver(configuration: c)
+        wd.register(ThinwireEngine())
+        wd.register(SeamlessEngine(config: SeamlessEngine.Config()))
+        wd.register(GDTEngine(), number: 29)
+        let (modules, names) = try wd.buildModules()
+        func channel(_ name: String) throws -> [UInt8] { Array(modules[try #require(names.firstIndex(of: name))][36...39]) }
+        #expect(try channel("CTXTW  ") == hex("00 02 00 00"))
+        #expect(try channel("CTXTWI") == hex("00 10 00 00"))
+        #expect(try channel("CTXGDT") == hex("00 00 00 20"))
+    }
+
+    @Test func echoesListedServerCapabilities() throws {
+        var policy = WDCapabilityPolicy()
+        #expect(!policy.negotiate(server: try Self.server()).contains { $0.id == 0x2A })
+        policy.echoCapabilities = [0x2A, 0x2C]
+        let out = policy.negotiate(server: try Self.server())
+        let a = try #require(out.first { $0.id == 0x2A }), c = try #require(out.first { $0.id == 0x2C })
+        #expect(a.body == [0x01] + [UInt8](repeating: 0xFF, count: 12) + zeros(4))
+        #expect(c.body == hex("01 00") + [UInt8](repeating: 0xFF, count: 12) + hex("01 00 00 00"))
+        #expect(out.last?.id == WDCapability.vcPriority)
     }
 }

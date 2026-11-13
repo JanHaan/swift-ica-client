@@ -6,9 +6,12 @@
 # MATRIX line. V7 and V8 build on V6 (and V8 on V7) by design; V11/V12 on V10; V13 = V9 with cap 07 echoed.
 # V14–V17 name the modules as the stock client does (V15+ also check cdm_connect=true: CTXCDM CONNECT); V17 =
 # V16 + CTXCAM with every announced module named and versioned from the stock list (docs/76 §7.6).
+# V18–V20: client identity (UI version/build/product, cap 0x0D Mac); V19 + V17 with the full stock module list
+# (now also WD/TD/PD/UI/TW/TWI names); V20 without CTXGDT (ICA_GDT=0 wins: clipboard v4 only) (docs/76 §7.8).
+# V21: no cap 0x21, VD channel fields as bit masks; V22: server caps 0x2A/0x2C echoed; both with CDM (docs/76 §7.9).
 # V12 also announces CTXCPM (host PDF printer), CTXCAM (playback, no sink) and CTXMM (no frames) and stubs for
 # every other stock channel, all on the stock client's channel numbers (docs/76 §7.4).
-# Usage: scripts/gdt-matrix.sh [variant ...]   (default: all; names V1 V2 V3a V3b V5a V5b V6 V7 V8 V10 V11 V12 V13 V14 V15 V16 V17)
+# Usage: scripts/gdt-matrix.sh [variant ...]   (default: all; names V1 V2 V3a V3b V5a V5b V6 V7 V8 V10 V11 V12 V13 V14 V15 V16 V17 V18 V19 V20 V21 V22)
 # Logs: /tmp/icashot/gdt-matrix-<time>/<variant>.log; GDT hex logs in .session/gdt/.
 # Never kills processes: a run that hangs is left to icactl's own timeouts.
 set -u
@@ -39,6 +42,11 @@ V14|ICA_MODNAME_CTXGDT=ClientGDT ICA_MODVER_CTXGDT=1-1
 V15|ICA_MODNAME_CTXGDT=ClientGDT ICA_MODVER_CTXGDT=1-1 ICA_GDT_CDM=1 ICA_MODNAME_CTXCDM=ClientDrive ICA_MODVER_CTXCDM=1-9
 V16|ICA_MODNAME_CTXGDT=ClientGDT ICA_MODVER_CTXGDT=1-1 ICA_GDT_CDM=1 ICA_MODNAME_CTXCDM=ClientDrive ICA_MODVER_CTXCDM=1-9 ICA_MODNAME_CTXCLIP=Clipboard ICA_MODVER_CTXCLIP=0-3 ICA_CTXCTL=1 ICA_MODNAME_CTXCTL=ControlChannel ICA_MODVER_CTXCTL=1-2
 V17|ICA_GDT_CDM=1 ICA_CTXCTL=1 ICA_GDT_AUDIO=1 ICA_STOCK_NAMES=1
+V18|ICA_UI_VERSION=26.09.0.17 ICA_UI_BUILD=17 ICA_UI_PRODUCT=- ICA_WD_OSCAP=3
+V19|ICA_UI_VERSION=26.09.0.17 ICA_UI_BUILD=17 ICA_UI_PRODUCT=- ICA_WD_OSCAP=3 ICA_GDT_CDM=1 ICA_CTXCTL=1 ICA_GDT_AUDIO=1 ICA_STOCK_NAMES=1
+V20|ICA_UI_VERSION=26.09.0.17 ICA_UI_BUILD=17 ICA_UI_PRODUCT=- ICA_WD_OSCAP=3 ICA_GDT=0
+V21|ICA_GDT_CDM=1 ICA_WD_VCMASK=1
+V22|ICA_GDT_CDM=1 ICA_WD_ECHO_CAPS=2a,2c
 "
 # V4 (client hello when the channel opens) has no plausible frame yet (docs/76 §7.1); run it by hand with
 # ICA_GDT_HELLO=<hex> once a guess exists.

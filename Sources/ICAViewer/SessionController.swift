@@ -494,10 +494,18 @@ final class SessionController: NSObject {
         }
         lastPointer = image.map { ($0, hotspot) }
         pointerCount += 1
+        if HelperManager.enabled { HelperManager.shared.pointerChanged(self) }
         if pointerCount <= 3 { vlog("pointer shape \(pointerCount): \(image.map { "\($0.width)x\($0.height)" } ?? "hidden") hotspot \(hotspot)") }
         // The screen of the last position sent to the host (as in `mouse`), so a cursor over a window
         // that straddles two screens does not flip between the two scales.
         buildCursor(scale: layout.monitors[layout.monitorIndex(forSessionX: lastMouse.x, y: lastMouse.y)].scale)
+    }
+
+    /// The host's pointer shape for helper apps (docs/99 §12 phase 2): nil before the first shape; `image` nil =
+    /// hidden. Session pixels; each helper window scales it by its own k.
+    var pointerShape: (image: CGImage?, hotspot: CGPoint)? {
+        guard pointerCount > 0 else { return nil }
+        return (lastPointer?.image, lastPointer?.hotspot ?? .zero)
     }
 
     /// k the cursor was built for; the host sends pointer bitmaps in session pixels.
@@ -838,6 +846,18 @@ final class SessionController: NSObject {
         vlog("minimise \(String(id, radix: 16))")
         keyboard.releaseAll()
         session.send { _, twi in twi.minimize(windowId: id) }
+    }
+
+    /// Window → Zoom in a helper app (docs/99 §12 phase 2): maximise on the host, or restore a maximised
+    /// window; only for windows with a maximise box (D20).
+    func toggleMaximize(id: UInt32) {
+        guard let info = infos[id], TWIWindowControls(style: info.style).zoomable else { return }
+        let maximized = info.isMaximized
+        vlog("\(maximized ? "restore" : "maximise") \(String(id, radix: 16)) (Zoom)")
+        session.send { _, twi in
+            if maximized { twi.restore(windowId: id) } else { twi.maximize(windowId: id) }
+            twi.activate(windowId: id)
+        }
     }
 
     func restore(id: UInt32) {

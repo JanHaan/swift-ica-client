@@ -149,6 +149,15 @@ final class KeyboardTranslator {
         if isDown { send(code, up: false) } else if down.contains(code) { send(code, up: true) }
     }
 
+    /// An Edit menu item a helper app's menu bar sent (docs/99 §12 phase 2): the same path as its Cmd
+    /// shortcut, so Ctrl+letter on the server and, for Paste, the clipboard sync first.
+    func menuShortcut(_ letter: String) {
+        guard let keyCode = KeyMap.keyCode(typing: letter) else { return }
+        let input = KeyInput(keyCode: keyCode, modifierFlags: .command, characters: letter, charactersIgnoringModifiers: letter)
+        keyDown(input)
+        keyUp(input)
+    }
+
     /// Releases every key the server thinks is down (focus left our windows).
     func releaseAll() {
         pendingAlt = nil

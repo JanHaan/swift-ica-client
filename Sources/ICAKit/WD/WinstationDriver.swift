@@ -274,7 +274,11 @@ public final class WinstationDriver {
                 modules.append(WDModules.vdHeader(vd.name == "CTXTWI\0" ? .twi : WDModuleIdentity(
                     moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA"), channel: vd.number, date: Date()).bytes())
             }
-            if let override = config.moduleOverrides[WDModuleOverride.key(vd.name)] { override.apply(to: &modules[modules.count - 1]) }
+            // Without cap 0x21 the channel field is a bit mask (docs/30 §5.5; only V21 runs like this).
+            if !config.policy.vcCountCapability, vd.number < 32, modules[modules.count - 1].count >= 40 {
+                let mask = UInt32(1) << UInt32(vd.number)
+                for i in 0..<4 { modules[modules.count - 1][36 + i] = UInt8((mask >> (8 * UInt32(i))) & 0xff) }
+            }
             names.append(vd.name.replacingOccurrences(of: "\0", with: ""))
         }
         let credentialsInModule = !negotiated.contains { $0.id == WDCapability.credentialRequest }
@@ -282,6 +286,12 @@ public final class WinstationDriver {
         modules.append(try WDModules.ui(logon: config.logon, credentialsInModule: credentialsInModule,
                                         longCredentials: long, seed: obfuscationSeed))
         names.append("UI")
+        // Discovery overrides (docs/76 §7.6, §7.8), by module name: VC names without padding, or WD/TD/PDRFRAME/PDCRYPT1/UI.
+        if !config.moduleOverrides.isEmpty {
+            for (index, name) in names.enumerated() {
+                config.moduleOverrides[WDModuleOverride.key(name)]?.apply(to: &modules[index])
+            }
+        }
         return (modules, names)
     }
 
