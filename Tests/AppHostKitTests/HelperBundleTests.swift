@@ -22,7 +22,7 @@ import Testing
     }
 
     @Test func bundleIdentifierDependsOnKeyNotName() {
-        let renamed = HelperLabel(key: label.key, name: "Outlook (XYZ)")
+        let renamed = HelperLabel(key: label.key, name: "Mail (Two)")
         #expect(HelperBundle.bundleIdentifier(for: renamed) == HelperBundle.bundleIdentifier(for: label))
     }
 
