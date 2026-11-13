@@ -48,8 +48,13 @@ The calculator above is a live session; the other images use the app's demo mode
   At start, the launcher offers to reconnect disconnected sessions (verified live).
 - Session sharing: several published apps run in one session. A second app starts inside the
   running session, with no second logon (verified live). Closing one app leaves the others running.
-- Dock and Cmd-Tab icon, and the menu-bar app name, follow the active remote app; the launcher shows
-  the real app icons (verified live). The Dock entry itself is still one for the whole client.
+- One Dock and Cmd-Tab entry per remote app, with the app's own name and icon and its own Mac menu
+  bar; Cmd-Q there quits only that app. While remote apps are open, ICA Viewer itself moves to the
+  menu bar, and the launcher stays one click away there or on ⌃⌥⌘L from anywhere. If a helper
+  crashes, it is restarted, and its windows fall back into ICA Viewer. On by default; Settings
+  switches back to a single Dock entry whose icon and menu name follow the active app. The launcher
+  shows the real app icons. Verified live.
+- A new app icon, with Liquid Glass appearances on macOS 26.
 - Display scaling: Windows scaling and client scaling are set separately. The Auto default is
   Retina-sharp at normal size (2x / 200 %), chosen per screen, and falls back to 1x when the
   session would exceed the protocol's size limit (5120x4096). Verified live: a single Retina
@@ -83,7 +88,7 @@ Implemented but not yet verified live:
   camera has been tried yet. Only 32-bit host applications can use this webcam path; 64-bit apps
   (Windows Camera, Teams, modern browsers) will not see the camera.
 
-Not implemented yet: one Dock entry with its own name per remote app (designed, not built), EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
+Not implemented yet: EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
 shared folder. H.264 is untested. Only seamless app launches are exercised; full desktops are
 untested.
 

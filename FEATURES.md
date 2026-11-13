@@ -60,7 +60,7 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
 | Adaptive display / throughput | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ [21] |
 | **Seamless integration** | | | | | | | | |
 | Native per-window integration | ✅† | ⚠️ [5] | ? | ❌ [6] | ? | ❌† | ❌† | ✅ [22] |
-| Taskbar / Dock entry per remote app | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ❌ [23] |
+| Taskbar / Dock entry per remote app | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ✅ [23] |
 | Visible to window switchers | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ✅ [22] |
 | App icons | ✅† | ✅ | ? | ? | ? | ? | ? | ✅ [24] |
 | **Input** | | | | | | | | |
@@ -144,9 +144,10 @@ Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS =
     adaptive throughput. Idle host repaints (about 154 kB/s for a mail client) still arrive.
 22. Each remote window is a real `NSWindow`: `AXStandardWindow`, working minimize, no duplicate title
     bar, visible to Cmd-Tab and third-party window switchers.
-23. Not built: one Cmd-Tab/Dock entry with its own name per remote app, probably via generated helper
-    bundles. Today the whole client is one Dock entry; its icon and the menu-bar app name follow the
-    active remote app, but the Dock and Cmd-Tab name cannot change at runtime.
+23. Since 0.5: one Dock and Cmd-Tab entry per remote app, with its own name, icon and Mac menu bar,
+    through a small helper app per remote app that shows that app's windows.
+    ICA Viewer itself moves to the menu bar while remote apps are open; ⌃⌥⌘L opens the launcher.
+    On by default; Settings switches back to one Dock entry. Verified live.
 24. The launcher shows the real app icons, and the Dock and Cmd-Tab icon follows the active remote app
     (icons from the store, else the session). Verified live.
 25. Scancodes with a German layout. There is no dynamic layout sync from the Mac to the VDA.
@@ -200,13 +201,11 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 2. **Live verification of what is already built.** Client drive mapping and printing are
    implemented but need a site that redirects drives and printers; clipboard HTML, RTF and images
    are unverified too, as is the webcam with a real camera.
-3. **Per-app Dock / Cmd-Tab name.** The windows switch correctly and the icon follows the active app,
-   but all remote apps share one Dock entry and name (designed, not built).
-4. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
+3. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
    optimisation is a separate, larger piece).
-5. **Full-desktop launch.** Only seamless apps are exercised.
-6. **General file transfer and clipboard files.** Only the shared folder exists.
-7. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
+4. **Full-desktop launch.** Only seamless apps are exercised.
+5. **General file transfer and clipboard files.** Only the shared folder exists.
+6. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,
 Citrix Cloud, App Protection, EPA, GACS, auto-update.
@@ -219,8 +218,8 @@ Some third-party window switchers require a standard window with a minimize butt
 skip them. The Dock icons come from placeholder "Husk" processes (`com.citrix.ctxapphusk`) that own
 no windows, controlled by `enableAppDockEnhancement` / `EnableAppPreview`. In ICAViewer each remote
 window is an `AXStandardWindow` with an enabled minimize button that round-trips to a TWI minimise,
-a single caption (the remote one), and no helper processes. Verified across two screens. The one
-open piece is a per-app Dock/Cmd-Tab name (gap 3).
+a single caption (the remote one). Verified across two screens. Since 0.5 each remote app also has
+its own Dock and Cmd-Tab entry, with its name, icon and menu bar.
 
 Secondary points: no telemetry, no background services, and the whole client is small enough to
 read in one sitting. These are design choices rather than features, and they come at the price of
