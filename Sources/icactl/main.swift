@@ -1361,6 +1361,32 @@ func runClipFilesTest(ica: ICAFile) async throws {
     var gdtLastHost: Date?
     if let gdt = session.gdt {
         let limit = gdt.config.logLimit
+        // docs/76 §7.16 (D82): answer the host's GetData (cmd 0x14) for FileGroupDescriptorW (ctxFormat 2, lindex -1,
+        // TYMED_HGLOBAL) with our FILEGROUPDESCRIPTORW. ICA_GDT_GETDATA=<style> picks the guessed reply layout
+        // (header `cmd u8, seq u32, total length u16` as in every host message):
+        //   a: 15, request seq, status u32 0, length u32, data       b: as a, but our own odd seq
+        //   c: 15, request seq, dataObj u64 (echoed), status, length, data
+        //   d: 15, request seq, status u32 0, data (no length)
+        if let style = env["ICA_GDT_GETDATA"], let descriptor = try? ClipboardFileGroup.build(files.map { $0.entry }) {
+            let data = [UInt8](descriptor)
+            gdt.responders.append(GDTEngine.Responder(name: "GetData FGDW reply (\(style))") { [unowned gdt] write, _ in
+                let b = write.bytes
+                guard b.count >= 31, b[0] == 0x14, b[15] == 2, b[16] == 0, b[17] == 0, b[18] == 0 else { return nil }
+                func u32(_ v: UInt32) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * $0)) & 0xFF) } }
+                let reqSeq = Array(b[1...4])
+                let ownSeq = u32(UInt32(gdt.sentCount * 2 + 1))
+                var body: [UInt8]
+                switch style {
+                case "b": body = u32(0) + u32(UInt32(data.count)) + data
+                case "c": body = Array(b[7...14]) + u32(0) + u32(UInt32(data.count)) + data
+                case "d": body = u32(0) + data
+                default: body = u32(0) + u32(UInt32(data.count)) + data
+                }
+                let total = 7 + body.count
+                return [0x15] + (style == "b" ? ownSeq : reqSeq) + [UInt8(total & 0xFF), UInt8(total >> 8)] + body
+            })
+            say("CTXGDT GetData reply style \(style), FILEGROUPDESCRIPTORW \(data.count) B")
+        }
         gdt.onEvent = { event in
             switch event {
             case .hostWrite(let w):
