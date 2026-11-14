@@ -435,10 +435,14 @@ private let openOpus16 = hex("01 02 06 00 02 00 00 00 00 00")
         try tone.start(format: AudioStreamFormat(sampleRate: 16000, channels: 1)) { s in
             lock.withLock { samples += s.count }
         }
+        // Bounded by the real elapsed time, not a fixed window: a loaded test run can oversleep.
+        let started = Date()
         try await Task.sleep(nanoseconds: 150_000_000)
+        for _ in 0..<40 where lock.withLock({ samples }) == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         tone.stop()
+        let elapsed = Date().timeIntervalSince(started)
         let atStop = lock.withLock { samples }
-        #expect(atStop > 0 && atStop <= 16000 * 3 / 10)
+        #expect(atStop > 0 && atStop <= Int(16000 * (elapsed + 0.15)))
         try await Task.sleep(nanoseconds: 60_000_000)
         let later = lock.withLock { samples }
         #expect(later == atStop)
