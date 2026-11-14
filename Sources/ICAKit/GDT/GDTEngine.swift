@@ -1,11 +1,11 @@
 import Foundation
 
-/// Discovery engine for `CTXGDT` (docs/76-gdt.md §6): announces the channel, records every host write, and by
-/// default answers nothing. Replies are added as `Responder`s (iteration 2 onwards); `ICA_GDT_ECHO_INIT` is the
-/// first one.
+/// Discovery engine for `CTXGDT` (docs/76-gdt.md §6): announces the channel, records every host write, and answers
+/// the host's opening `01` with `02` (D80). Further replies are added as `Responder`s; `ICA_GDT_ECHO_INIT` is one.
 ///
 /// - Module: the generic 48-byte VD (docs/30 §5.5), versions `Config.versionLow…versionHigh` (1…1), host name
-///   "ICA", flow type 0, no VD data; channel 29, bind entry `CTXGDT\0 1D 00` from the WD module's table.
+///   "ICA", flow type 0, then the stock VD data `87 13 00` (51 bytes, D80); channel 29, bind entry `CTXGDT\0 1D 00`
+///   from the WD module's table.
 /// - Every host write goes to `onEvent(.hostWrite)` (log it with `GDTHexLog`) and into `statistics`.
 ///
 /// Call everything on the session queue; `onEvent` is called there.
@@ -55,11 +55,13 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         public var versionHigh = GDTWire.versionHigh
         /// VD-specific data after the 48-byte common part (docs/30 §5.5); empty by default. Variant V1 puts the
         /// stock client's "maxPacketSize 4999" there as u16 `87 13`, the way CTXMM carries 4996 (docs/98b §1.3).
-        public var vdData: [UInt8] = []
+        public var vdData: [UInt8] = GDTWire.vdDataTail
         /// The VC's maximum packet size as u16 LE right after the 48-byte common part, before `vdData` (docs/76 §7.13
         /// V39). The stock client's GDT VD logs `GDT VC maxPacketSize:[4999]` in driverInfo, just before its module
         /// record [B]; our CTXMM module carries its 4996 in the same place (docs/98b §1.3). nil (default) = none.
-        public var maxPacketSize: UInt16?
+        public var maxPacketSize: UInt16? = GDTWire.maxPacketSize
+        /// Answer the host's opening `01` write with `02` (GDTWire, D80). `ICA_GDT_HANDSHAKE=0` turns it off.
+        public var handshake = true
         /// Answer the host's first write if it looks like an init (≤ `initMaxSize` bytes, before we sent anything).
         public var initReply: InitReply?
         public var initMaxSize = 128
@@ -79,8 +81,12 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
                 if parts.count == 1, let v = parts[0] { c.versionLow = v; c.versionHigh = v }
                 if parts.count == 2, let low = parts[0], let high = parts[1] { c.versionLow = low; c.versionHigh = high }
             }
-            if let text = env["ICA_GDT_VDDATA"], let bytes = GDTEngine.parseHex(text) { c.vdData = bytes }
-            if let text = env["ICA_GDT_MAXPACKET"], let value = UInt16(text) { c.maxPacketSize = value }
+            // Either switch spells out the VD data exactly (as in the V1/V39/V45 runs); neither: the stock `87 13 00`.
+            if env["ICA_GDT_VDDATA"] != nil || env["ICA_GDT_MAXPACKET"] != nil {
+                c.vdData = env["ICA_GDT_VDDATA"].flatMap { GDTEngine.parseHex($0) } ?? []
+                c.maxPacketSize = env["ICA_GDT_MAXPACKET"].flatMap { UInt16($0) }
+            }
+            if env["ICA_GDT_HANDSHAKE"] == "0" { c.handshake = false }
             c.initReply = InitReply(environment: env["ICA_GDT_ECHO_INIT"])
             return c
         }
@@ -142,6 +148,15 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
             responders.append(Responder(name: "init reply") { [unowned self] write, _ in
                 guard write.index == 1, self.sentCount == 0, !write.bytes.isEmpty, write.bytes.count <= limit else { return nil }
                 return initReply.reply(to: write.bytes)
+            })
+        }
+        if config.handshake {
+            var nextSeq: UInt8 = 1
+            responders.append(Responder(name: "open reply") { write, _ in
+                let b = write.bytes
+                guard b.count >= 8, b[0] == GDTWire.hostOpen else { return nil }
+                defer { nextSeq &+= 2 }
+                return [GDTWire.clientOpenReply, nextSeq] + b[2...]
             })
         }
     }

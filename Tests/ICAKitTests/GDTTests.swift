@@ -11,17 +11,36 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
 @Suite struct GDTModuleTests {
     static let exampleDate = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 11, day: 6, hour: 12))!
 
-    @Test func module48BytesVersion1HostICAChannel29() {
+    @Test func module51BytesVersion1HostICAChannel29StockVDData() {
         let m = GDTEngine().module(channel: GDTWire.channelNumber, date: Self.exampleDate)
-        let expected = hex("30 00 00 03 01 01") + zeros(13) + hex("49 43 41") + zeros(6)
-            + hex("66 5D 00 60 00 00 00 00 1D 00 00 00 00 00 00 00 00 00 00 00")
-        #expect(m.count == 48)
+        let expected = hex("33 00 00 03 01 01") + zeros(13) + hex("49 43 41") + zeros(6)
+            + hex("66 5D 00 60 00 00 00 00 1D 00 00 00 00 00 00 00 00 00 00 00") + hex("87 13 00")
+        #expect(m.count == 51)
         let packet = WDModules.initResponsePackets([m])[0]
-        #expect(Array(packet.prefix(3)) == hex("01 30 00"))
+        #expect(Array(packet.prefix(3)) == hex("01 33 00"))
         #expect(Array(packet.dropFirst(3)) == expected)
-        // The same bytes as the generic VD the WD would build without the engine's module.
-        #expect(m == WDModules.vdHeader(WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA"),
-                                        channel: 29, date: Self.exampleDate).bytes())
+        // The common part is the generic VD the WD would build without the engine's module (length byte aside).
+        #expect(Array(m[2...47]) == Array(WDModules.vdHeader(WDModuleIdentity(moduleClass: .vd, versionLow: 1, versionHigh: 1, name: "", hostName: "ICA"),
+                                        channel: 29, date: Self.exampleDate).bytes()[2...47]))
+    }
+
+    @Test func opensLikeTheStockClient() {
+        // D80 recording: host 01 02 …, stock answer 02 01 …; the host's retry 01 04 gets 02 03.
+        let tail = hex("00 00 00 1d 00 07 01 00 00 02 00 00 03 00 00 04 00 00 05 00 00 06 00 00 07 00 00")
+        let engine = GDTEngine()
+        var out: [[UInt8]] = []
+        engine.output = { if case .channel(let d) = $0 { out.append([UInt8](d)) } }
+        engine.receive(Data(hex("01 02") + tail))
+        engine.receive(Data(hex("03 04") + tail))   // the host's ack: no answer
+        engine.receive(Data(hex("01 06") + tail))
+        #expect(out == [hex("02 01") + tail, hex("02 03") + tail])
+        var off = GDTEngine.Config()
+        off.handshake = false
+        let silent = GDTEngine(config: off)
+        var none: [Data] = []
+        silent.output = { if case .channel(let d) = $0 { none.append(d) } }
+        silent.receive(Data(hex("01 02") + tail))
+        #expect(none.isEmpty)
     }
 
     @Test func versionFromEnvironment() throws {
@@ -54,7 +73,7 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
         let (modules, names) = try wd.buildModules()
         #expect(names.suffix(2) == ["CTXGDT", "UI"])
         let index = try #require(names.firstIndex(of: "CTXGDT"))
-        #expect(modules[index].count == 48)
+        #expect(modules[index].count == 51)
         #expect(Array(modules[index][36...39]) == hex("1D 00 00 00"))
         #expect(engine.moduleBytes == modules[index])
         // `CTXGDT` + NUL in 7 bytes, NUL, u16 29.
@@ -262,7 +281,10 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
         #expect(m[4] == 0 && m[5] == 1)
         #expect(Array(m[36...39]) == hex("1D 00 00 00") && Array(m[48...49]) == hex("87 13"))
         let r = try #require(GDTEngine.Config.fromEnvironment(["ICA_GDT": "1", "ICA_GDT_VERSION": "1-2"]))
-        #expect(r.versionLow == 1 && r.versionHigh == 2 && r.vdData.isEmpty)
+        #expect(r.versionLow == 1 && r.versionHigh == 2 && r.vdData == [0x00] && r.maxPacketSize == 4999)
+        let v45 = try #require(GDTEngine.Config.fromEnvironment(["ICA_GDT": "1", "ICA_GDT_MAXPACKET": "4999", "ICA_GDT_VDDATA": "00"]))
+        #expect(GDTEngine(config: v45).module(channel: 29, date: GDTModuleTests.exampleDate)
+                == GDTEngine().module(channel: 29, date: GDTModuleTests.exampleDate))
     }
 
     @Test func clipInitReplyVariants() {
@@ -445,7 +467,7 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
         let before = m
         WDModuleOverride(name: "ClientGDT", versionLow: 1, versionHigh: 1).apply(to: &m)
         #expect(Array(m[6..<19]) == Array("ClientGDT".utf8) + zeros(4))
-        #expect(Array(m[19...]) == Array(before[19...]) && m.count == 48)
+        #expect(Array(m[19...]) == Array(before[19...]) && m.count == 51)
         // 14 characters: cut to 12, NUL kept at 18.
         WDModuleOverride(name: "ControlChannel", versionLow: 1, versionHigh: 2).apply(to: &m)
         #expect(Array(m[6..<19]) == Array("ControlChann".utf8) + [0] && m[4] == 1 && m[5] == 2)

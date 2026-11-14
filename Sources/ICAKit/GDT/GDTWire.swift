@@ -12,6 +12,18 @@ public enum GDTWire {
     /// The stock client logs version 1 [B]: min 1 / max 1, host module name "ICA" (the generic VD, docs/30 §5.5).
     public static let versionLow: UInt8 = 1
     public static let versionHigh: UInt8 = 1
+    /// The VD data after the 48-byte common part, as the stock client sends it (D80, docs/76 §7.14): u16 4999
+    /// (its "maxPacketSize") and one zero byte. The host opens CTXGDT only with all three bytes; `87 13` alone
+    /// (V1, V39) leaves the channel silent.
+    public static let maxPacketSize: UInt16 = 4999
+    public static let vdDataTail: [UInt8] = [0x00]
+
+    /// Opening exchange (D80 recording): the host sends `01 <seq> 00 00 00 1d 00 07 …` (its seq even: 02, 04, 06),
+    /// the stock client answers `02 <seq> …` with the host's bytes from offset 2 unchanged and its own odd seq
+    /// (01, 03), then the host sends `03 <seq> …`. Without an answer the host repeats `01` with the next seq.
+    public static let hostOpen: UInt8 = 0x01
+    public static let clientOpenReply: UInt8 = 0x02
+    public static let hostOpenAck: UInt8 = 0x03
 
     /// TYMED values (Microsoft Learn, TYMED enumeration) [P]; candidates for the `tymed` field of GetData (§3).
     public enum TYMED {
