@@ -25,13 +25,17 @@ enum Paths {
 
     /// The nearest directory at or above `start` with a `Package.swift`.
     static func packageRoot(above start: URL) -> URL? {
+        // Bounded walk: at "/" `deletingLastPathComponent()` yields "/..", whose path never equals "/", so an
+        // unbounded loop never ends for an installed app (no Package.swift above /Applications).
         var dir = start.standardizedFileURL
-        while true {
+        for _ in 0..<64 {
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent("Package.swift").path) { return dir }
-            let parent = dir.deletingLastPathComponent()
+            if dir.path == "/" || dir.pathComponents.count <= 1 { return nil }
+            let parent = dir.deletingLastPathComponent().standardizedFileURL
             if parent.path == dir.path { return nil }
             dir = parent
         }
+        return nil
     }
 
     static var envFile: String { ProcessInfo.processInfo.environment["ICA_ENV"] ?? root.appendingPathComponent(".env").path }
