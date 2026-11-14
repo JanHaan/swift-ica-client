@@ -503,6 +503,8 @@ public final class CGPTransport: @unchecked Sendable {
     public struct Status: Sendable {
         public var state: CGPSession.State = .notStarted
         public var receivedSequenced = 0
+        /// Bytes read from the TLS stream (CGP framing included), all connections of this session (D83).
+        public var bytesReceived = 0
         public var sent = 0
         public var acknowledged = 0
         public var queued = 0
@@ -697,6 +699,7 @@ public final class CGPTransport: @unchecked Sendable {
         firstReadTimer?.cancel()
         firstReadTimer = nil
         // Packets parsed before a failure in the same chunk are already counted: deliver them first.
+        counters.bytesReceived += chunk.count
         let (events, failure) = cgp.consume(chunk)
         if failure == nil || !events.isEmpty { lastReceived = clock.now() }
         for event in events {

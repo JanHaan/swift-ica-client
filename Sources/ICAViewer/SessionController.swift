@@ -135,6 +135,8 @@ final class SessionController: NSObject {
         // ICA_TW_H264=0: advertise only the compatible-mode Thinwire caps (idle-repaint experiment).
         display.advertiseH264 = ProcessInfo.processInfo.environment["ICA_TW_H264"] != "0"
         config.display = display
+        // Server → client V3 compression (D83); ICA_COMPRESSION=0 turns it off.
+        config.expanderPowerOffer = CompressionSetting.expanderPower(environment: ProcessInfo.processInfo.environment)
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
                                  printing: Self.printingConfig(), audio: Self.audioConfig(),
                                  webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless))
@@ -1657,5 +1659,22 @@ final class SystemPasteboard: ClipboardPasteboard {
         return CGImage(width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: image.width * 4,
                        space: space, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider,
                        decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+}
+
+/// Settings › Network › "Compress screen data" (D83): server → client V3 compression, on by default.
+/// `ICA_COMPRESSION` (0 or a power) overrides the stored choice for one run.
+enum CompressionSetting {
+    static let defaultsKey = "compressScreenData"
+    static let defaultOn = true
+
+    static var stored: Bool {
+        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? defaultOn }
+        set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+    }
+
+    static func expanderPower(environment env: [String: String]) -> UInt8 {
+        if env["ICA_COMPRESSION"] != nil { return WinstationDriver.Configuration.expanderPowerOffer(environment: env) }
+        return stored ? WinstationDriver.Configuration.defaultExpanderPower : 0
     }
 }

@@ -591,6 +591,7 @@ func hexLine(_ bytes: [UInt8], limit: Int = 48) -> String {
 func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, captureDir: URL) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     if ProcessInfo.processInfo.environment["ICA_CREDS_IN_UI"] == "1" { config.policy.credentialRequest = false }
     if let flags = ProcessInfo.processInfo.environment["ICA_REDUCER_FLAGS"].flatMap({ UInt16($0, radix: 16) }) {
@@ -791,6 +792,7 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
             let t = session.transport.status
             say("  CGP: resumes \(t.resumes), attempts \(t.attempts), sent \(t.sent), acked \(t.acknowledged), queue \(t.queued), " +
                 "received sequenced \(t.receivedSequenced), our keepalives \(t.keepalivesSent), acks \(t.acksSent), ack overrun \(t.ackOverrun)")
+            say("  received on the wire: \(t.bytesReceived) B (TLS payload, CGP included); compression offer \(config.expanderPowerOffer)")
             for (key, value) in packetCounts.sorted(by: { $0.key < $1.key }) {
                 say(String(format: "  %-18@ %6d packets %9d bytes", key as NSString, value.count, value.bytes))
             }
@@ -858,6 +860,7 @@ func runClipTest(ica: ICAFile) async throws {
     // Umlauts, a non-BMP character and a line break: exercises UTF-16, surrogates and CRLF ↔ LF.
     let testText = "CTXCLIP-Test äöü ß € 😀\nZeile 2"
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     // E1 (docs/75 §10): ICA_CLIP_VERSION=4 answers CLIP_INIT with 4 and traces every CTXCLIP byte.
@@ -1142,6 +1145,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     }
 
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     // docs/76 §7.1 V2: negotiate WD cap 0x10 (high throughput) and use the HT frame header.
@@ -2025,6 +2029,7 @@ func runCDMTest(ica: ICAFile, save: Bool) async throws {
     try Data(probeText.utf8).write(to: root.appendingPathComponent("cdmtest-probe.txt"))
     say("shared folder: \(root.path) as M:")
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     let fs = try CDMPOSIXFileSystem(root: root, readOnly: false)
@@ -2215,6 +2220,7 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
     let runID = PrintTestGate.newRunID()
     say("run \(runID); confirm: \(confirm ? "possible (Enter only with \(PrintTestGate.confirmFileName(runID: runID)) created after the screenshot)" : "no (screenshot, then Esc)")")
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     let session = try ICASession(ica: ica, configuration: config, clipboard: nil, cdm: nil, printing: PrinterEngine.Config())
@@ -2483,6 +2489,7 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
                                   : "(no capture device)")
         + "; playback \(play ? "aloud + WAV" : "WAV only")")
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     let session = try ICASession(ica: ica, configuration: config, clipboard: nil, cdm: nil, printing: nil, audio: audioConfig)
@@ -2777,6 +2784,7 @@ func runCamTest(ica: ICAFile, resource: String) async throws {
     say(camtestEncoderCheck(count: 45) { stream.write($0) })
 
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     var webcamConfig = WebcamEngine.Config()
@@ -2928,6 +2936,7 @@ func runCamTest(ica: ICAFile, resource: String) async throws {
 func runShareTest(ica: ICAFile, secondICA: () async throws -> ICAFile?) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: ProcessInfo.processInfo.environment)
     config.logon = WDLogon(ica: ica)
     config.display = WDDisplay(width: 1920, height: 1080)
     var controlConfig = ControlEngine.Config()

@@ -51,6 +51,18 @@ public final class WinstationDriver {
         /// Off by default: our WD module offers powers 0, so the server never compresses. Client → server stays
         /// uncompressed V3 segments either way.
         public var v3Decompression = false
+        /// Server → client compression (D83): the expander power our WD module offers (docs/30 §5.3 offset 77, §12).
+        /// 0 = none (the server then never compresses). Non-zero turns V3 decompression on. The stock Mac client offers
+        /// 19 (512 KiB window); the server took it as offered. We never compress client → server (reducer power 0).
+        public var expanderPowerOffer: UInt8 = 0
+
+        /// `ICA_COMPRESSION`: unset → `defaultExpanderPower`, `0` → off, `N` (10…20) → offer N.
+        public static let defaultExpanderPower: UInt8 = 19
+        public static func expanderPowerOffer(environment env: [String: String]) -> UInt8 {
+            guard let text = env["ICA_COMPRESSION"] else { return defaultExpanderPower }
+            guard let n = UInt8(text), n == 0 || (10...20).contains(n) else { return defaultExpanderPower }
+            return n
+        }
         /// Answer the host's credential request `03 01` (cap 0x12 version 2) with the version-2 reply
         /// (`WDBuild.credentialsV2`). Off by default (we offer version 0, the host then asks `01 01`).
         public var credentialsV2 = false
@@ -314,7 +326,7 @@ public final class WinstationDriver {
         var modules: [[UInt8]] = [
             WDModules.wd(capabilities: negotiated, channels: channels, maxVirtualWrite: UInt16(config.maxVirtualWrite),
                          reducerVersion: WDCapabilityPolicy.reducerVersion(negotiated), productID: config.wdProductID,
-                         fixedTail: config.wdFixedTail),
+                         fixedTail: config.wdFixedTail, expanderPower: config.expanderPowerOffer),
             WDModules.td(outBufLength: config.outBufLength, port: config.tdClientPort ?? config.tdPort, ipv4: config.tdClientIPv4),
             WDModules.framing(),
             WDModules.encryption(),
@@ -421,7 +433,7 @@ public final class WinstationDriver {
             if reducerVersion != 0 && reducerVersion != 3 {
                 onEvent(.failure("server selected reducer version \(reducerVersion); only 0 and 3 are implemented"))
             }
-            if reducerVersion == 3 && expanderPower != 0 && !configuration.v3Decompression {
+            if reducerVersion == 3 && expanderPower != 0 && !decompresses {
                 onEvent(.failure("server kept expander power \(expanderPower); compressed V3 segments cannot be decoded"))
             }
             lastReducer = (reducerVersion, reducerPower, expanderPower)
@@ -432,7 +444,7 @@ public final class WinstationDriver {
         v3 = lastReducer.0 == 3
         highThroughput = negotiated.contains { $0.id == WDCapability.highThroughput }
         expander = WDV3Expander()
-        if v3, configuration.v3Decompression, lastReducer.2 > 0 {
+        if v3, decompresses, lastReducer.2 > 0 {
             // docs/30 §12.3: the server compresses S→C with the expander power it selected; we never compress C→S.
             do { expander = try WDV3Expander(power: Int(lastReducer.2)) } catch {
                 onEvent(.failure("V3 coder for expander power \(lastReducer.2): \(error)"))
@@ -452,6 +464,7 @@ public final class WinstationDriver {
     /// a discovery variant, docs/30 §8.3, docs/76 §7.1 V2).
     public private(set) var highThroughput = false
     private var expander = WDV3Expander()
+    private var decompresses: Bool { configuration.v3Decompression || configuration.expanderPowerOffer > 0 }
 
     // MARK: Send
 

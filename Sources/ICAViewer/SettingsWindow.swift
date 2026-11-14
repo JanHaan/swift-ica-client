@@ -46,6 +46,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let cameraAutomatic = Text(en: "Automatic (system default)", de: "Automatisch (Systemstandard)")
     static let cameraHint = Text(en: "Only while a session app uses it; 32-bit apps only.",
                                  de: "Nur während eine Sitzungs-App sie nutzt; nur 32-Bit-Apps.")
+    static let compressTitle = Text(en: "Compress screen data", de: "Bildschirmdaten komprimieren")
+    static let compressHint = Text(en: "The server sends about a quarter of the data; useful on slow connections. Applies at the next connect.",
+                                   de: "Der Server sendet etwa ein Viertel der Daten; hilfreich bei langsamen Verbindungen. Gilt ab der nächsten Verbindung.")
     static let dockTitle = Text(en: "One Dock entry per app", de: "Ein Dock-Eintrag pro App")
     static let dockHint = Text(en: "Each remote app gets its own Dock icon and Cmd-Tab entry; ICA Viewer then waits in the menu bar. Applies the next time ICA Viewer starts.",
                                de: "Jede Remote-App erhält ein eigenes Dock-Symbol und einen eigenen Cmd-Tab-Eintrag; ICA Viewer wartet dann in der Menüleiste. Gilt ab dem nächsten Start von ICA Viewer.")
@@ -65,6 +68,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         "share": Text(en: "Shared folder:", de: "Freigabe:"), "print": Text(en: "Printing:", de: "Drucken:"),
         "audio": Text(en: "Audio:", de: "Audio:"), "camera": Text(en: "Camera:", de: "Kamera:"),
         "dock": Text(en: "Dock:", de: "Dock:"), "shortcut": Text(en: "Launcher:", de: "Launcher:"),
+        "network": Text(en: "Network:", de: "Netzwerk:"),
     ]
 
     private let protectBox = NSButton(checkboxWithTitle: T.protectTitle.shown, target: nil, action: nil)
@@ -95,6 +99,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let micBox = NSButton(checkboxWithTitle: T.micTitle.shown, target: nil, action: nil)
     private let cameraBox = NSButton(checkboxWithTitle: T.cameraTitle.shown, target: nil, action: nil)
     private let cameraPopup = NSPopUpButton()
+    private let compressBox = NSButton(checkboxWithTitle: T.compressTitle.shown, target: nil, action: nil)
     private let dockBox = NSButton(checkboxWithTitle: T.dockTitle.shown, target: nil, action: nil)
     private let dockHint = NSTextField(wrappingLabelWithString: "")
     private let shortcutPopup = NSPopUpButton()
@@ -279,6 +284,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, cameraPopup],
             [NSGridCell.emptyContentView, hint(T.cameraHint)],
             [NSGridCell.emptyContentView, cameraAccessNote],
+            [label("network"), compressBox],
+            [NSGridCell.emptyContentView, hint(T.compressHint)],
             [label("dock"), dockBox],
             [NSGridCell.emptyContentView, dockHint],
             [label("shortcut"), shortcutPopup],
@@ -341,7 +348,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// popup (at least 360 pt), each measured in English and German. Logged in demo mode.
     static func columnWidths(popups: [NSPopUpButton]) -> (column0: CGFloat, column1: CGFloat) {
         let labels = rowLabels.values.flatMap(\.both).map { ($0, NSTextField(labelWithString: $0).fittingSize.width) }
-        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle, dockTitle].flatMap(\.both)
+        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle, compressTitle, dockTitle].flatMap(\.both)
             .map { ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil).fittingSize.width) }
         let radios = [promptTitle, totpTitle].flatMap(\.both)
             .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
@@ -496,6 +503,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private func selectDockApps() {
         let stored = demo ? nil : UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
         dockBox.state = (stored ?? HelperAppsSwitch.defaultOn) ? .on : .off
+        compressBox.state = (demo ? CompressionSetting.defaultOn : CompressionSetting.stored) ? .on : .off
         let overridden = !demo && HelperManager.setting.source == .environment
         dockHint.stringValue = T.dockHint.shown + (overridden ? " " + T.dockOverride.shown : "")
         let hotKey = demo ? LauncherHotKey.standard : GlobalHotKey.stored
@@ -505,6 +513,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     private func saveDockApps() {
+        let compress = compressBox.state == .on
+        if CompressionSetting.stored != compress {
+            CompressionSetting.stored = compress
+            vlog("compression: saved \(compress ? "on" : "off"); applies at the next connect")
+        }
         let on = dockBox.state == .on
         let stored = UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
         if (stored ?? HelperAppsSwitch.defaultOn) != on {

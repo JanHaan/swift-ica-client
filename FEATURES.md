@@ -86,6 +86,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | EDT lossy mode | Yes | Yes | Yes | ? | Yes | Yes | Yes | No | Release notes only |
 | DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11 |
 | Direct VDA connection (HDX Direct) | Yes | Yes | Yes | Partly | Partly | ? | Partly | No | Release notes only; Web, ChromeOS, Android mention it in passing |
+| ICA stream compression (server → client) | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | Ours: on by default (Settings › Network), about a quarter of the data in a live test; client → server stays uncompressed |
 | Multi-port ICA | Yes | No | Yes | No | No | No | No | No | |
 | SD-WAN support | Yes | Yes | Yes | Yes | Yes | No | No | ? | |
 

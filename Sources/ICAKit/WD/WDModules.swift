@@ -254,7 +254,7 @@ public enum WDModules {
     /// WD module (§5.3). `channels` is the VC bind table (name, number).
     public static func wd(capabilities: [WDCapability], channels: [(String, UInt8)], serial: UInt32 = 0x149A_97F5,
                           maxVirtualWrite: UInt16 = 5000, reducerVersion: UInt16 = 0, productID: UInt16 = WDModules.referenceProductID,
-                          fixedTail: [UInt8] = [], date: Date = Date()) -> [UInt8] {
+                          fixedTail: [UInt8] = [], expanderPower: UInt8 = 0, date: Date = Date()) -> [UInt8] {
         var w = header(.wd, date: date)
         let c = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: date)
         w.u32(serial)
@@ -284,7 +284,7 @@ public enum WDModules {
         }
         w.reference(table)
         w.u8(0)                // reducer power (client → server)
-        w.u8(0)                // expander power (server → client)
+        w.u8(expanderPower)    // expander power (server → client); only meaningful with reducer version 3
         w.u16(0)
         w.u16(reducerVersion)  // max reducer version
         let block = WDCapabilityBlock.serialize(capabilities)

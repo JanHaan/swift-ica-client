@@ -176,6 +176,26 @@ private func syntheticReplay() throws -> WDStockReplay {
         #expect(failures.contains { $0.contains("expander power 19") })
     }
 
+    @Test func compressionOfferAloneTurnsDecompressionOn() throws {
+        // D83: the live client sets only expanderPowerOffer; that must enable the coder for the server's power.
+        let (wd, engines) = try Self.driver { $0.v3Decompression = false; $0.expanderPowerOffer = 19 }
+        var failures: [String] = []
+        wd.onEvent = { if case .failure(let t) = $0 { failures.append(t) } }
+        wd.receive(Data(bytes(hex: liveInitRequestHex)))
+        Self.connect(wd)
+        #expect(failures.isEmpty)
+        var peer = try WDV3Coder(power: 19)
+        let syn = hex("01 02 00 00 00 1d 00 07 01 00 00 02 00 00")
+        var f = V3FrameBuilder()
+        f.segment(channel: 29, complete: true, compressed: true, value: syn.count, try peer.encode(model: 0, syn))
+        var server = WDBasicCipher(key: 0x42)
+        var body = [0x00] + f.frame
+        server.encrypt(&body)
+        wd.receive(Data(WDFraming.frame([0x01] + body)))
+        #expect(failures.isEmpty)
+        #expect(engines["CTXGDT\0"]?.received == [Data(syn)])
+    }
+
     @Test func credentialRequestVersion2IsAnsweredOnlyWhenEnabled() throws {
         let reply = WDBuild.credentialsV2(username: "", domain: "\\D", password: "pw", ticketType: "T1", ticket: "abc")
         // 44 len16, 04 00, offsets from the byte after 04 00: user 0, 0, domain 16, 0, password 22, 0, type 28, ticket 34.
