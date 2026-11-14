@@ -8,10 +8,10 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 
 - **Works, verified live:** gateway logon with password and one-time code, seamless apps as native
   Mac windows with their own Dock entries, several apps in one session, reconnect, survival of short
-  network drops, Thinwire graphics, several monitors, Retina scaling, text clipboard, audio playback
-  and microphone.
+  network drops, Thinwire graphics, several monitors, Retina scaling, text and image clipboard,
+  audio playback and microphone.
 - **Built, not yet verified live:** client drive (one shared folder), printing to PDF, H.264,
-  formatted text and images on the clipboard, webcam with a real camera.
+  formatted text (HTML, RTF) on the clipboard, webcam with a real camera.
 - **Main gaps:** file transfer, links opening on the Mac, automatic reconnect after longer drops,
   UDP transport (EDT), Teams optimisation, smart cards, USB devices.
 
@@ -132,7 +132,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | Clipboard: plain text | Likely | Yes | Yes | Yes | ? | ? | ? | Yes | |
-| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Built | Web: HTML confirmed, images not |
+| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Partly | Web: HTML confirmed, images not. Ours: images verified both ways (D85); HTML and RTF built, not verified live |
 | Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | No | Ours: under investigation |
 | Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: one shared folder; the test site maps no drives |
 | File transfer (upload, download) | Likely | Likely | Likely | Likely | Likely | ? | ? | No | Not a matrix row. Ours: under investigation |
@@ -243,8 +243,9 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
    reconnects the session; it waits up to 10 minutes for the network and then falls back to the
    Reconnect panel (D86). Needs the user's GUI test (Wi-Fi off for more than 3 minutes).
 2. **Live verification of what is already built.** Client drive mapping and printing are
-   implemented but need a site that redirects drives and printers; clipboard HTML, RTF and images
-   are unverified too, as is the webcam with a real camera.
+   implemented but need a site that redirects drives and printers; clipboard HTML and RTF are
+   unverified too (the Word test app was unavailable; images are verified, D85), as is the webcam
+   with a real camera.
 3. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
    optimisation is a separate, larger piece).
 4. **Full-desktop launch.** Only seamless apps are exercised.

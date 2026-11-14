@@ -529,6 +529,44 @@ private final class Harness {
     #expect(throws: ClipboardDIB.Failure.truncated) { try ClipboardDIB.decode(dib.prefix(60)) }
 }
 
+/// The shapes a paint program's session showed live (docs/70 §10): our 32-bpp BI_BITFIELDS DIB is fetched with a
+/// flags-1 DATA_REQUEST plus 2 trailing zero bytes; its copy is listed as METAFILEPICT, DIB, BITMAP and CF_BITMAP
+/// arrives as a 40-byte-header, 24-bpp BI_RGB DIB with biSizeImage set.
+@Test func clipboardImageLiveShapes() throws {
+    let h = Harness()
+    h.ready()
+    h.clock = 5_000
+    // 3×2 image, top-down RGBA, opaque.
+    let bytes: [UInt8] = [230, 20, 20, 255, 20, 200, 40, 255, 0, 0, 0, 255,
+                          8, 0, 220, 255, 16, 50, 128, 255, 255, 255, 255, 255]
+    let rgba = Data(bytes)
+    h.engine.announceLocal(ClipboardSnapshot(content: ClipboardContent(image: ClipboardImage(width: 3, height: 2, rgba: rgba)), takenAt: 6_000))
+    let list: [UInt8] = Host.u16(3) + Host.u16(1) + Host.u16(2) + Host.u32(0)
+    #expect(h.take() == Data(list))
+    h.feed(hex("04 00 01 00 02 00 00 00 00 00"))
+    let served = h.take()
+    let header: [UInt8] = Host.u16(5) + Host.u16(0) + Host.u16(2) + Host.u32(UInt32(52 + 4 * 6))
+    #expect(served.prefix(10) == Data(header))
+    #expect(try ClipboardDIB.decode(served.dropFirst(10)).rgba() == rgba)
+    #expect(!h.events.contains { if case .protocolError = $0 { return true } else { return false } })
+
+    // The session copies it back.
+    h.clock = 7_000
+    h.feed(Host.list([3, 8, 2]))
+    #expect(h.take() == ClipboardWire.dataRequest(format: 2))
+    var dib = ByteWriter()
+    dib.u32(40); dib.u32(3); dib.u32(2); dib.u16(1); dib.u16(24); dib.u32(0); dib.u32(2 * 12)
+    dib.raw([UInt8](repeating: 0, count: 16))
+    // Bottom-up B G R rows of 9 bytes, padded to 12.
+    dib.raw([220, 0, 8, 128, 50, 16, 255, 255, 255, 0, 0, 0])
+    dib.raw([20, 20, 230, 40, 200, 20, 0, 0, 0, 0, 0, 0])
+    h.feed(Host.response(2, dib.data))
+    let (content, echo) = try #require(h.hostClipboard)
+    #expect(!echo && content.text == nil)
+    #expect(content.image?.width == 3 && content.image?.height == 2 && content.image?.rgba() == rgba)
+    #expect(h.take().isEmpty)  // CF_DIB and CF_METAFILEPICT are not fetched
+}
+
 // MARK: Pasteboard sync and loop prevention (§5.4, §5.6)
 
 private final class FakePasteboard: ClipboardPasteboard {

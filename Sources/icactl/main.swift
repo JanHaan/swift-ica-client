@@ -231,6 +231,20 @@ case "cliptest":
         fail("\(error)")
     }
 
+case "cliptest-rich":
+    // icactl cliptest-rich html|rtf|image — HTML/RTF in "Word 2016 - TEST", images in "Paint ABC" (docs/70 §10), both
+    // directions; fresh logon only, nothing saved (the logoff discards the document).
+    guard let kind = args.first.flatMap(RichClipKind.init(rawValue:)) else { fail("usage: icactl cliptest-rich html|rtf|image") }
+    do {
+        let resources = try await storeClient().resources()
+        guard let resource = resources.first(where: { $0.name == kind.resource }) else { fail("no resource named \(kind.resource)") }
+        guard let ica = ICAFile(text: try await storeClient().launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runClipRichTest(ica: ica, kind: kind)
+    } catch {
+        fail("\(error)")
+    }
+
 case "cliptest-files":
     // icactl cliptest-files — clipboard file copy discovery (docs/75 §10 E2/E3), "Explorer Citrix ABC" only, fresh
     // logon only. Mac → session: two known files pasted into %TEMP%\ica-cliptest-<run> (created by this run);
@@ -489,7 +503,10 @@ default:
       icactl session [resource]          launch, logon, capture to .session/last/ (ICA_CAPTURE_REPLAY=1: .session/replay/), log off
       icactl droptest [resource]         session with one link drop after ICA_TEST_DROP_AFTER s and a CGP resume
       icactl cliptest                    clipboard test in "Notepad" (Notepad): paste in, copy out, never saves
-                                         (ICA_CLIP_VERSION=4: answer v4 and trace CTXCLIP to .session/clipfiles/)
+                                         (ICA_CLIP_VERSION=4: answer v4 and trace CTXCLIP to .session/clipfiles/;
+                                         ICA_CLIPTEST_MIXED=1: offer text + HTML + RTF in one list)
+      icactl cliptest-rich html|rtf|image  HTML/RTF in "Word 2016 - TEST", an image in "Paint ABC": paste in, copy
+                                         out, compare; fresh logon only, never saves (ICA_CLIPRICH_START_KEYS=…)
       icactl cliptest-files              clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
                                          copy them back (SHA-256), delete only that folder, log off (fresh logon only)
                                          (ICA_GDT=1: also announce CTXGDT, log host GDT writes to .session/gdt/;
@@ -989,7 +1006,13 @@ func runClipTest(ica: ICAFile) async throws {
             // (a) Mac → host: announce the test string, then paste with Ctrl+V.
             await onSession(session) { pasteServed = nil }
             say("(a) announcing the test string (\(testText.utf16.count) UTF-16 units), then Ctrl+V")
-            session.clipboardAnnounce(ClipboardSnapshot(content: ClipboardContent(text: testText)))
+            // ICA_CLIPTEST_MIXED=1: text, HTML and RTF at once (a browser-style Mac copy; the multi-format list).
+            let mixed = ProcessInfo.processInfo.environment["ICA_CLIPTEST_MIXED"] == "1"
+            let offered = mixed
+                ? ClipboardContent(text: testText, html: "<p><b>CTXCLIP-Test</b></p>", rtf: Data("{\\rtf1\\ansi \\b CTXCLIP-Test\\b0\\par}".utf8))
+                : ClipboardContent(text: testText)
+            if mixed { say("ICA_CLIPTEST_MIXED=1: offering \(offered.summary)") }
+            session.clipboardAnnounce(ClipboardSnapshot(content: offered))
             try await Task.sleep(nanoseconds: 300_000_000)
             ctrl(0x2F)
             scratch.markTyped()
