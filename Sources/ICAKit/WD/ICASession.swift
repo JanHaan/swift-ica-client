@@ -96,7 +96,7 @@ public final class ICASession: @unchecked Sendable {
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
                 cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
                 webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil, gdt: GDTEngine.Config? = nil,
-                extraEngines: [VirtualChannelEngine] = []) throws {
+                extraEngines: [VirtualChannelEngine] = [], acr: ACRReconnect? = nil) throws {
         guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
             throw Failure.notGatewayFile
         }
@@ -105,6 +105,12 @@ public final class ICASession: @unchecked Sendable {
         port = colon.flatMap { UInt16(proxy[proxy.index(after: $0)...]) } ?? 443
         var config = configuration
         config.tdPort = port
+        if let acr {
+            // ACR reconnect (docs/30 §15.6 points 3-4): same ICA data, the stored cookie (flag 0x10, 0x41 answer), cap 0x0A.
+            config.acrReconnectCookie = acr.cookie
+            config.policy.acr = true
+        }
+        isACRReconnect = acr != nil
         wd = WinstationDriver(configuration: config)
         thinwire = ThinwireEngine()
         var twi = SeamlessEngine.Config()
@@ -143,6 +149,7 @@ public final class ICASession: @unchecked Sendable {
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
+        transport.reconnectTicket = acr?.ticket
         // T_sr without a server cap 9: the ICA file's SessionReliabilityTTL (§3.12.4).
         transport.srTimeoutFallback = ica["SessionReliabilityTTL"].flatMap(TimeInterval.init)
         transport.configureTestHooks(from: ProcessInfo.processInfo.environment)
@@ -279,6 +286,30 @@ public final class ICASession: @unchecked Sendable {
         defer { suspendedLock.unlock() }
         return suspendedFlag
     }
+
+    /// This session was opened as an ACR reconnect (`init(…, acr:)`).
+    public let isACRReconnect: Bool
+
+    private func sync<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) == true { return body() }
+        return queue.sync(execute: body)
+    }
+
+    /// What an ACR reconnect would use now (any thread), or why ACR is not possible (docs/30 §15.6 point 1: ACR on,
+    /// ICA data received; our client also needs a cookie and the CGP reconnect ticket).
+    public var acrReadiness: Result<ACRReconnect, ACRUnavailable> {
+        sync {
+            guard let params = wd.acrParameters else { return .failure(.notNegotiated) }
+            guard params.enabled else { return .failure(.disabledByHost) }
+            guard wd.everConnected else { return .failure(.noICAData) }
+            guard let cookie = wd.acrCookie, !cookie.isEmpty else { return .failure(.noCookie) }
+            guard let ticket = transport.latestReconnectTicket else { return .failure(.noTicket) }
+            return .success(ACRReconnect(ticket: ticket, cookie: cookie, parameters: params))
+        }
+    }
+
+    /// The ACR data, if ACR is possible (see `acrReadiness`).
+    public var acrReconnect: ACRReconnect? { try? acrReadiness.get() }
 
     /// Runs `block` on the session queue (inline if already there).
     public func perform(_ block: @escaping () -> Void) {
@@ -483,6 +514,10 @@ public final class CGPTransport: @unchecked Sendable {
         /// Without an explicit refusal the VDA may hold the session for SR until about then; a store
         /// relaunch before it would not reconnect yet (§3.12.11).
         public let relaunchNotBefore: Date?
+
+        /// For `icactl acrtest` (ICA_ACR_EARLY): the test closed the suspended session itself.
+        public static let testEarly = GiveUp(cause: .refused(.refused), message: "closed by the test while suspended",
+                                             offerRelaunch: true, relaunchNotBefore: nil)
     }
 
     public enum Event {
@@ -514,6 +549,10 @@ public final class CGPTransport: @unchecked Sendable {
         public var resumes = 0
         public var acksSent = 0
         public var keepalivesSent = 0
+        /// A BIND_RESPONSE arrived on this CGP session (the gateway accepted the ticket).
+        public var bound = false
+        /// Reason byte of a server FINISH_REQUEST, if one came (docs/20 §3.9, §3.12.8).
+        public var serverFinishReason: UInt8?
     }
 
     public let host: String
@@ -525,6 +564,12 @@ public final class CGPTransport: @unchecked Sendable {
     /// Test hooks (first connection only): abrupt drop after n s; stall reads and writes after n s.
     public var testDropAfter: TimeInterval?
     public var testBlackhole: (after: TimeInterval, duration: TimeInterval)?
+    /// Test hook (`icactl acrtest`): resume attempts are skipped while suspended, as if the server stayed unreachable,
+    /// so SR gives up at T_sr exactly as after a real long outage.
+    public var testSuppressResume = false
+    private var suppressionLogged = false
+    /// ACR (docs/30 §15.6 point 4): the first bind carries this CGP reconnect ticket instead of the STA ticket.
+    public var reconnectTicket: CGPReconnectTicket?
 
     private let tls: Bool
     private let ticket: String
@@ -563,6 +608,7 @@ public final class CGPTransport: @unchecked Sendable {
     private var srDeadline: ContinuousClock.Instant?
     private var srTimeoutUsed: TimeInterval = 0
     private var suspendedAt: Date?
+    private var firstSuspend: Date?
     private var onlineDuringSuspension = false
     private var deadlineTimer: CGPTimer?
     private var attemptWork: CGPTimer?
@@ -609,6 +655,27 @@ public final class CGPTransport: @unchecked Sendable {
 
     public var isClosed: Bool { onQueue { closed } }
 
+    /// The latest CGP reconnect ticket from the server (any thread), for an ACR reconnect.
+    public var latestReconnectTicket: CGPReconnectTicket? { onQueue { cgp.reconnectTicket } }
+
+    /// When the link of this session first went dead (the start of the ACR budget, docs/30 §15.6 point 2).
+    public var firstSuspendedAt: Date? { onQueue { firstSuspend } }
+
+    /// T_sr in use (server cap 9, else the ICA file, else 180 s).
+    public var sessionReliabilityTimeout: TimeInterval { onQueue { srTimeoutUsed > 0 ? srTimeoutUsed : srTimeout } }
+
+    /// Test hook (`icactl acrtest`): drop the connection abruptly now, as a dead link (no FINISH). With
+    /// `suppressResume` no resume attempt follows, so SR gives up at T_sr.
+    public func testDropNow(suppressResume: Bool) {
+        perform { [self] in
+            guard !closed, cgp.state == .connected, let stream else { return }
+            testSuppressResume = suppressResume
+            log("test: dropping the connection abruptly (no FINISH)" + (suppressResume ? "; resume attempts suppressed (simulated long outage)" : ""))
+            stream.abort()
+            linkFailed("test drop", generation: generation)
+        }
+    }
+
     public var status: Status {
         onQueue {
             var s = counters
@@ -635,8 +702,13 @@ public final class CGPTransport: @unchecked Sendable {
             guard !closed else { return stream.close() }
             log("\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
             install(stream)
-            write(cgp.bindRequest(ticket: ticket))
-            log("→ CGP bind request (ticket \(ticket.count) chars)")
+            if let reconnectTicket {
+                write(cgp.bindRequest(reconnect: reconnectTicket))
+                log("→ CGP bind request for ACR (\(reconnectTicket), not a resume)")
+            } else {
+                write(cgp.bindRequest(ticket: ticket))
+                log("→ CGP bind request (ticket \(ticket.count) chars)")
+            }
             scheduleTestHooks()
         }
     }
@@ -707,6 +779,7 @@ public final class CGPTransport: @unchecked Sendable {
             case .signature:
                 break
             case .bindResponse(let caps):
+                counters.bound = true
                 onEvent(.bound(caps))
                 logBindDetails()
                 cgp.openChannel()
@@ -747,6 +820,7 @@ public final class CGPTransport: @unchecked Sendable {
                 // than 5 received packets are unacknowledged.
                 onEvent(.keepalive(raw: raw))
             case .finishRequest(let type, let reason):
+                counters.serverFinishReason = reason
                 if cgp.state == .resuming {
                     // Refusal in state 6: answer, no FINISH_REQUEST of our own (§3.12.8), give up.
                     write(cgp.finishResponse(closeType: type))
@@ -960,6 +1034,7 @@ public final class CGPTransport: @unchecked Sendable {
         srDeadline = clock.now() + .seconds(srTimeoutUsed)
         let deadline = clock.date().addingTimeInterval(srTimeoutUsed)
         suspendedAt = clock.date()
+        if firstSuspend == nil { firstSuspend = suspendedAt }
         onlineDuringSuspension = online
         attempt = 0
         log("link dead (\(reason)): suspended, resume window \(Int(srTimeoutUsed)) s; queue \(cgp.queueCount) packets, " +
@@ -999,6 +1074,11 @@ public final class CGPTransport: @unchecked Sendable {
         guard !closed, cgp.state == .suspended, !attemptInProgress else { return }
         if deadlinePassed { return giveUp(onlineDuringSuspension ? .deadline : .offline) }
         guard online else { return scheduleAttempt(after: timing.retryDelay) }
+        if testSuppressResume {
+            if !suppressionLogged { log("test: resume attempts suppressed until T_sr ends") }
+            suppressionLogged = true
+            return scheduleAttempt(after: timing.retryDelay)
+        }
         attempt += 1
         counters.attempts += 1
         attemptInProgress = true

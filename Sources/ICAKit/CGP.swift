@@ -1,5 +1,24 @@
 import Foundation
 
+/// The CGP reconnect ticket from the server's BIND_RESPONSE cap 6 (docs/20 §3.12.5, §3.12.10): used by every SR
+/// resume and by an ACR reconnect (a fresh bind, docs/30 §15.6). A secret: memory only; the description shows only the
+/// type and length.
+public struct CGPReconnectTicket: Equatable, Sendable, CustomStringConvertible {
+    public let type: UInt8
+    let bytes: Data
+
+    init(type: UInt8, bytes: Data) {
+        self.type = type
+        self.bytes = bytes
+    }
+
+    public var length: Int { bytes.count }
+    /// The same ticket with another type byte (the reference's ACR path puts the ticket into `Address`, which goes out
+    /// with type 0, docs/30 §15.6 point 3 [I]).
+    public func withType(_ type: UInt8) -> CGPReconnectTicket { CGPReconnectTicket(type: type, bytes: bytes) }
+    public var description: String { "reconnect ticket type \(type), \(bytes.count) B" }
+}
+
 /// Common Gateway Protocol (session reliability), docs/20-transport.md §3 and §7.1, with resume
 /// (§3.12): retransmit queue, resume bind, resume bind response.
 ///
@@ -130,6 +149,7 @@ public final class CGPSession {
     var reconnectCookie = Data()
     var serverTicket: (type: UInt8, ticket: Data)?
     private var staTicket = Data()
+    private var staTicketType: UInt8 = 0
     public private(set) var serverReliability: ServerReliability?
     public private(set) var reliabilityParams: ReliabilityParams?
     /// Server cap 7 intervals in ms ([I] C2H, then H2C).
@@ -150,6 +170,8 @@ public final class CGPSession {
     /// Received packets not yet acknowledged.
     public var unacknowledged: Int { rxCount - lastAcked }
     public var hasServerTicket: Bool { serverTicket != nil }
+    /// The latest server ticket (cap 6), for an ACR reconnect.
+    public var reconnectTicket: CGPReconnectTicket? { serverTicket.map { CGPReconnectTicket(type: $0.type, bytes: $0.ticket) } }
     /// Kept for older callers: same as `txAcked`.
     public var peerAcked: Int { txAcked }
     /// Packets go on the wire only in CONNECTED and CLOSING (§3.12.7).
@@ -212,7 +234,15 @@ public final class CGPSession {
     }
 
     /// Signature plus BIND_REQUEST carrying the STA ticket (`Address` from the ICA file). State → 2.
-    public func bindRequest(ticket: String) -> Data {
+    public func bindRequest(ticket: String) -> Data { bindRequest(ticketType: 0, ticket: Data(ticket.utf8)) }
+
+    /// A fresh (non-resume) bind with the server's CGP reconnect ticket instead of the STA ticket: the ACR connect
+    /// (docs/30 §15.6 point 4, docs/20 §3.12.11). Same caps as any first bind.
+    public func bindRequest(reconnect ticket: CGPReconnectTicket) -> Data {
+        bindRequest(ticketType: ticket.type, ticket: ticket.bytes)
+    }
+
+    private func bindRequest(ticketType: UInt8, ticket: Data) -> Data {
         var params = ByteWriter()  // cap 9 Reliability parameters
         params.u8(1); params.u16(180); params.u16(1); params.u16(25); params.u16(10)
 
@@ -233,10 +263,11 @@ public final class CGPSession {
         let kept = (params: Self.capability(9, params.data), keepalive: Self.capability(7, keepalive.data),
                     services: Self.capability(1, services.data), cap2: Self.capability(2, cap2.data))
         keptCaps = kept
-        staTicket = Data(ticket.utf8)
+        staTicket = ticket
+        staTicketType = ticketType
         state = .binding
         return bindPacket([reliabilityCap(resume: false), kept.params, kept.keepalive, kept.services,
-                           ticketCap(type: 0, staTicket), kept.cap2])
+                           ticketCap(type: ticketType, staTicket), kept.cap2])
     }
 
     /// Signature plus the resume BIND_REQUEST (§3.12.5): same caps in the same order, cap 5 in the
@@ -244,7 +275,7 @@ public final class CGPSession {
     /// everything received so far, so `lastAcked = rxCount` afterwards.
     public func resumeBindRequest() -> Data {
         guard let kept = keptCaps else { preconditionFailure("resume before the first bind") }
-        let ticket = serverTicket ?? (type: 0, ticket: staTicket)
+        let ticket = serverTicket ?? (type: staTicketType, ticket: staTicket)
         let data = bindPacket([reliabilityCap(resume: true), kept.params, kept.keepalive, kept.services,
                                ticketCap(type: ticket.type, ticket.ticket), kept.cap2])
         lastAcked = rxCount

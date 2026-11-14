@@ -180,6 +180,15 @@ case "connect", "session":
         fail("\(error)")
     }
 
+case "acrtest":
+    // icactl acrtest — auto client reconnect (docs/30 §15.6), "Calculator" only, headless, no input. Fresh logon with cap
+    // 0x0A advertised, wait for Thinwire INIT, the app window and the ACR cookie; then a simulated long outage: the TCP/TLS
+    // connection is dropped hard (no FINISH) and every resume attempt is suppressed, so SR gives up at T_sr as after a real
+    // outage; then an ACR connect (fresh TLS + non-resume CGP bind with the reconnect ticket, WD flag 0x10, cookie answer),
+    // retried every 3 s within the ACR budget. Then a logoff. Refuses to start unless Sessions/List shows 0 sessions.
+    // ICA_ACR_TICKET_TYPE=<n> sends the ticket with type byte n instead of the server's.
+    await runACRTest(name: "Calculator")
+
 case "droptest":
     // icactl droptest [resource] — like `session`, but drops the TCP connection once after
     // ICA_TEST_DROP_AFTER s (alias ICA_DROP_AFTER; default 15, no FINISH), lets CGP session reliability resume (docs/20 §3.12),
@@ -714,6 +723,9 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
             case .terminate(let reason):
                 terminateReason = reason
                 say("← TERMINATE reason \(reason); acked")
+            case .acrCookie(let length): say("← ACR cookie (0x41 sub 1): \(length) B stored in memory (not shown)")
+            case .acrQuery(let length): say("← ACR query (0x41 sub 2) → answered with the stored cookie (\(length) B, not shown)")
+            case .acrOther(let sub, let length): say("← 0x41 sub \(sub) (\(length) B, not shown)")
             case .packet(let p):
                 if let ch = p.channel, let capture = captures.first(where: { $0.number == ch }) { capture.record(p.payload) }
                 let key = p.channel.map { "VC ch\($0)" } ?? WDPacketType.name(p.type)
@@ -3259,4 +3271,280 @@ func soundAppSteps(session: ICASession, target: UInt32, keys: [AudioTestKeyStep]
     let deadline = Date().addingTimeInterval(observe)
     while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 500_000_000) }
     return steps
+}
+
+// MARK: - ACR test (docs/30 §15.6)
+
+func hexBytes(_ text: String) -> [UInt8] {
+    let digits = Array(text.filter(\.isHexDigit))
+    return stride(from: 0, to: digits.count - 1, by: 2).compactMap { UInt8(String(digits[$0...$0 + 1]), radix: 16) }
+}
+
+/// Sessions/List as one line per session; nil if the call failed.
+func acrListSessions(_ label: String, api: StoreSessions) async -> StoreSessionList? {
+    do {
+        let list = try await api.list()
+        try? http.saveCookies(to: cookiePath)
+        say("Sessions/List (\(label)): \(list.sessions.count) session(s)" + list.sessions.map {
+            "; \($0.shortId) \($0.connectionState.name) apps [\($0.appNames.joined(separator: ", "))]"
+        }.joined())
+        return list
+    } catch {
+        say("Sessions/List (\(label)) failed: \(error)")
+        return nil
+    }
+}
+
+/// One connection of the ACR test: logs, milestones, window and Thinwire tracking (session queue).
+final class ACRTestConnection {
+    let label: String
+    let session: ICASession
+    var monitor = ACRAttemptMonitor()
+    var closedReason: String?
+    var gaveUp: CGPTransport.GiveUp?
+    var windows: [String] = []
+
+    init(label: String, ica: ICAFile, config: WinstationDriver.Configuration, acr: ACRReconnect?) throws {
+        self.label = label
+        session = try ICASession(ica: ica, configuration: config, acr: acr)
+        let session = self.session
+        session.thinwire.log = { [label] in say("[\(label)] " + $0) }
+        session.onThinwireInit = { [weak self] info in
+            self?.monitor.thinwireInit()
+            say("[\(label)] Thinwire INIT \(info.width)x\(info.height) profile \(info.profile)")
+        }
+        session.seamless.onEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .channelReady(let host):
+                self.monitor.hostInit()
+                say("[\(label)] TWI host init: flags 0x\(String(host.flags.rawValue, radix: 16))")
+            case .windowAdded(let w):
+                self.monitor.windowAdded(kind: w.kind, appKey: w.appKey)
+                let line = "window \(w.id) \(w.kind) \"\(w.title)\" \(GuardedLogoff.basename(w.appKey))"
+                self.windows.append(line)
+                say("[\(label)] TWI " + line)
+            default: break
+            }
+        }
+        session.onEvent = { [weak self] event in
+            guard let self else { return }
+            self.monitor.note(event)
+            switch event {
+            case .log(let text): say("[\(label)] " + text)
+            case .cgpBound(let caps): say("[\(label)] ← CGP bind response: \(caps.map(\.description).joined(separator: ", "))")
+            case .channelOpened(let status): say("[\(label)] ← CGP channel open: status \(status)")
+            case .detect: say("[\(label)] ← ICA detect, replied")
+            case .keepalive: break
+            case .suspended(let info): say("[\(label)] CGP suspended: \(info.reason); deadline in \(Int(info.deadline.timeIntervalSinceNow)) s")
+            case .resuming(let n): say("[\(label)] CGP resume attempt \(n)")
+            case .resumed: say("[\(label)] CGP resumed (unexpected in this test)")
+            case .gaveUp(let g):
+                self.gaveUp = g
+                say("[\(label)] CGP gave up: \(g.message) (\(g.cause))")
+            case .closed(let reason):
+                self.closedReason = reason
+                if let r = session.transport.status.serverFinishReason { self.monitor.serverFinished(reason: r) }
+                say("[\(label)] session closed: \(reason)")
+            case .wd(let e):
+                switch e {
+                case .initRequest(let r):
+                    say("[\(label)] ← INIT_REQUEST level \(r.level), \(r.capabilities.count) caps; server cap 0x0a: " +
+                        (r.capability(WDCapability.acrCookie).map(\.description) ?? "none"))
+                case .initResponseSent(let modules, let negotiated):
+                    say("[\(label)] → INIT_RESPONSE \(modules.joined(separator: ", ")); WD flags 0x\(session.wd.isACRReconnect ? "1f" : "0f")")
+                    say("[\(label)]      negotiated: \(negotiated.map(\.description).joined(separator: ", "))")
+                case .connected(let v, let rp, let ep, let caps):
+                    say("[\(label)] → INIT_CONNECT_RESPONSE; connected (reducer v\(v), powers \(rp)/\(ep)); final cap 0x0a: " +
+                        (caps.first { $0.id == WDCapability.acrCookie }.map(\.description) ?? "none") +
+                        "; ACR parameters: " + (WDACRParameters(caps).map(\.description) ?? "none"))
+                case .credentialRequest(let answered): say("[\(label)] ← credential request 0x44; answered: \(answered) (strings not shown)")
+                case .acrCookie(let length): say("[\(label)] ← ACR cookie (0x41 sub 1): \(length) B, kept in memory (not shown)")
+                case .acrQuery(let length): say("[\(label)] ← ACR query (0x41 sub 2) → answered with the cookie (\(length) B, not shown)")
+                case .acrOther(let sub, let length): say("[\(label)] ← 0x41 sub \(sub) (\(length) B, not shown)")
+                case .terminate(let reason): say("[\(label)] ← TERMINATE reason \(reason); acked")
+                case .sessionInfo(let tag, _): say("[\(label)] ← session info \(tag)")
+                case .failure(let text): say("[\(label)] WD failure: \(text)")
+                case .encryption(let mode): say("[\(label)] encryption established: \(mode)")
+                default: break
+                }
+            }
+        }
+    }
+
+    func on<T>(_ body: @escaping (ACRTestConnection) -> T) async -> T {
+        await withCheckedContinuation { c in session.perform { c.resume(returning: body(self)) } }
+    }
+
+    /// Polls `condition` on the session queue every 250 ms; true when met, false on close or timeout.
+    func wait(_ seconds: Double, _ condition: @escaping (ACRTestConnection) -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if await on(condition) { return true }
+            if session.isClosed { return false }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return await on(condition)
+    }
+
+    /// TWI logoff, then wait for the server to end the session; FINISH if it does not.
+    func logoff() async -> String {
+        let sent: Bool = await withCheckedContinuation { c in session.logoff { c.resume(returning: $0) } }
+        guard sent else {
+            await session.close()
+            return "no TWI channel to log off: disconnected"
+        }
+        say("[\(label)] → TWI LOGOFF")
+        let deadline = Date().addingTimeInterval(25)
+        while Date() < deadline, !session.isClosed { try? await Task.sleep(nanoseconds: 250_000_000) }
+        if !session.isClosed {
+            await session.close()
+            return "logoff sent, server did not end the session in 25 s: disconnected"
+        }
+        return "logged off"
+    }
+}
+
+func runACRTest(name: String) async {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let environment = ProcessInfo.processInfo.environment
+    let store = storeClient()
+    let api = store.sessions
+    let ica: ICAFile
+    do {
+        let resources = try await store.resources()
+        guard let before = await acrListSessions("before", api: api) else { fail("cannot list sessions: refusing to start") }
+        guard before.sessions.isEmpty else { fail("\(before.sessions.count) session(s) open: refusing to start (touch nothing)") }
+        guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
+        guard let file = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        ica = file
+    } catch {
+        fail("\(error)")
+    }
+    var config = WinstationDriver.Configuration()
+    config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: environment)
+    config.logon = WDLogon(ica: ica)
+    config.policy.acr = true
+    if let hex = environment["ICA_ACR_CAP"] {
+        // Discovery: the cap 0x0A body as hex ("ref" = the reference's 12 zero bytes).
+        config.policy.acrReplyBody = hex == "ref" ? WDCapabilityPolicy.acrReferenceBody : hexBytes(hex)
+    }
+    if let form = environment["ICA_ACR_REPLY"].flatMap(ACRReplyForm.init(rawValue:)) { config.acrReplyForm = form }
+    if environment["ICA_CREDV2"] == "1" {
+        // Discovery: cap 0x12 version 2 and its reply, as the stock client (docs/76 §7.13-7.14).
+        config.policy.credentialVersion = 2
+        config.credentialsV2 = true
+    }
+    say("0x41 reply form \(config.acrReplyForm.rawValue), credential v2 \(config.credentialsV2)")
+    say("cap 0x0a body offered: " + config.policy.acrReplyBody.map { String(format: "%02x", $0) }.joined(separator: " "))
+    config.display = WDDisplay(width: 1920, height: 1080)
+
+    // 1. Fresh logon.
+    let first: ACRTestConnection
+    do { first = try ACRTestConnection(label: "S1", ica: ica, config: config, acr: nil) } catch { fail("\(error)") }
+    do {
+        try await first.session.start()
+        await first.on { $0.monitor.tlsConnected() }
+    } catch { fail("first connect: \(error)") }
+    // The logon must be over (fresh logon decided: the post-logon Thinwire INIT), not just a logon console window.
+    let up = await first.wait(120) { $0.monitor.logon.isFresh && $0.monitor.appWindows > 0 }
+    say(up ? "S1: fresh logon complete, app window seen" : "S1: logon not complete within 120 s")
+    if up { try? await Task.sleep(nanoseconds: 5_000_000_000) }
+    if up { _ = await first.wait(30) { $0.session.acrReconnect != nil } }
+    let readiness = first.session.acrReadiness
+    let fresh = await first.on { $0.monitor.logon.isFresh }
+    say("S1: fresh logon \(fresh); ACR readiness: " + ((try? readiness.get()).map(\.description) ?? "\(readiness)"))
+    guard up, case .success(var acr) = readiness else {
+        say("ACR not possible on this connection: logging off, no outage simulated")
+        if !first.session.isClosed { say("S1: " + (await first.logoff())) }
+        _ = await acrListSessions("after", api: api)
+        say("=== result: ACR not available (\((try? readiness.get()).map { _ in "S1 failed" } ?? "\(readiness)")) ===")
+        return
+    }
+    if let typeText = environment["ICA_ACR_TICKET_TYPE"], let type = UInt8(typeText) {
+        acr = acr.withTicketType(type)
+        say("ICA_ACR_TICKET_TYPE: ticket type byte \(type) instead of the server's")
+    }
+    let srTimeout = first.session.transport.sessionReliabilityTimeout
+    let target = await acrListSessions("established", api: api)?.sessions.first
+
+    // 2. Simulated long outage: hard drop, no resume, SR gives up at T_sr.
+    say("outage: hard drop now; resume attempts suppressed; SR should give up after \(Int(srTimeout)) s")
+    first.session.transport.testDropNow(suppressResume: true)
+    let polls = Date()
+    // ICA_ACR_EARLY=<s>: discovery variant, ACR while the server still holds SR: close S1 (no FINISH) n s after the drop.
+    if let early = environment["ICA_ACR_EARLY"].flatMap(Double.init) {
+        try? await Task.sleep(nanoseconds: UInt64(early * 1_000_000_000))
+        say("ICA_ACR_EARLY: closing S1 \(Int(early)) s after the drop, without FINISH (server still holds SR)")
+        await first.on { $0.gaveUp = CGPTransport.GiveUp.testEarly }
+        await first.session.close()
+    }
+    while !first.session.isClosed, Date().timeIntervalSince(polls) < srTimeout + 60 {
+        try? await Task.sleep(nanoseconds: 30_000_000_000)
+        if !first.session.isClosed { _ = await acrListSessions("outage +\(Int(Date().timeIntervalSince(polls))) s", api: api) }
+    }
+    let gaveUp = await first.on { $0.gaveUp }
+    guard first.session.isClosed, let gaveUp else {
+        say("SR did not give up in time: closing S1 without FINISH")
+        await first.session.close()
+        _ = await acrListSessions("after", api: api)
+        say("=== result: test aborted (SR did not give up) ===")
+        return
+    }
+    let firstSuspend = first.session.transport.firstSuspendedAt ?? polls
+    say("SR gave up \(Int(Date().timeIntervalSince(firstSuspend))) s after the drop: \(gaveUp.message)")
+    _ = await acrListSessions("after SR give-up", api: api)
+
+    // 3. ACR: countdown min(acrTimeout, T_sr + acrTimeout − elapsed since the first suspend); attempts every 3 s.
+    let budgetEnd = firstSuspend.addingTimeInterval(srTimeout + acr.acrTimeout)
+    let countdownEnd = min(Date().addingTimeInterval(acr.acrTimeout), budgetEnd)
+    say("ACR: \(acr); countdown \(Int(countdownEnd.timeIntervalSinceNow)) s")
+    var attempt = 0
+    var outcome: ACRAttemptMonitor.Outcome = .failed("no attempt")
+    var connection: ACRTestConnection?
+    while Date() < countdownEnd {
+        attempt += 1
+        let c: ACRTestConnection
+        do { c = try ACRTestConnection(label: "ACR\(attempt)", ica: ica, config: config, acr: acr) } catch { fail("\(error)") }
+        say("ACR attempt \(attempt): connecting")
+        do {
+            try await c.session.start()
+            await c.on { $0.monitor.tlsConnected() }
+            let done = await c.wait(90) { $0.monitor.success != nil || $0.closedReason != nil }
+            outcome = await c.on { conn in conn.monitor.success ?? conn.closedReason.map { conn.monitor.verdict(closed: $0) } ?? .failed("timeout") }
+            if !done, !c.session.isClosed {
+                // Not retried: a connection that hangs (e.g. at a logon screen) may have created a session.
+                say("ACR attempt \(attempt): no verdict within 90 s; disconnecting, no further attempt")
+                await c.session.close()
+                outcome = .hostRefused("no verdict within 90 s (" + "\(await c.on { $0.monitor.verdict(closed: "timeout") })" + ")")
+            }
+        } catch {
+            outcome = .failed("connect: \(error)")
+        }
+        let m = await c.on { $0.monitor }
+        say("ACR attempt \(attempt): \(outcome); bound \(m.bound), WD connected \(m.wdConnected), cookie query " +
+            (m.cookieAnswered.map { "answered (\($0) B)" } ?? "none") + ", new cookie " + (m.newCookie.map { "\($0) B" } ?? "none") +
+            ", credential request \(m.credentialRequested), logon UI \(m.logon.sawLogonUI), Thinwire INITs \(m.thinwireInits), app windows \(m.appWindows)")
+        connection = c
+        if outcome == .reconnected || outcome == .newLogon || !outcome.isRetryable { break }
+        if !c.session.isClosed { await c.session.close() }
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+    }
+
+    // 4. Check the store's view, then log off what this run created.
+    let after = await acrListSessions("after ACR", api: api)
+    if let target, let after {
+        let same = after.sessions.count == 1 && after.sessions[0].sessionId == target.sessionId
+        say("same session as before the outage: \(same) (before \(target.shortId), now \(after.sessions.map(\.shortId).joined(separator: ", ")))")
+    }
+    var ending = "nothing to log off"
+    if let c = connection, !c.session.isClosed {
+        if outcome == .reconnected { _ = await c.wait(10) { _ in false } }
+        ending = await c.logoff()
+    }
+    try? await Task.sleep(nanoseconds: 3_000_000_000)
+    _ = await acrListSessions("end", api: api)
+    if let c = connection { for line in await c.on({ $0.windows }) { say("  ACR windows: " + line) } }
+    say("=== result: \(outcome) after \(attempt) attempt(s); end: \(ending) ===")
 }

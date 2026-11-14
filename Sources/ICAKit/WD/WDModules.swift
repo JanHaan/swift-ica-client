@@ -254,7 +254,8 @@ public enum WDModules {
     /// WD module (§5.3). `channels` is the VC bind table (name, number).
     public static func wd(capabilities: [WDCapability], channels: [(String, UInt8)], serial: UInt32 = 0x149A_97F5,
                           maxVirtualWrite: UInt16 = 5000, reducerVersion: UInt16 = 0, productID: UInt16 = WDModules.referenceProductID,
-                          fixedTail: [UInt8] = [], expanderPower: UInt8 = 0, date: Date = Date()) -> [UInt8] {
+                          fixedTail: [UInt8] = [], expanderPower: UInt8 = 0, acrReconnect: Bool = false,
+                          date: Date = Date()) -> [UInt8] {
         var w = header(.wd, date: date)
         let c = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: date)
         w.u32(serial)
@@ -265,7 +266,8 @@ public enum WDModules {
         w.u8(UInt8(c.minute!))
         w.u8(UInt8(c.second!))
         w.u8(UInt8(min(99, c.nanosecond! / 10_000_000)))
-        w.u32(0x0F)            // flags
+        // flags; +0x10 on an ACR reconnect with a stored cookie (docs/30 §5.3, §15.6)
+        w.u32(acrReconnect ? 0x1F : 0x0F)
         w.u16(0)               // count of 12-byte entries
         w.reference([])        // their offset
         w.u16(maxVirtualWrite)

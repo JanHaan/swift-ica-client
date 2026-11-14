@@ -1,5 +1,16 @@
 import Foundation
 
+/// Layouts of the 0x41 answer (`WinstationDriver.Configuration.acrReplyForm`, D84). The stored cookie is the host's whole
+/// sub-1 payload, its leading `01` included.
+public enum ACRReplyForm: String, Sendable {
+    /// `41 <u16 1+n> 01 <stored payload>`: the host accepted this (live, D84).
+    case wholePayload
+    /// `41 <u16 n> 01 <payload after its sub byte>`: our first reading of docs/30 §15.6; the host answered TERMINATE 1.
+    case afterSub
+    /// `41 <u16 n-1> <payload after its sub byte>` (discovery only, never run).
+    case noSub
+}
+
 /// The ICA Winstation Driver: handshake (INIT_REQUEST → INIT_RESPONSE → INIT_CONNECT →
 /// INIT_CONNECT_RESPONSE), then framed/encrypted WD packets, VC dispatch and input
 /// (docs/30-winstation.md). Not thread-safe: drive it from one serial queue (see `ICASession`).
@@ -66,6 +77,12 @@ public final class WinstationDriver {
         /// Answer the host's credential request `03 01` (cap 0x12 version 2) with the version-2 reply
         /// (`WDBuild.credentialsV2`). Off by default (we offer version 0, the host then asks `01 01`).
         public var credentialsV2 = false
+        /// ACR reconnect (docs/30 §15.6): the cookie the host handed out on the previous connection. Non-empty → the
+        /// WD module carries flag 0x10 and the host's 0x41 query is answered with it. A secret: memory only, never logged.
+        public var acrReconnectCookie: [UInt8]?
+        /// Layout of the answer to the host's 0x41 query; the others than `.wholePayload` are discovery variants
+        /// (icactl `ICA_ACR_REPLY`).
+        public var acrReplyForm: ACRReplyForm = .wholePayload
 
         public init() {}
 
@@ -97,6 +114,12 @@ public final class WinstationDriver {
         case setLED(UInt8)
         case mousePosition(x: UInt16, y: UInt16)
         case terminate(reason: UInt8)
+        /// 0x41 sub 1: the host handed out an ACR cookie (length only; the bytes are a secret).
+        case acrCookie(length: Int)
+        /// 0x41 sub 2: the host asked for the cookie; answered with `length` bytes (0 = none stored).
+        case acrQuery(answeredLength: Int)
+        /// 0x41 with another sub-command (length only).
+        case acrOther(sub: UInt8, length: Int)
         /// Every server packet after parsing (for statistics), VC writes included.
         case packet(WDPacket)
         case droppedChannelData(channel: UInt8, bytes: Int)
@@ -116,6 +139,15 @@ public final class WinstationDriver {
     public private(set) var initRequest: WDInitRequest?
     public private(set) var negotiated: [WDCapability] = []
     public private(set) var finalCapabilities: [WDCapability] = []
+    /// The latest ACR cookie (0x41 sub 1), or the configured one of the previous connection. Secret: memory only.
+    private(set) var acrCookie: [UInt8]?
+    public var acrCookieLength: Int { acrCookie?.count ?? 0 }
+    /// The host's cap 0x0A values from the final capability list (nil without cap 0x0A).
+    public var acrParameters: WDACRParameters? { WDACRParameters(finalCapabilities) }
+    /// True once a handshake completed on this connection (ICA data was received, docs/30 §15.6 point 1).
+    public private(set) var everConnected = false
+    /// This connection is an ACR reconnect: flag 0x10 in the WD module.
+    public var isACRReconnect: Bool { !(configuration.acrReconnectCookie ?? []).isEmpty }
 
     private var engines: [UInt8: VirtualChannelEngine] = [:]
     private var channelOrder: [(name: String, number: UInt8)] = []
@@ -133,6 +165,7 @@ public final class WinstationDriver {
         self.configuration = configuration
         crypto = WDEncryptionPD(key: encryptionKey)
         self.obfuscationSeed = obfuscationSeed
+        if let cookie = configuration.acrReconnectCookie, !cookie.isEmpty { acrCookie = cookie }
     }
 
     // MARK: Channels
@@ -275,12 +308,39 @@ public final class WinstationDriver {
                                          password: String(logon.password.prefix(long ? 256 : 14))))
                 onEvent(.credentialRequest(answered: true))
             }
+        case WDPacketType.acrCookie:
+            handleACR(p)
         case WDPacketType.setLED:
             onEvent(.setLED(p.first ?? 0))
         case WDPacketType.setMousePosition where p.count >= 4:
             onEvent(.mousePosition(x: UInt16(p[0]) | UInt16(p[1]) << 8, y: UInt16(p[2]) | UInt16(p[3]) << 8))
         default:
             break
+        }
+    }
+
+    /// 0x41 (docs/30 §15.6): sub 1 stores the cookie, i.e. the whole payload `01 <data>` (replacing any earlier one);
+    /// sub 2 is answered with it: `41 <u16 1+n> 01 <stored payload>` (n = 0 if none). The cookie bytes never reach an
+    /// event or a log.
+    private func handleACR(_ p: [UInt8]) {
+        guard let sub = p.first else { return onEvent(.acrOther(sub: 0xFF, length: 0)) }
+        switch sub {
+        case 1:
+            // The whole payload, sub byte included: the answer must repeat it (live, D84).
+            acrCookie = p
+            onEvent(.acrCookie(length: p.count))
+        case 2:
+            let cookie = acrCookie ?? []
+            // sendNow: also answered if the query should come before framing starts.
+            let body = Array(cookie.dropFirst())
+            switch configuration.acrReplyForm {
+            case .wholePayload: sendNow(WDBuild.acrCookieReply(cookie))
+            case .afterSub: sendNow(WDBuild.acrCookieReply(body))
+            case .noSub: sendNow([0x41, UInt8(body.count & 0xff), UInt8(body.count >> 8)] + body)
+            }
+            onEvent(.acrQuery(answeredLength: cookie.count))
+        default:
+            onEvent(.acrOther(sub: sub, length: p.count - 1))
         }
     }
 
@@ -326,7 +386,7 @@ public final class WinstationDriver {
         var modules: [[UInt8]] = [
             WDModules.wd(capabilities: negotiated, channels: channels, maxVirtualWrite: UInt16(config.maxVirtualWrite),
                          reducerVersion: WDCapabilityPolicy.reducerVersion(negotiated), productID: config.wdProductID,
-                         fixedTail: config.wdFixedTail, expanderPower: config.expanderPowerOffer),
+                         fixedTail: config.wdFixedTail, expanderPower: config.expanderPowerOffer, acrReconnect: isACRReconnect),
             WDModules.td(outBufLength: config.outBufLength, port: config.tdClientPort ?? config.tdPort, ipv4: config.tdClientIPv4),
             WDModules.framing(),
             WDModules.encryption(),
@@ -451,6 +511,7 @@ public final class WinstationDriver {
             }
         }
         phase = .connected
+        everConnected = true
         framer = WDFrameAssembler()
         parser.reset()
         onEvent(.connected(reducerVersion: lastReducer.0, reducerPower: lastReducer.1, expanderPower: lastReducer.2,

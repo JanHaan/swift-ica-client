@@ -105,6 +105,17 @@ public struct WDCapabilityPolicy: Sendable {
     /// reference's version min(server, 1), mode 1. Discovery only (icactl `ICA_WD_EUKS=V[:M]`).
     public var unicodeKeyboardReply: (version: UInt16, mode: UInt16)?
 
+    /// Advertise cap 0x0A (ACR cookie, docs/30 §4.3, §15.6) when the server offers it, with `acrReplyBody`. The host then
+    /// hands out an ACR cookie (0x41 sub 1) and enables auto client reconnect (`WDACRParameters`).
+    public var acr = false
+    /// Cap 0x0A body we send. Default: the stock client's form `02 00 80 00` + 8 zero bytes (version 2, field a = 0x80,
+    /// black-box D84). With the reference's 12 zero bytes the host negotiated acrTimeout 120 s but never sent a cookie
+    /// (live, D84 run 1).
+    public var acrReplyBody: [UInt8] = WDCapabilityPolicy.acrStockBody
+
+    public static let acrStockBody: [UInt8] = [0x02, 0x00, 0x80, 0x00] + [UInt8](repeating: 0, count: 8)
+    public static let acrReferenceBody = [UInt8](repeating: 0, count: 12)
+
     public static let cap1E: UInt16 = 0x1E
 
     /// The 0x1E reply body for a server body (nil if the body is shorter than 5 bytes).
@@ -155,6 +166,8 @@ public struct WDCapabilityPolicy: Sendable {
                     let version = min(cap.body.first ?? 1, 1)
                     result = WDCapability(id: cap.id, body: [version, 0, 1, 0])
                 }
+            case WDCapability.acrCookie where acr:
+                result = WDCapability(id: cap.id, body: acrReplyBody)
             case WDCapability.hostOS where hostOSReply != nil:
                 let os = hostOSReply ?? 0
                 result = WDCapability(id: cap.id, body: [UInt8(os & 0xff), UInt8(os >> 8), 0, 0, 0, 0])
@@ -177,6 +190,45 @@ public struct WDCapabilityPolicy: Sendable {
         }
         out.append(WDCapability(id: WDCapability.vcPriority))
         return out
+    }
+}
+
+/// Cap 0x0A body (docs/30 §15.6): `u8 version, u8 0, u16 a, u16 acrTimeout (s), u16 b, u16 c, u16 estimatedTcpTimeout (s)`.
+/// The host's copy in the final capability list (INIT_CONNECT) carries the values; a, b, c are [I].
+public struct WDACRParameters: Equatable, Sendable, CustomStringConvertible {
+    public var version: UInt8
+    public var a: UInt16
+    public var acrTimeout: UInt16
+    public var b: UInt16
+    public var c: UInt16
+    public var estimatedTcpTimeout: UInt16
+
+    public init(version: UInt8, a: UInt16 = 0, acrTimeout: UInt16, b: UInt16 = 0, c: UInt16 = 0, estimatedTcpTimeout: UInt16 = 0) {
+        self.version = version
+        self.a = a
+        self.acrTimeout = acrTimeout
+        self.b = b
+        self.c = c
+        self.estimatedTcpTimeout = estimatedTcpTimeout
+    }
+
+    public init?(_ cap: WDCapability) {
+        guard cap.id == WDCapability.acrCookie, cap.body.count >= 12, let a = cap.u16(at: 2), let t = cap.u16(at: 4),
+              let b = cap.u16(at: 6), let c = cap.u16(at: 8), let tcp = cap.u16(at: 10) else { return nil }
+        self.init(version: cap.body[0], a: a, acrTimeout: t, b: b, c: c, estimatedTcpTimeout: tcp)
+    }
+
+    /// From a capability list (the first cap 0x0A).
+    public init?(_ caps: [WDCapability]) {
+        guard let cap = caps.first(where: { $0.id == WDCapability.acrCookie }) else { return nil }
+        self.init(cap)
+    }
+
+    /// ACR is on when the negotiated timeout is greater than 0 (docs/30 §15.6).
+    public var enabled: Bool { acrTimeout > 0 }
+
+    public var description: String {
+        "version \(version), acrTimeout \(acrTimeout) s, estimatedTcpTimeout \(estimatedTcpTimeout) s, a \(a), b \(b), c \(c)"
     }
 }
 

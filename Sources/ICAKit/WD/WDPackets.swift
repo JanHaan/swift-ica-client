@@ -177,6 +177,13 @@ public enum WDBuild {
     public static let terminateAck: [UInt8] = [0x05, 0x01, 0x02]
     public static let pingResponse: [UInt8] = [0x3F, 0x01, 0x02]
 
+    /// Answer to the host's ACR query `41 .. 02`: `41 <u16 1+n> 01 <cookie>`, n = 0 if no cookie is stored
+    /// (docs/30 §15.6). The cookie is a secret: never log these bytes.
+    public static func acrCookieReply(_ cookie: [UInt8]) -> [UInt8] {
+        let length = 1 + cookie.count
+        return [0x41, UInt8(length & 0xff), UInt8(length >> 8), 0x01] + cookie
+    }
+
     /// VC write with the smallest header: `2F ch b`, `30 n ch data`, `31 n16 ch data` (n counts ch).
     public static func virtualWrite(channel: UInt8, _ data: [UInt8]) -> [UInt8] {
         if data.count == 1 { return [0x2F, channel, data[0]] }
