@@ -81,7 +81,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | TLS 1.3 | Yes | Yes | Yes | No | Yes | Yes | Yes | Built | Ours: system TLS offers 1.3; the negotiated version is not logged |
 | TLS 1.0 / 1.1 | No | Yes | No | Yes | Yes | No | No | ? | |
 | Survives short network drops (session reliability) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Up to the server's timeout, typically 180 s |
-| Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | No | Web: matrix no, HTML5 2607 yes. Ours: protocol tried live (gateway takes the reconnect ticket, host takes the cookie), but the reconnected session waits at the Windows logon screen on this site, so not used; after a long drop the Reconnect panel relaunches through the store |
+| Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | Built | Web: matrix no, HTML5 2607 yes. Ours: the ACR protocol was tried live, but on this site the reconnected session waits at the Windows logon screen, so not used (D84). Instead, after a long drop ICAViewer relaunches the app through the store by itself, which reconnects the session (D86, Settings › Connection drop; waits up to 10 min for the network); not yet verified live |
 | UDP transport (EDT) | Yes | Yes | Yes | Partly | Yes | Yes | Yes | No | Web: matrix no, HTML5 2603 mentions EDT Reliable |
 | EDT lossy mode | Yes | Yes | Yes | ? | Yes | Yes | Yes | No | Release notes only |
 | DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11 |
@@ -237,10 +237,11 @@ Libraries next to them: `libUrlRedirection_client.dylib` (link redirection), `li
 
 Ordered for daily use through a gateway with mail and line-of-business applications.
 
-1. **Auto client reconnect.** Session reliability covers short outages; after longer ones the
-   Reconnect panel relaunches through the store. The ACR protocol works up to the host (reconnect
-   ticket and cookie accepted, same session), but on this site Windows then asks for a logon, so an
-   automatic reconnect would need credentials the client does not have (D84).
+1. **Auto client reconnect: built, live check pending.** Session reliability covers short outages.
+   The ACR protocol works up to the host, but on this site Windows then asks for a logon (D84). So
+   after a longer outage ICAViewer now relaunches the app through the store by itself, which
+   reconnects the session; it waits up to 10 minutes for the network and then falls back to the
+   Reconnect panel (D86). Needs the user's GUI test (Wi-Fi off for more than 3 minutes).
 2. **Live verification of what is already built.** Client drive mapping and printing are
    implemented but need a site that redirects drives and printers; clipboard HTML, RTF and images
    are unverified too, as is the webcam with a real camera.

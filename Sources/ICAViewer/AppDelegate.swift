@@ -85,6 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let autoLaunch = ProcessInfo.processInfo.environment["ICAVIEWER_LAUNCH"]
     /// Phase 3 (docs/99 §12.13): the menu-bar item, and menu-bar only while helpers show the remote apps.
     private var menuBarHost: MenuBarHost?
+    /// Automatic reconnect after a session reliability give-up (docs/90 §9.6, D86).
+    private let autoReconnect = AutoReconnector()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -95,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         startSystemHooks()
+        configureAutoReconnect()
         vlog("helper apps: \(HelperManager.enabled ? "on" : "off") (\(HelperManager.setting.source.rawValue))")
         if HelperManager.enabled {
             HelperManager.shared.onCommand = { [weak self] command, controller, cancelled in
@@ -199,10 +202,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var retries: [String: LaunchRetry] = [:]
 
     /// `interactive`: the user chose the resource in the launcher. Automated launches (see `LaunchPolicy`)
-    /// are limited to the test resources.
-    private func launch(_ resource: StoreClient.Resource, interactive: Bool) {
+    /// are limited to the test resources. `autoAttempt`: an automatic reconnect's relaunch (docs/90 §9.6), told how it went.
+    private func launch(_ resource: StoreClient.Resource, interactive: Bool, autoAttempt: AutoReconnector.Attempt? = nil) {
         guard let store, !launching else {
             if !launching { launcher?.launchEnded() }   // no launch started: release the launcher's guard
+            if let autoAttempt { autoReconnect.failed(autoAttempt, "another launch was running", toPanel: false) }
             return
         }
         let automated = !interactive || LaunchPolicy.envAutomated()
@@ -211,6 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             vlog("automated launch of \(logName(resource.name)) refused (not in ICA_TEST_RESOURCES)")
             if autoLaunch != nil { AppQuit.request("automated launch refused") }
             launcher?.launchEnded()
+            if let autoAttempt { autoReconnect.failed(autoAttempt, "launch refused by the policy", toPanel: true) }
             return
         }
         launching = true
@@ -237,6 +242,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let shareKey = SessionShareKey(ica: ica)
                 let open = sessions.filter { !$0.ended }
                 switch SessionSharingDecision.decide(shareKey, among: open.map { ($0, $0.shareKey, $0.hasControl) }) {
+                case .share(let target) where autoAttempt != nil:
+                    // The session is open again in another connection of ours: no relaunch, no second start of the app.
+                    vlog("launch: \(logName(resource.name)): automatic reconnect, but \(logName(target.name)) holds the session again")
+                    retries[resource.name] = nil
+                    if let autoAttempt { autoReconnect.alreadyOpen(autoAttempt) }
+                    return
                 case .share(let target):
                     vlog("launch: \(logName(resource.name)): same endpoint, TWIMode and SessionsharingKey as the running session of "
                          + "\(target.appNames.map(logName).joined(separator: ", ")): starting it there over CTXCTL; no second connection")
@@ -249,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     retries[resource.name] = nil
                     sharedFallbacks.remove(resource.name)
                     refuseSharedLaunch(resource.name, running: target.name)
+                    if let autoAttempt { autoReconnect.failed(autoAttempt, "session sharing refused", toPanel: true) }
                     return
                 case .connect:
                     vlog("launch: \(logName(resource.name)): " + (shareKey.canShare ? "no running session to share" : "not shareable ("
@@ -266,8 +278,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         vlog("launch: \(logName(resource.name)) dropped; its SessionsharingKey equals that of \(logName(running.name)): not an early drop, no relaunch")
                         self.retries[resource.name] = nil
                         self.sessionEnded(c)
+                        if let autoAttempt { return self.autoReconnect.alreadyOpen(autoAttempt) }
                         self.refuseSharedLaunch(resource.name, running: running.name)
                         return
+                    }
+                    if let autoAttempt, !autoAttempt.live {
+                        // The automatic reconnect was closed meanwhile: no relaunch of its connection.
+                        self.retries[resource.name] = nil
+                        return self.sessionEnded(c)
                     }
                     if let drop = c.session.earlyDrop {
                         vlog("launch: \(logName(resource.name)): \(drop.summary)" + (c.announcedAudio ? " (CTXCAM was announced)" : ""))
@@ -278,6 +296,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         vlog("launch: \(logName(resource.name)): pattern B (TERMINATE before the first Thinwire INIT): no relaunch")
                         self.retries[resource.name] = nil
                         self.sessionEnded(c)
+                        // An automatic reconnect tries again later (the host may still hold the session, docs/55 §9.3).
+                        if let autoAttempt { return self.autoReconnect.failed(autoAttempt, "the host refused the connection (pattern B)", toPanel: false) }
                         self.refuseSecondSession(resource.name)
                         return
                     }
@@ -297,10 +317,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         Task { @MainActor [weak self] in
                             if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
                             guard let self, !self.terminating else { return }
-                            self.launch(resource, interactive: interactive)
+                            self.launch(resource, interactive: interactive, autoAttempt: autoAttempt)
                         }
                         return
                     }
+                    if let autoAttempt { self.autoReconnect.failed(autoAttempt, c.endReason, toPanel: false) }
                     self.sessionEnded(c)
                 }
                 controller.onRelaunch = { [weak self] c in
@@ -310,12 +331,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.launcher?.showWindow(nil)
                     self?.launch(resource, interactive: true)   // the user pressed Reconnect
                 }
+                controller.onAutoReconnect = { [weak self] c, giveUp in
+                    self?.beginAutoReconnect(c, resource: resource, giveUp: giveUp) ?? false
+                }
                 controller.onParkedChanged = { [weak self] c in
                     self?.refreshSessionRows()
                     if c.isParked { self?.launcher?.showWindow(nil) }
                 }
                 sessions.append(controller)
                 refreshSessionRows()
+                if let autoAttempt {
+                    autoReconnect.created(autoAttempt, controller)
+                } else {
+                    // Another connection of ours may have taken a waiting session back (docs/90 §9.6: no second relaunch).
+                    controller.onAppWindowAppeared = { [weak self] _, _ in self?.autoReconnect.tickAll() }
+                }
                 if ProcessInfo.processInfo.environment["ICAVIEWER_SELFTEST"] == "1" {
                     selfTest = SelfTest(controller: controller)
                 }
@@ -352,7 +382,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 vlog("launch failed: \(error)")
                 launcher?.setStatus("Launch failed: \(error)")
                 if autoLaunch != nil { AppQuit.request("launch failed") }
+                // Sign-in cancelled: the user is there and said no, so the panel; anything else is tried again later.
+                if let autoAttempt { autoReconnect.failed(autoAttempt, error is LoginCancelled ? "sign-in cancelled" : "\(error)", toPanel: error is LoginCancelled) }
             }
+        }
+    }
+
+    // MARK: Automatic reconnect (docs/90 §9.6, D86)
+
+    private func configureAutoReconnect() {
+        autoReconnect.online = { [weak self] in self?.lastPath?.satisfied ?? true }
+        autoReconnect.busy = { [weak self] in self?.launching ?? true }
+        autoReconnect.quitting = { [weak self] in self?.terminating ?? true }
+        autoReconnect.openSession = { [weak self] key, except in self?.runningSession(sharing: key, except: except) }
+        autoReconnect.launch = { [weak self] resource, attempt in
+            guard let self else { return }
+            self.launch(resource, interactive: true, autoAttempt: attempt)
+        }
+        autoReconnect.replaced = { [weak self] old in
+            guard let self else { return }
+            self.sessions.removeAll { $0 === old }
+            self.clientNames[ObjectIdentifier(old)] = nil
+            self.userDisconnected.remove(ObjectIdentifier(old))
+            self.refreshSessionRows()
+        }
+    }
+
+    /// Session reliability gave up on `c`: true if an automatic reconnect took it over (or absorbed it), false for
+    /// the manual panel. Never for a connection the user disconnected or logged off, while quitting, or in headless
+    /// and test runs.
+    private func beginAutoReconnect(_ c: SessionController, resource: StoreClient.Resource, giveUp: CGPTransport.GiveUp) -> Bool {
+        let automated = autoLaunch != nil || LaunchPolicy.envAutomated() || HelperManager.automated || StoreService.autofill || Demo.enabled
+        let userEnded = userDisconnected.contains(ObjectIdentifier(c)) || c.endRequested || terminating
+        let skip = AutoReconnect.skipReason(giveUp, mode: AutoReconnectSetting.stored, automated: automated, userEnded: userEnded)
+        switch autoReconnect.begin(c, resource: resource, giveUp: giveUp, skip: skip) {
+        case .tookOver:
+            // `c` stays in `sessions` (ended) while it waits, as with the manual panel: the app does not quit meanwhile.
+            refreshSessionRows()
+            return true
+        case .absorbed:
+            sessions.removeAll { $0 === c }
+            clientNames[ObjectIdentifier(c)] = nil
+            refreshSessionRows()
+            return true
+        case .declined:
+            return false
         }
     }
 
@@ -742,6 +816,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let last = lastPath, satisfied != last.satisfied || (satisfied && interface != last.interface) else { return }
         vlog("network path: \(satisfied ? "satisfied" : "unsatisfied") via \(interface ?? "none")")
         sessions.filter { !$0.ended }.forEach { $0.session.networkChanged(online: satisfied) }
+        // After the `defer` above has recorded the new path: automatic reconnects waiting for the network go on.
+        DispatchQueue.main.async { [weak self] in self?.autoReconnect.tickAll() }
     }
 
     private func buildMenu() {

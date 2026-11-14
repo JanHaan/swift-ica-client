@@ -34,6 +34,17 @@ enum ReconnectAtStart: String {
     }
 }
 
+/// "After a connection drop" (Settings, docs/90 §9.6, D86): when session reliability gives up, reconnect
+/// automatically through the store (default) or show the Reconnect panel.
+enum AutoReconnectSetting {
+    static let key = "afterConnectionDrop"
+
+    static var stored: AutoReconnect.Mode {
+        get { UserDefaults.standard.string(forKey: key).flatMap(AutoReconnect.Mode.init(rawValue:)) ?? .defaultMode }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+}
+
 /// Read-only listing for the reconnect offer: only sessions `SessionDirectory.reconnectable` allows.
 enum ReconnectOffer {
     static func eligible(_ store: StoreClient, clientNames: Set<String>) async -> [StoreSession] {

@@ -144,8 +144,40 @@ final class HelperManager: NSObject, RemotePresenter {
     /// Helpers became ready or went, or windows moved between a helper and this process (phase 3: the app
     /// delegate decides whether this process keeps its Dock tile).
     var onChange: (() -> Void)?
+    /// Automatic reconnect (docs/90 §9.6, D86): the connection each new one replaces. The old session's dimmed windows
+    /// stay in their helpers while it waits; an app window of the new connection takes over the old helper of the same
+    /// app (same process and Dock tile, no "Name (2)"), see `helperKey`.
+    private var predecessors: [ObjectIdentifier: WeakController] = [:]
+    private struct WeakController { weak var controller: SessionController? }
 
     // MARK: Routing (SessionController)
+
+    /// `new` is the relaunch that is to replace `old` (automatic reconnect).
+    func replace(_ old: SessionController, with new: SessionController) {
+        predecessors = predecessors.filter { $0.value.controller != nil }
+        predecessors[ObjectIdentifier(new)] = WeakController(controller: old)
+    }
+
+    /// The replacement is over (it succeeded and the old windows are gone, or it failed).
+    func replacementEnded(_ new: SessionController) {
+        predecessors[ObjectIdentifier(new)] = nil
+    }
+
+    /// The old session's helper for this app, now handed to `controller` (its surface and pointer follow at once).
+    private func carryOver(appKey: String, to controller: SessionController) -> Helper? {
+        guard let old = predecessors[ObjectIdentifier(controller)]?.controller,
+              let kept = helpers.values.first(where: { $0.appKey == appKey && $0.controller === old && $0.state != .failed && !$0.quitting })
+        else { return nil }
+        kept.controller = controller
+        kept.quitWork?.cancel()
+        kept.quitWork = nil
+        vlog("helper apps: \(kept.logLabel) carries over to the reconnected session")
+        if kept.state == .ready {
+            sendSurface(kept)
+            if let cursor = cursor(for: controller) { send(kept, .cursor(cursor)) }
+        }
+        return kept
+    }
 
     /// The helper key of an app (TWI app key) in a session: the helper this session already has for it (also a
     /// failed one, which keeps the app's windows here), else the smallest slot no other session's helper uses.
@@ -155,6 +187,7 @@ final class HelperManager: NSObject, RemotePresenter {
         // own: their windows stay here, never in a helper named after anything (docs/99 §12.15).
         if AppNaming.isSystemProcess(AppNaming.executableName(key: appKey, executablePath: nil)) { return nil }
         if let own = helpers.values.first(where: { $0.appKey == appKey && $0.controller === controller }) { return own.key }
+        if let kept = carryOver(appKey: appKey, to: controller) { return kept.key }
         let taken = Set(helpers.values.filter { $0.appKey == appKey && $0.controller != nil }.map(\.slot))
         return HelperSessionSlots.key(appKey: appKey, slot: HelperSessionSlots.freeSlot(taken: taken))
     }

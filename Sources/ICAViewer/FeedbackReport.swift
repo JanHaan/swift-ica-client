@@ -118,6 +118,7 @@ enum FeedbackSources {
             : "off"))
         lines.append("Cmd-Q with open connections: \(QuitAction.stored.rawValue)")
         lines.append("Reconnect offer after sign-in: \(ReconnectAtStart.stored.rawValue)")
+        lines.append("After a connection drop: \(AutoReconnectSetting.stored.rawValue)")
         lines.append("Log file: " + (LogStore.fileEnabled ? "on" : "off"))
         if let env {
             lines.append(".env keys (values not shown): " + env.values.keys.filter { env[$0] != nil }.sorted().joined(separator: ", "))

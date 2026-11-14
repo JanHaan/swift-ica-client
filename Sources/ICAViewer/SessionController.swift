@@ -28,6 +28,16 @@ final class SessionController: NSObject {
     /// the store, which reconnects to the now-disconnected session (docs/20 §3.12.11, D18). Without
     /// it a give-up ends the session like any other close.
     var onRelaunch: ((SessionController) -> Void)?
+    /// Session reliability gave up and a relaunch is possible: the app delegate may take it over as an automatic
+    /// reconnect (docs/90 §9.6, D86) and returns true; then this controller keeps its windows dimmed and shows the
+    /// progress it is given, until it is replaced (`finishReplaced`) or falls back to the panel (`showManualReconnect`).
+    var onAutoReconnect: ((SessionController, CGPTransport.GiveUp) -> Bool)?
+    /// An app window appeared, with its TWI app key (automatic reconnect: the replaced connection's windows of that
+    /// app go away now).
+    var onAppWindowAppeared: ((SessionController, String) -> Void)?
+    /// Log off was asked for this connection (by the user, the last-window rule or a test): a later give-up must not
+    /// reconnect it. Main thread.
+    private(set) var endRequested = false
     /// The CGP link is down and a resume is pending (docs/20 §3.12.3): user input is dropped, windows
     /// stay as they are under a dark overlay.
     private(set) var inputBlocked = false
@@ -690,6 +700,7 @@ final class SessionController: NSObject {
             sawAppWindow = true
             if let pid = w.processId { appWindowProcesses?.insert(pid) }
             onAppWindowShown?(self)
+            onAppWindowAppeared?(self, w.appKey)
             pendingLogoff?.cancel()
             lastAppWindows.removeAll()
             logoffDeferred = false
@@ -949,6 +960,7 @@ final class SessionController: NSObject {
     /// TWI logoff; falls back to closing the transport if the channel is not up. Callable from any
     /// thread: it only touches the session (its own queue) and the timer queue, never main.
     func logoff() {
+        if Thread.isMainThread { endRequested = true } else { DispatchQueue.main.async { self.endRequested = true } }
         let session = self.session
         session.logoff { ok in
             vlog(ok ? "→ TWI LOGOFF" : "TWI not ready; closing the connection")
@@ -981,25 +993,82 @@ final class SessionController: NSObject {
             return
         }
         if let gaveUp, gaveUp.offerRelaunch, onRelaunch != nil {
-            // Keep the dimmed windows until the user picks Reconnect or Close; never relaunch silently.
+            // Keep the dimmed windows: an automatic reconnect (docs/90 §9.6) replaces them, or the user picks
+            // Reconnect or Close in the panel.
             inputBlocked = true
             setDim(dimAlpha ?? Self.dimAlpha(nil))
-            hud.onReconnect = { [weak self] in
-                guard let self else { return }
-                vlog("reconnect chosen after give-up: relaunching \(logName(self.name))")
-                self.tearDown()
-                self.onRelaunch?(self)
-            }
-            hud.onClose = { [weak self] in
-                guard let self else { return }
-                vlog("close chosen after give-up")
-                self.tearDown()
-                self.onEnded?(self)
-            }
-            hud.showGaveUp(name: name, message: gaveUp.message, notBefore: gaveUp.relaunchNotBefore)
+            if onAutoReconnect?(self, gaveUp) == true { return }
+            showManualReconnect()
             return
         }
         tearDown()
+        onEnded?(self)
+    }
+
+    /// The give-up panel with Reconnect / Close (docs/20 §3.12.11); also where an automatic reconnect ends up when it
+    /// did not succeed (`note` says so).
+    func showManualReconnect(note: String? = nil) {
+        guard ended, let gaveUp else { return }
+        hud.onReconnect = { [weak self] in
+            guard let self else { return }
+            vlog("reconnect chosen after give-up: relaunching \(logName(self.name))")
+            self.tearDown()
+            self.onRelaunch?(self)
+        }
+        hud.onClose = { [weak self] in
+            guard let self else { return }
+            vlog("close chosen after give-up")
+            self.tearDown()
+            self.onEnded?(self)
+        }
+        hud.showGaveUp(name: name, message: [note, gaveUp.message].compactMap { $0 }.joined(separator: " "),
+                       notBefore: gaveUp.relaunchNotBefore)
+    }
+
+    /// Progress of an automatic reconnect on the dimmed windows. Close stops it (as the panel's Close; a helper's
+    /// close button and Cmd-Q do the same, `closeAfterGiveUp`); Reconnect Now skips a pause.
+    func showAutoReconnect(status: @escaping () -> String, reconnectNow: (() -> Void)?, close: @escaping () -> Void) {
+        guard ended else { return }
+        hud.onReconnect = reconnectNow
+        hud.onClose = close
+        hud.showAutoReconnect(name: name, status: status, canReconnectNow: reconnectNow != nil)
+    }
+
+    /// Automatic reconnect: this connection replaces `old`. The session's other apps (docs/55: started over CTXCTL, they
+    /// come back with the window replay) and the app keys this run mapped to resources come along, so names, Dock
+    /// icons and the several-apps logoff rule stay as they were.
+    func inherit(from old: SessionController) {
+        for app in old.appNames where !appNames.contains(app) { appNames.append(app) }
+        for (key, resource) in old.appResources where appResources[key] == nil { appResources[key] = resource }
+        if appNames.count > 1, appWindowProcesses == nil { appWindowProcesses = [] }
+    }
+
+    /// Automatic reconnect: the session is back; the remaining old windows wait a moment for their apps.
+    func hideReconnectHUD() { hud.hide() }
+
+    /// The TWI app keys of the app windows still shown.
+    var appWindowKeys: Set<String> { Set(windows.values.filter(\.isApp).map(\.info.appKey)) }
+
+    /// Automatic reconnect: the new connection shows this app again; its old dimmed windows go (popups and other
+    /// windows of the same app key too).
+    func dropWindows(appKey: String) {
+        guard ended else { return }
+        for (id, w) in windows where w.info.appKey == appKey { remove(id) }
+    }
+
+    /// Automatic reconnect: another connection took this session over; the rest of the old windows go, without the
+    /// end-of-session handling (`onEnded`).
+    func finishReplaced() {
+        guard ended else { return }
+        hud.onReconnect = nil
+        hud.onClose = nil
+        tearDown()
+    }
+
+    /// Closing the dimmed windows outright (the user's Close while an automatic reconnect runs).
+    func closeReplaced() {
+        guard ended else { return }
+        finishReplaced()
         onEnded?(self)
     }
 
@@ -1469,6 +1538,17 @@ final class ReconnectHUD: NSObject {
             self.detail.stringValue = loc("Connection interrupted — reconnecting… (\(left))",
                                           "Verbindung unterbrochen – neuer Verbindungsversuch… (\(left))")
         }
+    }
+
+    /// Automatic reconnect (docs/90 §9.6): `status` is read once a second (it carries its own countdown).
+    func showAutoReconnect(name: String, status: @escaping () -> String, canReconnectNow: Bool) {
+        buttons.isHidden = false
+        closeButton.isHidden = false
+        reconnectButton.isHidden = !canReconnectNow
+        reconnectButton.isEnabled = true
+        reconnectButton.title = loc("Reconnect Now", "Jetzt verbinden")
+        label.stringValue = displayName(name)
+        run { [weak self] in self?.detail.stringValue = status() }
     }
 
     func showGaveUp(name: String, message: String, notBefore: Date?) {

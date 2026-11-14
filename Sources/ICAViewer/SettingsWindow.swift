@@ -13,7 +13,8 @@ import ICAKit
 /// "Automatic" = the system default; listing the devices never opens one or asks for permission).
 /// Dock apps (docs/99 §12.2, D63): "One Dock entry per app" (default on; applies at the next start of ICA Viewer;
 /// ICA_HELPER_APPS=0/1 overrides it) and the launcher's global shortcut (⌃⌥⌘L, two other letters, or off;
-/// applies at once).
+/// applies at once). After a connection drop (docs/90 §9.6, D86): reconnect automatically (default) or ask; applies at
+/// the next drop.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -49,6 +50,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let compressTitle = Text(en: "Compress screen data", de: "Bildschirmdaten komprimieren")
     static let compressHint = Text(en: "The server sends about a quarter of the data; useful on slow connections. Applies at the next connect.",
                                    de: "Der Server sendet etwa ein Viertel der Daten; hilfreich bei langsamen Verbindungen. Gilt ab der nächsten Verbindung.")
+    static let dropAutomatic = Text(en: "Reconnect automatically", de: "Automatisch neu verbinden")
+    static let dropAsk = Text(en: "Ask", de: "Fragen")
+    static let dropHint = Text(en: "After a longer network drop, ICA Viewer reconnects your session through the store, waiting up to 10 minutes for the network. Short drops always resume by themselves.",
+                               de: "Nach einem längeren Netzwerkausfall verbindet ICA Viewer die Sitzung über den Store neu und wartet bis zu 10 Minuten auf das Netzwerk. Kurze Ausfälle werden immer von selbst überbrückt.")
     static let dockTitle = Text(en: "One Dock entry per app", de: "Ein Dock-Eintrag pro App")
     static let dockHint = Text(en: "Each remote app gets its own Dock icon and Cmd-Tab entry; ICA Viewer then waits in the menu bar. Applies the next time ICA Viewer starts.",
                                de: "Jede Remote-App erhält ein eigenes Dock-Symbol und einen eigenen Cmd-Tab-Eintrag; ICA Viewer wartet dann in der Menüleiste. Gilt ab dem nächsten Start von ICA Viewer.")
@@ -69,6 +74,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         "audio": Text(en: "Audio:", de: "Audio:"), "camera": Text(en: "Camera:", de: "Kamera:"),
         "dock": Text(en: "Dock:", de: "Dock:"), "shortcut": Text(en: "Launcher:", de: "Launcher:"),
         "network": Text(en: "Network:", de: "Netzwerk:"),
+        "drop": Text(en: "Connection drop:", de: "Verbindungsabbruch:"),
     ]
 
     private let protectBox = NSButton(checkboxWithTitle: T.protectTitle.shown, target: nil, action: nil)
@@ -100,6 +106,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let cameraBox = NSButton(checkboxWithTitle: T.cameraTitle.shown, target: nil, action: nil)
     private let cameraPopup = NSPopUpButton()
     private let compressBox = NSButton(checkboxWithTitle: T.compressTitle.shown, target: nil, action: nil)
+    private let dropPopup = NSPopUpButton()
     private let dockBox = NSButton(checkboxWithTitle: T.dockTitle.shown, target: nil, action: nil)
     private let dockHint = NSTextField(wrappingLabelWithString: "")
     private let shortcutPopup = NSPopUpButton()
@@ -218,6 +225,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         (cameraPopup.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
         printActionPopup.addItems(withTitles: [loc("Show the print dialog first", "Zuerst den Druckdialog zeigen"),
                                                loc("Open in Preview first", "Zuerst in Vorschau öffnen")])
+        // Same order as `AutoReconnect.Mode.allCases`.
+        dropPopup.addItems(withTitles: [T.dropAutomatic.shown, T.dropAsk.shown])
         for choice in LauncherHotKey.choices { shortcutPopup.addItem(withTitle: choice.shortcut == nil ? T.shortcutOff.shown : choice.title) }
         folderPath.lineBreakMode = .byTruncatingMiddle
         folderPath.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
@@ -229,7 +238,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             l.alignment = .right
             return l
         }
-        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup, shortcutPopup])
+        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup, shortcutPopup, dropPopup])
         func hint(_ text: Text) -> NSTextField {
             let l = NSTextField(wrappingLabelWithString: text.shown)
             l.textColor = .secondaryLabelColor
@@ -286,6 +295,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, cameraAccessNote],
             [label("network"), compressBox],
             [NSGridCell.emptyContentView, hint(T.compressHint)],
+            [label("drop"), dropPopup],
+            [NSGridCell.emptyContentView, hint(T.dropHint)],
             [label("dock"), dockBox],
             [NSGridCell.emptyContentView, dockHint],
             [label("shortcut"), shortcutPopup],
@@ -313,8 +324,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 25).isHidden = true   // shown only when the camera list needs an access hint
         grid.row(at: 26).topPadding = 12
         grid.row(at: 27).topPadding = 0
-        grid.row(at: 28).topPadding = 12
+        grid.row(at: 28).topPadding = 8
         grid.row(at: 29).topPadding = 0
+        grid.row(at: 30).topPadding = 12
+        grid.row(at: 31).topPadding = 0
         cameraGrid = grid
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
@@ -353,7 +366,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let radios = [promptTitle, totpTitle].flatMap(\.both)
             .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
         let menus = popups.map { ($0.titleOfSelectedItem ?? "popup", $0.fittingSize.width) }
-            + cameraAutomatic.both.map { title -> (String, CGFloat) in
+            + (cameraAutomatic.both + dropAutomatic.both).map { title -> (String, CGFloat) in
                 let p = NSPopUpButton()
                 p.addItem(withTitle: title)
                 return (title, p.fittingSize.width)
@@ -504,6 +517,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let stored = demo ? nil : UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
         dockBox.state = (stored ?? HelperAppsSwitch.defaultOn) ? .on : .off
         compressBox.state = (demo ? CompressionSetting.defaultOn : CompressionSetting.stored) ? .on : .off
+        let drop = demo ? AutoReconnect.Mode.defaultMode : AutoReconnectSetting.stored
+        dropPopup.selectItem(at: AutoReconnect.Mode.allCases.firstIndex(of: drop) ?? 0)
         let overridden = !demo && HelperManager.setting.source == .environment
         dockHint.stringValue = T.dockHint.shown + (overridden ? " " + T.dockOverride.shown : "")
         let hotKey = demo ? LauncherHotKey.standard : GlobalHotKey.stored
@@ -517,6 +532,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         if CompressionSetting.stored != compress {
             CompressionSetting.stored = compress
             vlog("compression: saved \(compress ? "on" : "off"); applies at the next connect")
+        }
+        let modes = AutoReconnect.Mode.allCases
+        if modes.indices.contains(dropPopup.indexOfSelectedItem), AutoReconnectSetting.stored != modes[dropPopup.indexOfSelectedItem] {
+            AutoReconnectSetting.stored = modes[dropPopup.indexOfSelectedItem]
+            vlog("after a connection drop: saved \(AutoReconnectSetting.stored.rawValue)")
         }
         let on = dockBox.state == .on
         let stored = UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
