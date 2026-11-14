@@ -20,8 +20,55 @@ public final class WinstationDriver {
         /// Module-header name/versions per VC (`WDModuleOverride.key`, e.g. "CTXGDT"), applied to the built VD module
         /// (discovery only, docs/76 §7.6). Empty by default.
         public var moduleOverrides: [String: WDModuleOverride] = [:]
+        /// The u16 at WD module offset 66 (docs/30 §5.3), read as the client product ID [I]. The reference value 0x0101
+        /// stays the default; other values are discovery only (docs/76 §7.11, icactl `ICA_WD_PRODUCT`).
+        public var wdProductID: UInt16 = WDModules.referenceProductID
+        /// Bytes appended to the WD module's fixed part (after @84; discovery only, docs/76 §7.11, `ICA_WD_TAIL`). Empty
+        /// by default.
+        public var wdFixedTail: [UInt8] = []
+        /// Client address in the TD module (docs/30 §5.4): IPv4 octets after the port. The reference writes zeros, and
+        /// the broker then shows ClientAddress 0.0.0.0 (D74/D76); the stock client's session shows the Mac's LAN IP.
+        /// Discovery only (docs/76 §7.12, icactl `ICA_TD_ADDR`). Zeros by default.
+        public var tdClientIPv4: [UInt8] = [0, 0, 0, 0]
+        /// Port in the TD module address instead of the connect port (`tdPort`); nil = the connect port (default).
+        public var tdClientPort: UInt16?
+        /// Discovery only (docs/76 §7.14, `ICA_STOCK_MODULES`): send a recorded stock module list instead of ours, with
+        /// our own UI module in its slot. The negotiated capabilities are then the replayed WD module's (unless
+        /// `stockOurs` has "WD" or "WDCAPS"). nil by default.
+        public var stockReplay: WDStockReplay?
+        /// Module keys (`WDStockReplay.key`: WD, TD, PDRFRAME, PDCRYPT1, a VC key such as CTXGDT, or VDS = every VD) for
+        /// which our own module replaces the recorded one; "WDCAPS" keeps the recorded WD module with our capability
+        /// block (bisection, docs/76 §7.14).
+        public var stockOurs: Set<String> = []
+        /// Our UI module in the stock client's layout (`WDModules.uiStockForm`) instead of the reference layout.
+        public var stockFormUI = false
+        /// Patches the replayed WD module's reducer / expander powers (e.g. 0/0: no compression offered). nil = as recorded.
+        public var stockPowers: (reducer: UInt8, expander: UInt8)?
+        /// Capability ids dropped from the replayed WD module's block (e.g. 0x10), and replacements by id.
+        public var stockDropCaps: Set<UInt16> = []
+        public var stockReplaceCaps: [WDCapability] = []
+        /// Decode compressed V3 segments from the server with the expander power it selected (INIT_CONNECT byte 27).
+        /// Off by default: our WD module offers powers 0, so the server never compresses. Client → server stays
+        /// uncompressed V3 segments either way.
+        public var v3Decompression = false
+        /// Answer the host's credential request `03 01` (cap 0x12 version 2) with the version-2 reply
+        /// (`WDBuild.credentialsV2`). Off by default (we offer version 0, the host then asks `01 01`).
+        public var credentialsV2 = false
 
         public init() {}
+
+        /// One line on the replayed WD module after the patches (for logs).
+        public var stockWDDescription: String {
+            guard let wd = stockReplay?.wdLayout else { return "none" }
+            var parts = ["recorded powers \(wd.reducerPower)/\(wd.expanderPower), max reducer v\(wd.maxReducerVersion)"]
+            if let p = stockPowers { parts.append("powers patched to \(p.reducer)/\(p.expander)") }
+            if stockOurs.contains("WD") { parts.append("replaced by ours") }
+            else if stockOurs.contains("WDCAPS") { parts.append("our capability block") }
+            if !stockDropCaps.isEmpty { parts.append("caps dropped " + stockDropCaps.sorted().map { String(format: "0x%02x", $0) }.joined(separator: ",")) }
+            if !stockReplaceCaps.isEmpty { parts.append("caps replaced " + stockReplaceCaps.map { String(format: "0x%02x", $0.id) }.joined(separator: ",")) }
+            parts.append("V3 decompression \(v3Decompression ? "on" : "off"), credential v2 reply \(credentialsV2 ? "on" : "off")")
+            return parts.joined(separator: "; ")
+        }
     }
 
     public enum Phase: Equatable, Sendable { case handshake, connected, closed }
@@ -202,7 +249,13 @@ public final class WinstationDriver {
             let tag = String(decoding: p.prefix(7), as: UTF8.self)
             onEvent(.sessionInfo(tag: tag, value: Array(p.dropFirst(8))))
         case WDPacketType.command:
-            if p.count >= 2, p[0] == 1, p[1] == 1 {
+            if p.count >= 2, p[0] == 3, p[1] == 1, configuration.credentialsV2 {
+                // Cap 0x12 version 2 (docs/76 §7.14, observed in the stock recording): host `03 01`, client `04 00` + strings.
+                let logon = configuration.logon
+                send(WDBuild.credentialsV2(username: logon.username, domain: logon.domain, password: logon.password,
+                                           ticketType: logon.logonTicketType, ticket: logon.logonTicket))
+                onEvent(.credentialRequest(answered: true))
+            } else if p.count >= 2, p[0] == 1, p[1] == 1 {
                 let logon = configuration.logon
                 let long = negotiated.contains { $0.id == WDCapability.longCredentials }
                 send(WDBuild.credentials(username: String(logon.username.prefix(long ? 256 : 20)),
@@ -243,6 +296,9 @@ public final class WinstationDriver {
             return
         }
         negotiated = configuration.policy.negotiate(server: request.capabilities)
+        if let wd = stockWDModule(), !configuration.stockOurs.contains("WD"), !configuration.stockOurs.contains("WDCAPS") {
+            negotiated = wd.capabilities
+        }
         do {
             let (modules, names) = try buildModules()
             for packet in WDModules.initResponsePackets(modules) { transmit(packet) }
@@ -257,8 +313,9 @@ public final class WinstationDriver {
         let channels = channelOrder.sorted { $0.number < $1.number }.map { ($0.name, $0.number) }
         var modules: [[UInt8]] = [
             WDModules.wd(capabilities: negotiated, channels: channels, maxVirtualWrite: UInt16(config.maxVirtualWrite),
-                         reducerVersion: WDCapabilityPolicy.reducerVersion(negotiated)),
-            WDModules.td(outBufLength: config.outBufLength, port: config.tdPort),
+                         reducerVersion: WDCapabilityPolicy.reducerVersion(negotiated), productID: config.wdProductID,
+                         fixedTail: config.wdFixedTail),
+            WDModules.td(outBufLength: config.outBufLength, port: config.tdClientPort ?? config.tdPort, ipv4: config.tdClientIPv4),
             WDModules.framing(),
             WDModules.encryption(),
         ]
@@ -292,7 +349,57 @@ public final class WinstationDriver {
                 config.moduleOverrides[WDModuleOverride.key(name)]?.apply(to: &modules[index])
             }
         }
-        return (modules, names)
+        if config.stockFormUI, let index = names.firstIndex(of: "UI") {
+            modules[index] = try WDModules.uiStockForm(logon: config.logon, seed: obfuscationSeed)
+        }
+        guard let replay = config.stockReplay else { return (modules, names) }
+        // Discovery (docs/76 §7.14): the recorded module list, ours for the UI slot and for the keys in `stockOurs`.
+        var ours: [String: [UInt8]] = [:]
+        for (index, name) in names.enumerated() { ours[WDModuleOverride.key(name)] = modules[index] }
+        var outModules: [[UInt8]] = [], outNames: [String] = []
+        for slot in replay.slots {
+            switch slot {
+            case .ui:
+                outModules.append(ours["UI"]!)
+                outNames.append(config.stockFormUI ? "UI(ours, stock form)" : "UI(ours)")
+            case .module(let recorded):
+                let key = replay.key(of: recorded)
+                let isVD = recorded.count > 3 && recorded[3] == WDModuleClass.vd.rawValue
+                if config.stockOurs.contains(key) || (isVD && config.stockOurs.contains("VDS")) {
+                    if let own = ours[key] { outModules.append(own); outNames.append("\(key)(ours)") }
+                    else { outNames.append("\(key)(dropped: no own module)") }
+                    continue
+                }
+                if key == "WD", let wd = stockWDModule() {
+                    outModules.append(wd.bytes)
+                    outNames.append("WD(stock" + (config.stockOurs.contains("WDCAPS") ? ", our caps" : "") + (stockPatched ? ", patched" : "") + ")")
+                    continue
+                }
+                outModules.append(recorded)
+                outNames.append("\(key)(stock)")
+            }
+        }
+        return (outModules, outNames)
+    }
+
+    private var stockPatched: Bool {
+        configuration.stockPowers != nil || !configuration.stockDropCaps.isEmpty || !configuration.stockReplaceCaps.isEmpty
+    }
+
+    /// The replayed WD module after the configured patches (powers, dropped / replaced caps, or our caps for WDCAPS).
+    func stockWDModule() -> WDModuleLayout? {
+        guard let replay = configuration.stockReplay, var wd = replay.wdLayout else { return nil }
+        if let p = configuration.stockPowers { wd.setPowers(reducer: p.reducer, expander: p.expander) }
+        if configuration.stockOurs.contains("WDCAPS") {
+            wd.replaceCapabilities(negotiated)
+        } else if !configuration.stockDropCaps.isEmpty || !configuration.stockReplaceCaps.isEmpty {
+            var caps = wd.capabilities.filter { !configuration.stockDropCaps.contains($0.id) }
+            for r in configuration.stockReplaceCaps {
+                if let i = caps.firstIndex(where: { $0.id == r.id }) { caps[i] = r } else { caps.append(r) }
+            }
+            wd.replaceCapabilities(caps)
+        }
+        return wd
     }
 
     private func handleInitConnect(_ p: [UInt8]) {
@@ -314,7 +421,7 @@ public final class WinstationDriver {
             if reducerVersion != 0 && reducerVersion != 3 {
                 onEvent(.failure("server selected reducer version \(reducerVersion); only 0 and 3 are implemented"))
             }
-            if reducerVersion == 3 && expanderPower != 0 {
+            if reducerVersion == 3 && expanderPower != 0 && !configuration.v3Decompression {
                 onEvent(.failure("server kept expander power \(expanderPower); compressed V3 segments cannot be decoded"))
             }
             lastReducer = (reducerVersion, reducerPower, expanderPower)
@@ -325,6 +432,12 @@ public final class WinstationDriver {
         v3 = lastReducer.0 == 3
         highThroughput = negotiated.contains { $0.id == WDCapability.highThroughput }
         expander = WDV3Expander()
+        if v3, configuration.v3Decompression, lastReducer.2 > 0 {
+            // docs/30 §12.3: the server compresses S→C with the expander power it selected; we never compress C→S.
+            do { expander = try WDV3Expander(power: Int(lastReducer.2)) } catch {
+                onEvent(.failure("V3 coder for expander power \(lastReducer.2): \(error)"))
+            }
+        }
         phase = .connected
         framer = WDFrameAssembler()
         parser.reset()

@@ -1,196 +1,236 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
-ICAViewer is an independent project and is not affiliated with Citrix. The stock-client columns
-summarise Citrix's public documentation (links under Sources); the ICAViewer column describes this
-client.
+ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.5.0 as
+of 2026-11-13; how each feature behaves is described in the README and under `docs/`.
 
-Status date: 2026-11-07, v0.4.0 (ICAViewer column); stock columns from Citrix documentation as fetched
-2026-11-05.
+## At a glance
 
-## How to read this
+- **Works, verified live:** gateway logon with password and one-time code, seamless apps as native
+  Mac windows with their own Dock entries, several apps in one session, reconnect, survival of short
+  network drops, Thinwire graphics, several monitors, Retina scaling, text clipboard, audio playback
+  and microphone.
+- **Built, not yet verified live:** client drive (one shared folder), printing to PDF, H.264,
+  formatted text and images on the clipboard, webcam with a real camera.
+- **Main gaps:** file transfer, links opening on the Mac, automatic reconnect after longer drops,
+  UDP transport (EDT), Teams optimisation, smart cards, USB devices.
 
-- Stock columns come mainly from the official **Citrix Workspace app feature matrix** (page dated
-  2026-10-30; Windows = Current Release column, 2603.x; the LTSR column was identical for almost every
-  row used here). Newer facts come from the per-platform "What's new" pages: Mac up to 2609, Linux 2608,
-  HTML5 2607, iOS 26.9, Android 26.7. The Windows and ChromeOS "What's new" pages could not be read,
-  so their columns rest on the matrix alone.
-- Cell values: ✅ supported, ⚠️ partial (see footnote), ❌ not supported, ? not verified.
-- **†** = the cited pages do not state it; the value comes from general product knowledge and is
-  unverified. Treat it as "probably". Cells without † that show ✅/❌ are on a cited page.
-- Some "yes" cells in the matrix hide platform caveats (for example Mac "Multi-port ICA: No",
-  Windows "Remote access via Gateway: StoreFront only"). The matrix says nothing about quality or
-  depth of a feature, so a ✅ means "listed as supported", not "works as well as on Windows".
-- The pages were read through a summarising fetch tool, not by hand. Spot-check any cell before
-  relying on it for a decision.
+## How to read the tables
 
-## Matrix
+| Word | In the stock columns | In the Ours column |
+|---|---|---|
+| Yes | Citrix lists it as supported | Works, verified live |
+| Built | – | Implemented, not yet verified live |
+| Partly | Supported with a limit; see Notes | Part of the feature; see Notes |
+| Likely | Not on any page read; general product knowledge | – |
+| No | Listed as not supported | Not implemented |
+| ? | Not found in the pages read | Not tested |
+| – | Not applicable | – |
 
-Columns: Win = Windows, Mac = macOS, Lin = Linux, Web = HTML5 (browser), ChrOS = ChromeOS,
-**Ours** = ICAViewer v0.4.0, 2026-11-07.
+- Stock cells come from Citrix's **feature matrix** (page dated 2026-10-30; Windows = Current
+  Release). A release number in Notes (for example "Mac 2607") means the platform's What's new page.
+  The matrix lags those pages (it names Mac 2511.1 and Linux 2601), so where they disagree the cell
+  follows the newer page and the note says so.
+- "Yes" means "listed as supported", not "works as well as on Windows".
+- The pages were read through a summarising fetch tool, and the long What's new pages only in part.
+  Spot-check a cell before relying on it. The evidence for each cell is in
+  `notes/feature-matrix-research-2026-11-13.md`.
 
-| Feature | Win | Mac | Lin | Web | ChrOS | iOS | Andr | **Ours** |
-|---|---|---|---|---|---|---|---|---|
-| **Access & auth** | | | | | | | | |
-| StoreFront via NetScaler Gateway | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [1] |
-| StoreFront direct (intranet) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [2] |
-| Citrix Cloud / Workspace | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| NetScaler nFactor / MFA | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [3] |
-| Smart card authentication | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ |
-| SSO / pass-through authentication | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ [4] |
-| FIDO2 / passkeys | ✅† | ✅ | ✅ | ? | ? | ✅ | ✅ | ❌ |
-| **Session launch** | | | | | | | | |
-| Seamless published apps | ✅† | ⚠️ [5] | ? | ⚠️ [6] | ? | ⚠️† [7] | ⚠️† [7] | ✅ [8] |
-| Full desktops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ? [9] |
-| Session sharing (several apps, one session) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [45] |
-| Reconnect to disconnected session / Follow Me | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [10] |
-| Connection Center / session management | ✅† | ? | ? | ? | ? | ? | ? | ⚠️ [11] |
-| **Transport** | | | | | | | | |
-| TLS via Gateway | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Session reliability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [12] |
-| Auto client reconnect | ✅ | ✅ | ✅ | ⚠️ [13] | ✅ | ❌ | ✅ | ❌ (planned) |
-| EDT / UDP (adaptive transport) | ✅ | ✅ | ✅ | ⚠️ [14] | ✅ | ✅ | ✅ | ❌ |
-| Rendezvous / HDX Direct | ? | ⚠️ [15] | ⚠️ [15] | ? | ? | ? | ? | ❌ |
-| **Graphics** | | | | | | | | |
-| Thinwire classic | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| H.264 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [16] |
-| H.265 / AV1 | ✅ | ⚠️ [17] | ⚠️ [17] | ? | ? | ? | ? | ❌ |
-| YUV444 (4:4:4) | ✅ | ✅ | ? | ? | ? | ? | ? | ❌ |
-| True multi-monitor | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [18] | ⚠️ [18] | ✅ [19] |
-| DPI scaling / HiDPI | ✅† | ? | ? | ✅ | ? | ✅ | ✅ | ✅ [20] |
-| Adaptive display / throughput | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ [21] |
-| **Seamless integration** | | | | | | | | |
-| Native per-window integration | ✅† | ⚠️ [5] | ? | ❌ [6] | ? | ❌† | ❌† | ✅ [22] |
-| Taskbar / Dock entry per remote app | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ✅ [23] |
-| Visible to window switchers | ✅† | ⚠️ [5] | ? | ❌ | ? | ❌† | ❌† | ✅ [22] |
-| App icons | ✅† | ✅ | ? | ? | ? | ? | ? | ✅ [24] |
-| **Input** | | | | | | | | |
-| Keyboard layout sync (client to Windows VDA) | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ [25] |
-| Scancode keyboard mode | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| Unicode keyboard mode | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [26] |
-| IME (CJK) | ✅ | ✅ | ⚠️ [27] | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Mouse and wheel | ✅† | ✅† | ✅† | ✅† | ✅† | ✅† | ✅† | ✅ |
-| Relative mouse | ? | ? | ? | ? | ? | ? | ? | ? [28] |
-| Touch / pen | ✅ [29] | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| **Devices & redirection** | | | | | | | | |
-| Clipboard (text / image / files) | ✅† | ✅ | ✅ | ⚠️ [30] | ? | ? | ? | ⚠️ [31] |
-| Client drive mapping / file transfer | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [32] |
-| Printing (client printers) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ⚠️ [41] |
-| Generic USB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Smart card into session | ✅† | ? | ✅ | ? | ? | ? | ? | ❌ |
-| Scanners / TWAIN | ✅ | ❌ | ⚠️ [33] | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Webcam | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ [43] |
-| Audio out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [42] |
-| Microphone (bidirectional audio) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ [44] |
-| MS Teams optimisation | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ [34] |
-| Zoom / WebEx optimisation | ✅† | ? | ? | ? | ? | ? | ? | ❌ |
-| Browser content redirection | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Windows multimedia redirection | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Location services | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
-| **Security** | | | | | | | | |
-| Secure ICA / Secure HDX encryption | ✅† | ? | ✅ | ✅† | ✅† | ✅ | ✅ | ❌ [35] |
-| App Protection | ✅ | ✅ | ✅ [36] | ❌ | ❌ | ✅ | ✅ | ❌ |
-| Endpoint analysis (EPA) | ✅† | ? | ✅ | ? | ? | ? | ? | ❌ [37] |
-| **Management** | | | | | | | | |
-| Config via policy / GACS | ✅ | ✅ | ⚠️ [38] | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Auto-update | ✅ | ✅ | ❌ | ❌ | ❌ | ⚠️ [39] | ⚠️ [39] | ❌ |
-| Telemetry / experience metrics | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ [40] |
-| In-app problem report | ? | ? | ? | ? | ? | ? | ? | ✅ [46] |
+## Sign-in and stores
 
-## Footnotes
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| StoreFront through NetScaler Gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
+| StoreFront direct, without gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: designed; all tests ran through a gateway |
+| Citrix Cloud (Workspace) stores | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | |
+| Anonymous store access | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | |
+| Store set-up from an email address | Yes | Yes | No | No | No | Yes | Yes | No | |
+| Password plus one-time code (nFactor form) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
+| NetScaler native one-time code (OTP) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: typed, or computed from a secret in the Keychain |
+| SMS challenge (RADIUS) | Yes | Yes | No | No | No | No | No | No | |
+| Federated logon (SAML, Entra ID) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | |
+| Save the login | Yes | Yes | No | No | No | No | No | Yes | Stock: on-premises StoreFront only. Ours: Keychain |
+| Credential insertion for scripts | Yes | No | Yes | No | Yes | No | No | No | Fast Connect, Storebrowse |
+| Smart card logon | Yes | Yes | Yes | No | Yes | Yes | Yes | No | |
+| Contactless card logon | Yes | No | Yes | No | Yes | No | No | No | |
+| User certificate through the gateway | No | No | No | Yes | Yes | Yes | Yes | No | Native app; the browser variant differs |
+| Pass-through of the Windows login | Yes | No | No | No | No | No | No | No | Entra ID single sign-on is a different feature |
+| Passkey / FIDO2 logon | Likely | Yes | Yes | ? | ? | Yes | Yes | No | Mac 2603, Linux 2601, iOS 24.5, Android 26.7 |
+| Touch ID / Face ID logon | No | No | No | No | No | Yes | No | No | The Mac uses Touch ID only for passkeys |
+| Full VPN through NetScaler | Yes | Yes | Yes | No | No | No | No | No | |
+| Web and SaaS apps with single sign-on | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | |
+| Secure Private Access | Yes | Yes | No | No | No | Yes | Yes | No | |
 
-1. nFactor ExplicitForms (username, password, TOTP), StoreFront Receiver-for-Web API,
-   CitrixAGBasic SSO. Verified live.
-2. Designed but not tested; all testing so far ran through the gateway.
-3. ICAViewer implements only the ExplicitForms factor with a TOTP passcode. Other nFactor schemas
-   (SAML, certificate, push) are not implemented. NetScaler accepts each TOTP code once.
-4. Entra ID SSO exists in some clients (Linux 2604, HTML5 2511, iOS 25.11, Android 25.11) but is a
-   different feature; it is not counted here.
-5. Observed on the stock Mac client (Citrix Viewer 26.09) through macOS Accessibility: seamless
-   windows are borderless, reported as `AXDialog` with no title-bar buttons; Dock icons come from
-   per-window "Husk" processes that own no windows.
-6. HTML5 runs inside a browser tab, so remote apps are not separate OS windows.
-7. Mobile clients show published apps inside a session view, not as OS windows. Unverified.
-8. Tested live with a calculator and a mail client.
-9. Not tested. The seamless path is the only one exercised.
-10. Launching a resource reconnects to the existing session, and the launcher offers to reconnect
-    disconnected sessions at start. Verified live.
-11. A Connection Center window lists sessions and can reconnect, disconnect or log off through the
-    store's session endpoints; Cmd-Q asks Disconnect (default) or Log off. Verified live with a
-    user. The launcher also offers to reconnect disconnected sessions at start (verified live).
-12. Resumes after a network drop, a Wi-Fi change or a short sleep, as long as the outage stays within
-    the server's reliability timeout (typically 180 s). Verified live. On longer outages a Reconnect
-    panel relaunches the app, which reconnects to the disconnected session.
-13. Conflict: the feature matrix says "No"; the HTML5 2607 notes list Auto Client Reconnect as new.
-    Treat as partial.
-14. Conflict: the matrix says adaptive transport is "No" for HTML5, but the 2603 notes mention "EDT
-    Reliable". Treat as partial.
-15. Mac 2503/2609 and Linux 2608 list HDX Direct (direct VDA connection without a gateway). Rendezvous
-    itself is not stated on any page read.
-16. VideoToolbox decoder implemented; not tested live because the tested server policy selects
-    classic Thinwire.
-17. Mac notes mention an H.265 (HEVC) hardware-acceleration switch; Linux notes list H.264/H.265
-    hardware decoding. AV1 is not confirmed for either. Windows negotiates AV1, then H.265, then H.264
-    per Citrix's Thinwire documentation.
-18. Matrix: "External monitor support" yes, "True multi-monitor" no.
-19. The session desktop is the union of all screens; its size stays fixed for the session even if
-    screens change.
-20. Windows scaling and client scaling are separate settings. Auto (default) is Retina-sharp at normal
-    size: per screen, 2x with a 200 % Windows DPI on Retina, 1x otherwise. It falls back to 1x when
-    the session would exceed the protocol's size limit (5120x4096). Verified live on a single Retina
-    screen (pixel-exact 2x, mouse mapping correct) and on two Retina screens, which would exceed the
-    limit and fall back to 1x; Settings explains the fallback. A settings change mid-session offers
-    a reconnect.
-21. ICAViewer uses a client-side frame-rate governor (5 fps idle, 30 fps active), not Citrix's HDX
-    adaptive throughput. Idle host repaints (about 154 kB/s for a mail client) still arrive.
-22. Each remote window is a real `NSWindow`: `AXStandardWindow`, working minimize, no duplicate title
-    bar, visible to Cmd-Tab and third-party window switchers.
-23. Since 0.5: one Dock and Cmd-Tab entry per remote app, with its own name, icon and Mac menu bar,
-    through a small helper app per remote app that shows that app's windows.
-    ICA Viewer itself moves to the menu bar while remote apps are open; ⌃⌥⌘L opens the launcher.
-    On by default; Settings switches back to one Dock entry. Verified live.
-24. The launcher shows the real app icons, and the Dock and Cmd-Tab icon follows the active remote app
-    (icons from the store, else the session). Verified live.
-25. Scancodes with a German layout. There is no dynamic layout sync from the Mac to the VDA.
-26. Unicode events exist only for Option-composed characters; scancodes cover the rest.
-27. Matrix: server IME yes, generic client IME (CTXIME) no.
-28. Not yet investigated. Unverified for stock clients too.
-29. Windows is listed as multi-touch yes; pen is not covered on any page read.
-30. Clipboard text/HTML is confirmed for HTML5 (2607 fix notes); files and images are unverified.
-31. Text works both ways (verified live). HTML, RTF and images are implemented but not yet verified
-    live. Files are not supported yet: the host offers `FileGroupDescriptorW` / `FileContents`, which
-    remains to be investigated.
-32. One shared folder (default `~/Citrix Shared`, read-write, strict confinement, quarantine flag on
-    files written by the session) is exposed as a client drive. Implemented and security-reviewed,
-    but not verified live: the test site does not redirect client drives. No general file transfer.
-33. Linux lists SANE scanner optimisation (2604) but no TWAIN.
-34. Not currently planned.
-35. Not needed: the transport is TLS to the gateway. Basic encryption was never started by the server
-    in testing.
-36. As listed in the matrix. The Linux cell is surprising; verify before relying on it.
-37. Not needed with the tested gateway policy, which has no EPA step. Linux 2601 added EPA plug-in
-    handling.
-38. Linux has centralised management settings but no Global App Config.
-39. Updates via the App Store or Play Store, not the Citrix auto-update service.
-40. None, by design.
-41. PDF printing through the host's PDF printer to the macOS print panel; nothing prints without a
-    click. Implemented, off by default, not verified live: the test site creates no client printers.
-42. Playback (PCM, Opus) verified live: the sound was heard on the Mac.
-43. HDX webcam redirection (H.264) with a camera picker. Off by default; the camera opens only while
-    the host is using it, and a menu-bar item disables it for the session. The host handshake is
-    verified live (headless, with a synthetic test pattern) and the picker lists the cameras, but a
-    real camera has not been tried. This client path supports 32-bit host applications only; 64-bit
-    apps (Windows Camera, Teams, modern browsers) will not see the camera. Teams optimisation is
-    separate.
-44. Opus uplink, sent when a session application records. Off by default in Settings; macOS asks for
-    permission on first use, and a menu-bar item disables the microphone for the current session.
-    Verified live. The row is for audio only; Teams optimisation is separate.
-45. Several published apps run in one session: the second app is launched into the running session
-    over the control channel, with no second logon. Verified live (a second app started fast, the
-    Dock icon and menu name followed, closing one app left the other running). Logoff happens only
-    when all apps have ended.
-46. Help > Report a Problem... builds a scrubbed report with a preview and a prefilled GitHub issue
-    plus a saved report file. You review the report before anything is shared; nothing is sent
-    automatically. Verified live (dialog and preview).
+## Launching and sessions
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Seamless published apps | Likely | Partly | ? | Partly | ? | Partly | Partly | Yes | Mac: borderless windows (see below). Web: inside a browser tab. Mobile: inside a session view, unverified |
+| Full desktops | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: only seamless apps are tested |
+| Desktop Viewer toolbar | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | |
+| Several apps in one session | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: no second logon |
+| Reconnect to a disconnected session | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: also offered at start |
+| Session list (Connection Center) | Likely | ? | ? | ? | ? | ? | ? | Partly | Ours: reconnect, disconnect, log off |
+| Local App Access | Yes | No | No | No | No | No | No | No | |
+
+## Network
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| TLS to the gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
+| TLS 1.3 | Yes | Yes | Yes | No | Yes | Yes | Yes | Built | Ours: system TLS offers 1.3; the negotiated version is not logged |
+| TLS 1.0 / 1.1 | No | Yes | No | Yes | Yes | No | No | ? | |
+| Survives short network drops (session reliability) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Up to the server's timeout, typically 180 s |
+| Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | No | Web: matrix no, HTML5 2607 yes. Ours: planned |
+| UDP transport (EDT) | Yes | Yes | Yes | Partly | Yes | Yes | Yes | No | Web: matrix no, HTML5 2603 mentions EDT Reliable |
+| EDT lossy mode | Yes | Yes | Yes | ? | Yes | Yes | Yes | No | Release notes only |
+| DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11 |
+| Direct VDA connection (HDX Direct) | Yes | Yes | Yes | Partly | Partly | ? | Partly | No | Release notes only; Web, ChromeOS, Android mention it in passing |
+| Multi-port ICA | Yes | No | Yes | No | No | No | No | No | |
+| SD-WAN support | Yes | Yes | Yes | Yes | Yes | No | No | ? | |
+
+## Graphics and displays
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Thinwire classic | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
+| H.264 | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: the test server never chose H.264 |
+| H.265 / AV1 | Yes | Partly | Partly | ? | ? | ? | ? | No | Mac, Linux: H.265 only |
+| Full colour (YUV 4:4:4) | Yes | Yes | ? | ? | ? | ? | ? | No | |
+| Hardware video decoding | Yes | Yes | Yes | No | No | No | Yes | Built | Ours: VideoToolbox, the H.264 path |
+| Desktop composition redirection | Yes | No | No | No | No | No | No | No | |
+| Several monitors as one desktop | Yes | Yes | Yes | Yes | Yes | Partly | Partly | Yes | iOS, Android: external monitor only. Ours: size fixed per session |
+| Retina / HiDPI scaling | Likely | ? | ? | Yes | ? | Yes | Yes | Yes | Ours: 2x on Retina, 1x above 5120 × 4096 |
+| Adaptive throughput | Yes | No | No | Yes | Yes | No | No | Partly | Ours: own frame-rate limit (5 to 30 fps) |
+
+## Mac window integration
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Remote windows are real OS windows | Likely | Partly | ? | No | ? | No | No | Yes | Mac: borderless, without title-bar buttons (see below) |
+| Own Dock / taskbar entry per remote app | Likely | Partly | ? | No | ? | No | No | Yes | Mac: placeholder processes that own no windows |
+| Visible to window switchers | Likely | Partly | ? | No | ? | No | No | Yes | |
+| Real app icons | Likely | Yes | ? | ? | ? | ? | ? | Yes | |
+
+## Keyboard, mouse and touch
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Partly | Ours: German layout tested; no live sync when the Mac layout changes |
+| Keyboard layout sync to a Linux VDA | Yes | Yes | Yes | No | No | Yes | Yes | ? | |
+| Scancode keyboard mode | Yes | Yes | Yes | Yes | Yes | No | No | Yes | |
+| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters only |
+| Local input method for Chinese, Japanese, Korean | Yes | Yes | No | Yes | Yes | Yes | Yes | No | CTXIME |
+| Server input method for Chinese, Japanese, Korean | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: needs only key events |
+| Mouse and wheel | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | |
+| Relative mouse | ? | ? | ? | ? | ? | ? | ? | ? | |
+| Touch and gestures | Yes | No | Yes | Yes | Yes | Yes | Yes | No | Mac 2603: gestures only into Citrix's macOS VDA. Pen: no page read |
+
+## Clipboard, files and links
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Clipboard: plain text | Likely | Yes | Yes | Yes | ? | ? | ? | Yes | |
+| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Built | Web: HTML confirmed, images not |
+| Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | No | Ours: under investigation |
+| Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: one shared folder; the test site maps no drives |
+| File transfer (upload, download) | Likely | Likely | Likely | Likely | Likely | ? | ? | No | Not a matrix row. Ours: under investigation |
+| Open a local file in a remote app | Yes | Partly | Yes | No | Yes | Yes | Yes | No | Mac: matrix no, but Mac 2411 added file type association |
+| Links in remote apps open on the client | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Host-to-client URL redirection |
+| Links in both directions | Yes | Yes | Yes | No | No | No | No | No | Bidirectional redirection; Mac since 2603 |
+
+## Devices
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Printing to client printers | Yes | Yes | Yes | Yes | Yes | Yes | No | Built | Ours: PDF to the macOS print panel, off by default |
+| Any USB device (generic USB) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Mac docs describe storage devices |
+| Smart card in the session | Likely | ? | Likely | ? | Partly | ? | ? | No | ChromeOS: through generic USB |
+| FIDO2 / WebAuthn in the session | Yes | Yes | Yes | ? | ? | ? | ? | No | Windows 2402, Linux 2303, Mac 2307 and later |
+| Scanners | Yes | No | Partly | No | Yes | No | No | No | Windows: TWAIN, WIA (not LTSR). Linux: SANE. ChromeOS 2411.1; matrix says no |
+| Webcam | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: 32-bit host apps only; no real camera tried |
+| Audio playback | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
+| Microphone | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: off by default |
+| Audio over UDP | Yes | No | Yes | No | No | No | No | No | |
+| Location | Yes | Partly | No | No | No | Yes | Yes | No | Mac 2607 preview; matrix says no |
+| Mobile device features (mobility pack) | Yes | No | No | Yes | Yes | Yes | Yes | No | |
+| Battery status in the session | Likely | ? | Yes | ? | ? | ? | ? | No | Release notes only (Linux 2503) |
+| Client time zone in the session | Likely | Likely | Likely | Yes | Likely | Likely | Likely | No | Not a matrix row. Ours: sends back the server's time zone |
+| COM / serial ports | Likely | ? | ? | ? | ? | ? | ? | No | |
+
+## Meetings and media
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Microsoft Teams optimisation | Yes | Yes | Yes | Yes | Yes | No | No | No | Mac: new Teams since 2607. Ours: not planned |
+| Zoom / Webex optimisation | Yes | Yes | ? | ? | Yes | ? | ? | No | Mac, ChromeOS: Zoom |
+| Cisco Jabber optimisation | Yes | No | Yes | No | No | No | No | No | |
+| Skype for Business optimisation | Yes | Yes | Yes | No | No | No | No | No | |
+| Unified Communications SDK | Yes | Yes | Yes | Yes | Yes | No | No | No | |
+| Browser content redirection | Yes | Yes | Yes | No | Yes | No | No | No | |
+| Windows media redirection | Yes | No | Yes | No | No | No | No | No | |
+
+## Security
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Secure ICA encryption | Likely | ? | Yes | Likely | Likely | Yes | Yes | No | Ours: not needed over TLS; no server asked for it |
+| App Protection | Yes | Yes | Yes | No | No | Yes | Yes | No | Linux as listed; verify before relying on it |
+| Endpoint analysis (EPA) | Likely | ? | Yes | ? | ? | ? | ? | No | Ours: the tested gateway has no EPA step |
+
+## Management and support
+
+| Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| Global App Config service | Yes | Yes | No | Yes | Yes | Yes | Yes | No | |
+| Centralised management settings | Yes | No | Yes | No | Yes | No | No | No | |
+| Client App Management | Yes | No | No | – | – | – | – | No | |
+| Auto-update | Yes | Yes | No | No | No | Partly | Partly | No | iOS, Android: through the app stores |
+| Usage metrics to Citrix Director (EUEM) | Yes | Yes | Yes | Yes | Yes | No | Yes | No | Ours: no telemetry, by design |
+| Network analytics (HDX Insight, AppFlow) | Yes | Yes | Yes | Partly | Partly | Partly | Partly | No | Web, ChromeOS: no NSAP channel. iOS, Android: NSAP only. Ours: by design |
+| Command-line tool | Yes | No | No | No | No | No | No | Yes | Ours: `icactl`, for testing |
+| In-app problem report | ? | ? | ? | ? | ? | ? | ? | Yes | Ours: scrubbed, previewed before sharing |
+
+Left out: matrix rows for the mobile apps only (RSA soft token, single sign-on to Citrix mobile
+apps, Lockdown mode, auto-launch, connection strength indicator, App Store updates), rows about
+settings screens (keyboard sync, input mode, language bar), keyboard layout sync from the VDA to
+the client (no on every platform), and Citrix Enterprise Browser (deprecated; removed in Linux 2604).
+
+## Stock Mac viewer components
+
+The stock Mac viewer (Citrix Viewer 26.09.0.25, inside
+`/Library/Application Support/Citrix Receiver/`) ships most virtual channels as separate plug-in
+bundles. The table below is built from the bundle names and the controller class named in each
+bundle's `Info.plist`; no binary was opened. Thinwire graphics and seamless windows (TWI) are part of
+the main viewer, not plug-ins. Where the feature column says "probably", the name is the only hint.
+
+| Bundle (controller class) | Feature, matrix row | **Ours** |
+|---|---|---|
+| `CTXCAM` (`ICAClientAudioController`) | Audio out, microphone | Yes |
+| `CTXCLIP` (`ICAClipboardController`) | Clipboard | Partly |
+| `CTXCDM` (`ICAClientDriveController`) | Client drive mapping | Partly |
+| `CTXGDT` (`ICAClientGDTController`) | File transfer (generic data transfer) | No (under investigation, docs/76-gdt.md) |
+| `CTXCPM` (`ICACPMVirtualChannel`) | Printing | Partly |
+| `CTXCTL` (`ICAControlChannelController`) | Control channel (launch into a running session) | Yes |
+| `CTXMM` (`ICAClientMultimediaController`) | Multimedia; ICAViewer's webcam uses this channel | Partly (webcam only) |
+| `CTXMTOP` (`ICAClientMTOPController`) | Probably Teams / WebRTC optimisation: the largest bundle (8.2 MB), next to `libbgblur.dylib` | No |
+| `CTXSCRD` (`ICAClientSCardV2Controller`) | Smart card into session | No |
+| `CTXFIDO` (`ICAClientFido2Controller`) | FIDO2 inside the session | No |
+| `CTXIME` (`ICAIMEVirtualChannel`) | Client IME | No |
+| `CTXMTCH` (`ICAMultiTouchController`) | Touch / gestures | No |
+| `CTXSCAN` (`ICAClientScanController`) | Scanners; shipped although no Mac page lists scanner redirection | No |
+| `CTXGUSB` (`ICAUSBVirtualChannel`), with `CTXUSBDaemon.framework` | Generic USB | No |
+| `CTXBCR`, `CTXBCRPF` (`ICAClientBCRController`, `…BCRPFController`) | Browser content redirection | No |
+| `CTXSENS` (`ICAClientSENSController`) | Probably location / sensors (Mac 2607 preview) | No |
+| `CTXMOB` (`ICAClientMobileController`) | Mobility pack; shipped although the matrix says Mac has none | No |
+| `CTXAPPP` (`ICAAppProtectionController`) | App Protection | No |
+| `CTXEUEM` (`ICAUserExperienceController`) | Experience metrics (EUEM) | No (by design) |
+| `CTXNSAP` (`ICANSAPController`) | HDX Insight / NetScaler AppFlow | No (by design) |
+| `CTXSUPP` (`ICAClientVdTelemetryController`) | Client telemetry | No (by design) |
+
+Libraries next to them: `libUrlRedirection_client.dylib` (link redirection), `libudt.dylib`
+(probably the UDP transport behind EDT), `libbgblur.dylib` (background blur), FFmpeg
+(`libavcodec`, `libavformat`, `libswscale`) and OpenCV.
 
 ## Gaps that matter most
 
@@ -223,11 +263,11 @@ its own Dock and Cmd-Tab entry, with its name, icon and menu bar.
 
 Secondary points: no telemetry, no background services, and the whole client is small enough to
 read in one sitting. These are design choices rather than features, and they come at the price of
-every row above that is marked ❌.
+every row above that is marked No.
 
 ## Sources
 
-Stock-client documentation (fetched 2026-11-05):
+Stock-client documentation (fetched 2026-11-05 unless noted):
 
 - Feature matrix, dated 2026-10-30: https://docs.citrix.com/en-us/citrix-workspace-app/citrix-workspace-app-feature-matrix.html
 - Mac, What's new (2409 to 2609): https://docs.citrix.com/en-us/citrix-workspace-app-for-mac/whats-new.html
@@ -236,7 +276,13 @@ Stock-client documentation (fetched 2026-11-05):
 - HTML5, What's new (2408 to 2607): https://docs.citrix.com/en-us/citrix-workspace-app-for-html5/whats-new.html
 - iOS, What's new (25.9 to 26.9): https://docs.citrix.com/en-us/citrix-workspace-app-for-ios/whats-new.html
 - Android, What's new (25.7 to 26.7): https://docs.citrix.com/en-us/citrix-workspace-app-for-android/whats-new.html
-- Windows, About this release (known only from search snippets): https://docs.citrix.com/en-us/citrix-workspace-app-for-windows/whats-new
+- Windows, About this release, dated 2026-11-04 (read in part): https://docs.citrix.com/en-us/citrix-workspace-app-for-windows/about.html
+  (the `whats-new.html` and `about-this-release.html` URLs return only site navigation)
 - Windows 2603.11 PDF (not opened): https://docs.citrix.com/en-us/citrix-workspace-app-for-windows/downloads/citrix_workspace_app_2603_11_for_windows.pdf
 - Thinwire / codec negotiation (H.264, H.265, AV1, 4:4:4): https://docs.citrix.com/en-us/citrix-virtual-apps-desktops/2311/graphics/thinwire.html
-- ChromeOS: no readable page; the column is the feature matrix only.
+- ChromeOS, What's new of the Chrome app, dated 2026-10-29 (read in part): https://docs.citrix.com/en-us/citrix-workspace-app-for-chrome/whats-new.html
+  (`citrix-workspace-app-for-chromeos/whats-new.html` returns only site navigation)
+- FIDO2 in the session, Virtual Apps and Desktops 2511: https://docs.citrix.com/en-us/citrix-virtual-apps-desktops/2511/secure/fido2/configuration
+
+Pages fetched again on 2026-11-13: the feature matrix and the Mac, Linux, HTML5, iOS and Android
+What's new pages (dated 2026-10-26 to 2026-11-13).

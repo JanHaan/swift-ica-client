@@ -78,7 +78,7 @@ public enum StockChannels {
 
 /// A channel that is only announced (docs/76 §7.4 V11/V12): the generic 48-byte VD module with the given versions,
 /// host name "ICA", no flow control, no VD data. Host writes are counted and the first ones logged; nothing is
-/// ever sent. Session queue only.
+/// sent unless `firstReply` is set. Session queue only.
 public final class StubChannelEngine: VirtualChannelEngine, VirtualChannelModule {
     public let channelName: String
     public var output: ((ChannelOutput) -> Void)?
@@ -89,6 +89,9 @@ public final class StubChannelEngine: VirtualChannelEngine, VirtualChannelModule
     public private(set) var hostBytes = 0
     /// How many host writes are logged (head bytes in hex).
     public var logFirst = 3
+    /// Sent once, as the answer to the host's first write (discovery, docs/76 §7.14: the stock client's observed answer,
+    /// e.g. CTXTUI `04 00 80 00 04 00 00 00`). nil (default): a stub never sends.
+    public var firstReply: [UInt8]?
 
     public init(name: String, versionLow: UInt8 = 1, versionHigh: UInt8 = 1) {
         channelName = name
@@ -109,6 +112,10 @@ public final class StubChannelEngine: VirtualChannelEngine, VirtualChannelModule
         hostBytes += data.count
         if hostWrites <= logFirst {
             onEvent("← \(label) #\(hostWrites) \(data.count) B: " + GDTHexLog.hex(data.prefix(32)) + (data.count > 32 ? " …" : ""))
+        }
+        if hostWrites == 1, let reply = firstReply {
+            output?(.channel(Data(reply)))
+            onEvent("→ \(label) \(reply.count) B: " + GDTHexLog.hex(reply))
         }
     }
 

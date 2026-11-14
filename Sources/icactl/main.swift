@@ -86,8 +86,8 @@ case "login":
     }
     do {
         var logon = GatewayLogon(http: http, base: gateway)
-        // Native clients don't select the web client mode (docs/15 §1.1); ICA_SKIP_SETCLIENT=0 forces it.
-        if nativeMode && ProcessInfo.processInfo.environment["ICA_SKIP_SETCLIENT"] != "0" { logon.selectWebClient = false }
+        // Native mode needs /cgi/setclient?wica too: until it is called the gateway answers 404 for every
+        // /Citrix/… path (docs/15 §1.1, live 2026-11-13). ICA_SKIP_SETCLIENT=1 skips it (GatewayLogon default).
         print("gateway logon: User-Agent \(http.userAgent == nil ? "system default" : "set")"
             + ", setclient \(logon.selectWebClient ? "on" : "skipped")")
         try await logon.logon(.init(username: username, password: password, passcode: passcode))
@@ -387,6 +387,37 @@ case "resources":
         fail("\(error)")
     }
 
+case "relay-decode":
+    // icactl relay-decode <dir> — offline decode of a scripts/cgp-relay.py recording (see RelayDecode.swift).
+    guard let dir = args.first else { fail("usage: icactl relay-decode <dir>") }
+    relayDecode(dir)
+
+case "relay-modules":
+    // icactl relay-modules <wd-C.log> <out> — the stock client's INIT_RESPONSE modules from a relay-decode log as an
+    // ICA_STOCK_MODULES file (docs/76 §7.14). The UI module (it carries the recorded session's logon ticket) is written
+    // as the placeholder line `UI`, never as bytes. Private: write it under .session/ only.
+    guard args.count == 2 else { fail("usage: icactl relay-modules <wd-C.log> <out>") }
+    guard let log = try? String(contentsOfFile: args[0], encoding: .utf8) else { fail("cannot read \(args[0])") }
+    var recorded: [[UInt8]] = []
+    for line in log.split(separator: "\n") where line.hasPrefix("HS type 0x01 ") {
+        let fields = line.split(separator: " ")
+        guard fields.count == 6, let bytes = GDTEngine.parseHex(String(fields[5])) else { fail("bad HS line: \(line.prefix(40))") }
+        recorded.append(bytes)
+    }
+    let text = WDStockReplay.fileText(modules: recorded, comment: "stock INIT_RESPONSE modules from \(args[0]) (private; UI = our own UI module)")
+    let replay: WDStockReplay
+    do { replay = try WDStockReplay.parse(text) } catch { fail("recorded module list does not parse: \(error)") }
+    FileManager.default.createFile(atPath: args[1], contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
+    print("\(replay.slots.count) slots (\(replay.modules.count) modules + UI) → \(args[1])")
+    for slot in replay.slots {
+        if case .module(let m) = slot { print("  \(replay.key(of: m)) \(m.count) B") } else { print("  UI (ours)") }
+    }
+    if let wd = replay.wdLayout {
+        print("  WD: powers \(wd.reducerPower)/\(wd.expanderPower), max reducer \(wd.maxReducerVersion), product \(wd.productID), caps " +
+              wd.capabilities.map { String(format: "0x%02x", $0.id) + "[\($0.body.count + 4)]" }.joined(separator: " "))
+        print("  bind: " + wd.bindTable.map { "\(WDModuleOverride.key($0.name))=\($0.number)" }.joined(separator: " "))
+    }
+
 case "cookies":
     print(http.cookieNames.joined(separator: "\n"))
 
@@ -456,15 +487,22 @@ default:
                                          ICA_GDT_ECHO_INIT=1|inc|inc@N|hex:…, ICA_GDT_HELLO=<hex>, ICA_GDT_VERSION=N|L-H,
                                          ICA_GDT_VDDATA=<hex>, ICA_WD_HT=1, ICA_CLIP_REPLY_WORD2/_TAIL, ICA_CTXCTL=1,
                                          ICA_CTL_ACCEPT=09[,..], ICA_GDT_CDM=1, ICA_STUB_VCS=NAME[:l-h],..,
-                                         ICA_STOCK_VCS=1; docs/76 §6-7)
+                                         ICA_STOCK_VCS=1, ICA_WD_PRODUCT=N, ICA_WD_TAIL=<hex>,
+                                         ICA_GDT_MAXPACKET=N, ICA_WD_CREDVER=N, ICA_WD_EUKS=V[:M];
+                                         ICA_STOCK_MODULES=<file>, ICA_STOCK_OURS=KEY,.., ICA_STOCK_UI=stock,
+                                         ICA_STOCK_COMPRESS=0, ICA_STOCK_DROPCAPS=id,.., ICA_STUB_REPLY=NAME:hex,..,
+                                         ICA_NO_INPUT=1; docs/76 §6-7)
+      icactl relay-modules <wd-C.log> <out>  recorded stock INIT_RESPONSE modules as an ICA_STOCK_MODULES file
+                                         (UI module never written; keep the file in .session/)
                                          (ICA_STORE_MODE=native: launch through the native store API, docs/15)
       icactl native discover|list        native Store Services API through the gateway (docs/15); log on first with
-                                         ICA_STORE_MODE=native icactl login (native User-Agent, no setclient)
+                                         ICA_STORE_MODE=native icactl login (native User-Agent; setclient as for web)
       icactl native launch <name>        native launch, saves .session/last-native.ica (no connect)
       icactl native keys                 offline key-name diff .session/last.ica (web) vs last-native.ica
-                                         ICA_NATIVE_STORE=/Citrix/<Store>/, ICA_NATIVE_LAUNCHER=<s> (launcher param)
+                                         ICA_NATIVE_STORE=/Citrix/<Store>/, ICA_NATIVE_LAUNCHER=<s> (launcher param),
+                                         ICA_NATIVE_TRACE=1 (token-flow trace: paths, realms, reasons)
     ICA_GATEWAY_UA=<string>              User-Agent for all gateway and store requests of the run
-    ICA_SKIP_SETCLIENT=1                 login: skip /cgi/setclient?wica (=0 forces it in native mode)
+    ICA_SKIP_SETCLIENT=1                 login: skip /cgi/setclient?wica (native mode needs it too, docs/15 §1.1)
       icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
@@ -1121,11 +1159,17 @@ func runClipFilesTest(ica: ICAFile) async throws {
         controlConfig = c
     } else if env["ICA_CTL_ACCEPT"] != nil {
         fail("ICA_CTL_ACCEPT needs ICA_CTXCTL=1")
+    } else if env["ICA_STOCK_MODULES"] != nil {
+        controlConfig = ControlEngine.Config()  // the replayed list announces CTXCTL: answer it with our engine
     }
     // docs/76 §7.4 V10: CTXCDM with an empty read-only temp folder as M: (created and removed by this run).
     var cdmConfig: CDMEngine.Config?
     var cdmDir: URL?
-    if env["ICA_GDT_CDM"] == "1" || env["ICA_STOCK_VCS"] == "1" {
+    // §7.14 round 9: ICA_STOCK_MODULES=<file from `icactl relay-modules`> replays the stock client's recorded module list
+    // (our UI module in its slot) and implies the stock channel set (ICA_STOCK_VCS) with our engines on the recorded
+    // bind table's numbers.
+    let replayPath = env["ICA_STOCK_MODULES"]
+    if env["ICA_GDT_CDM"] == "1" || env["ICA_STOCK_VCS"] == "1" || replayPath != nil {
         let dir = URL(fileURLWithPath: "/tmp/ica-gdt-cdm-\(runID)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         cdmDir = dir
@@ -1143,10 +1187,47 @@ func runClipFilesTest(ica: ICAFile) async throws {
         guard let stub = StubChannelEngine.parse(String(item)) else { fail("ICA_STUB_VCS: \(item) is not NAME[:low-high]") }
         stubs.append(stub)
     }
-    let stock = env["ICA_STOCK_VCS"] == "1"
+    let stock = env["ICA_STOCK_VCS"] == "1" || replayPath != nil
     if stock {
         stubs = StockChannels.stubs() + stubs.filter { s in !StockChannels.all.contains { $0.name == s.channelName } }
         config.channelOverrides = StockChannels.channelMap
+    }
+    if let replayPath {
+        guard let text = try? String(contentsOfFile: replayPath, encoding: .utf8) else { fail("ICA_STOCK_MODULES: cannot read \(replayPath)") }
+        let replay: WDStockReplay
+        do { replay = try WDStockReplay.parse(text) } catch { fail("ICA_STOCK_MODULES: \(error)") }
+        config.stockReplay = replay
+        guard let wd = replay.wdLayout else { fail("ICA_STOCK_MODULES: no WD module") }
+        // Engines and stubs on the recorded bind table's numbers; a recorded name without an engine of ours gets a stub.
+        config.channelOverrides = Dictionary(wd.bindTable.map { ($0.name, $0.number) }, uniquingKeysWith: { a, _ in a })
+        let known = Set(StockChannels.engineBacked).union(stubs.map(\.channelName))
+        for entry in wd.bindTable where !known.contains(entry.name) { stubs.append(StubChannelEngine(name: entry.name)) }
+        config.v3Decompression = true
+        config.credentialsV2 = true
+        config.stockOurs = Set((env["ICA_STOCK_OURS"] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }.filter { !$0.isEmpty })
+        config.stockFormUI = env["ICA_STOCK_UI"] == "stock"
+        // Fallback if the compressed path fails: offer no compression and no HT (an explicitly logged deviation).
+        if env["ICA_STOCK_COMPRESS"] == "0" {
+            config.stockPowers = (0, 0)
+            config.stockDropCaps.insert(WDCapability.highThroughput)
+        }
+        for item in (env["ICA_STOCK_DROPCAPS"] ?? "").split(separator: ",") {
+            guard let id = UInt16(item.trimmingCharacters(in: .whitespaces), radix: 16) else { fail("ICA_STOCK_DROPCAPS: \(item) is not a hex id") }
+            config.stockDropCaps.insert(id)
+        }
+        let patched = config.stockWDDescription
+        say("stock replay: \(replay.slots.count) slots from \(replayPath); ours for [\(config.stockOurs.sorted().joined(separator: ","))]; UI " +
+            (config.stockFormUI ? "ours in the stock layout" : "ours (reference layout)") + "; WD \(patched)")
+        say("stock replay: bind " + wd.bindTable.map { "\(WDModuleOverride.key($0.name))=\($0.number)" }.joined(separator: " "))
+        say("stock replay: date fields as recorded (WD module 2026-11-13 20:57:16, VD headers DOS date of the same day); not patched")
+    }
+    // ICA_STUB_REPLY=NAME:hex[,NAME:hex]: the stub answers the host's first write with these bytes (the stock client's
+    // observed answer, e.g. CTXTUI 04 00 80 00 04 00 00 00; docs/76 §7.14).
+    for item in (env["ICA_STUB_REPLY"] ?? "").split(separator: ",") {
+        let parts = item.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let bytes = GDTEngine.parseHex(parts[1]), !bytes.isEmpty,
+              let stub = stubs.first(where: { $0.label.uppercased() == parts[0].uppercased() }) else { fail("ICA_STUB_REPLY: \(item) is not NAME:hex of an announced stub") }
+        stub.firstReply = bytes
     }
     // §7.6 V14–V17: module-header names/versions (ICA_MODNAME_<VC>, ICA_MODVER_<VC>; ICA_STOCK_NAMES=1 = the stock
     // client's list for every announced module, explicit variables win). ICA_GDT_AUDIO=1 announces CTXCAM (playback,
@@ -1187,13 +1268,61 @@ func runClipFilesTest(ica: ICAFile) async throws {
         guard let id = UInt16(text.hasPrefix("0x") ? String(text.dropFirst(2)) : text, radix: 16) else { fail("ICA_WD_ECHO_CAPS: \(text) is not a hex id") }
         config.policy.echoCapabilities.insert(id)
     }
+    // §7.12: cap 0x1E as the reference negotiates it (docs/30 §4.3), not echoed verbatim.
+    config.policy.capability1E = env["ICA_WD_CAP1E"] == "1"
+    // §7.13: caps 0x12 / 0x14 with the stock client's versions (credential passing 2, EUKS 3) [B].
+    if let text = env["ICA_WD_CREDVER"] {
+        guard let v = UInt16(text) else { fail("ICA_WD_CREDVER must be a u16") }
+        config.policy.credentialVersion = v
+    }
+    if let text = env["ICA_WD_EUKS"] {
+        let parts = text.split(separator: ":", omittingEmptySubsequences: false).map { UInt16($0) }
+        guard (1...2).contains(parts.count), let v = parts[0], parts.count == 1 || parts[1] != nil else {
+            fail("ICA_WD_EUKS must be V or V:M (u16)")
+        }
+        config.policy.unicodeKeyboardReply = (v, parts.count == 2 ? parts[1]! : 1)
+    }
+    // §7.11 V23+: the WD module's u16 @66 (reference 0x0101 = 257, read as the client product ID [I]); decimal or 0x hex.
+    if let text = env["ICA_WD_PRODUCT"] {
+        let value = text.hasPrefix("0x") ? UInt16(text.dropFirst(2), radix: 16) : UInt16(text)
+        guard let value else { fail("ICA_WD_PRODUCT must be a u16 (decimal or 0x hex)") }
+        config.wdProductID = value
+    }
+    // §7.11: bytes after the WD module's 86-byte fixed part (the stock module's fixed part is 88 bytes [B][I]).
+    if let text = env["ICA_WD_TAIL"] {
+        guard let bytes = GDTEngine.parseHex(text), !bytes.isEmpty, bytes.count <= 16 else { fail("ICA_WD_TAIL must be 1-16 hex bytes") }
+        config.wdFixedTail = bytes
+    }
+    // §7.12 V29+: the client address in the TD module (D76: the broker shows 0.0.0.0 for us, the LAN IP for the stock
+    // client). auto = the default-route IPv4; or a.b.c.d[:port] (port default: the connect port).
+    if let text = env["ICA_TD_ADDR"] {
+        if text == "auto" {
+            guard let ip = WDClientIdentity.primaryIPv4() else { fail("ICA_TD_ADDR=auto: no IPv4 on the default route") }
+            config.tdClientIPv4 = ip
+        } else {
+            guard let parsed = WDClientIdentity.parseAddress(text) else { fail("ICA_TD_ADDR must be auto or a.b.c.d[:port]") }
+            config.tdClientIPv4 = parsed.ipv4
+            config.tdClientPort = parsed.port
+        }
+    }
+    // §7.12: the client name (UI module). auto = the computer name in the stock client's form (spaces → "_") [B].
+    if let text = env["ICA_CLIENT_NAME"] {
+        let name = text == "auto" ? WDClientIdentity.clientName(computerName: Host.current().localizedName ?? "") : text
+        guard !name.isEmpty, name.utf16.count <= 20 else { fail("ICA_CLIENT_NAME must give 1-20 characters") }
+        config.logon.clientName = name
+    }
+    say("client: name \"\(config.logon.clientName)\" TD address " + config.tdClientIPv4.map(String.init).joined(separator: ".") +
+        (config.tdClientPort.map { " port \($0)" } ?? " port = connect port"))
     say("identity: version \"\(config.logon.clientVersion)\" build \(config.logon.clientBuild) product \"\(config.logon.productName)\" " +
-        "cap 0x0D \(config.policy.hostOSReply.map(String.init) ?? "not sent")")
+        "cap 0x0D \(config.policy.hostOSReply.map(String.init) ?? "not sent")" + String(format: " WD product id 0x%04x", config.wdProductID) +
+        (config.wdFixedTail.isEmpty ? "" : " WD tail " + GDTHexLog.hex(config.wdFixedTail)))
     let announceAudio = stock || env["ICA_GDT_AUDIO"] == "1"
     let variant = (["ICA_GDT", "ICA_GDT_VERSION", "ICA_GDT_VDDATA", "ICA_GDT_ECHO_INIT", "ICA_GDT_HELLO", "ICA_WD_HT", "ICA_CLIP_VERSION",
                    "ICA_CLIP_REPLY_WORD2", "ICA_CLIP_REPLY_TAIL", "ICA_CTXCTL", "ICA_CTL_ACCEPT", "ICA_GDT_CDM", "ICA_STUB_VCS", "ICA_STOCK_VCS",
         "ICA_STOCK_NAMES", "ICA_GDT_AUDIO", "ICA_UI_VERSION", "ICA_UI_BUILD", "ICA_UI_PRODUCT", "ICA_WD_OSCAP", "ICA_WD_VCMASK",
-        "ICA_WD_ECHO_CAPS"]
+        "ICA_WD_ECHO_CAPS", "ICA_WD_PRODUCT", "ICA_WD_TAIL", "ICA_TD_ADDR", "ICA_CLIENT_NAME", "ICA_WD_CAP1E",
+        "ICA_GDT_MAXPACKET", "ICA_WD_CREDVER", "ICA_WD_EUKS", "ICA_STOCK_MODULES", "ICA_STOCK_OURS", "ICA_STOCK_UI",
+        "ICA_STOCK_COMPRESS", "ICA_STOCK_DROPCAPS", "ICA_STUB_REPLY", "ICA_NO_INPUT"]
         + env.keys.filter { $0.hasPrefix("ICA_MODNAME_") || $0.hasPrefix("ICA_MODVER_") || $0.hasPrefix("ICA_MODHOST_") }.sorted()).compactMap { key in env[key].map { "\(key)=\($0)" } }
     say("variant: " + (variant.isEmpty ? "(defaults)" : variant.joined(separator: " ")) +
         String(format: "; CLIP_INIT_REPLY word2 0x%04x tail %@", clipConfig.initReplyWord2, GDTHexLog.hex(clipConfig.initReplyTail)))
@@ -1258,6 +1387,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     var hostText: String?
     var protocolErrors = 0
     var terminateReason: UInt8?
+    var wdTypes: [UInt8: Int] = [:]
 
     clip.onEvent = { event in
         if case .trace(let line) = event { return trace.write(line) }
@@ -1313,11 +1443,26 @@ func runClipFilesTest(ica: ICAFile) async throws {
         case .wd(.terminate(let reason)):
             terminateReason = reason
             say("← TERMINATE reason \(reason)")
+        case .wd(.initRequest(let r)):
+            // Server cap ids with their full lengths (incl. the 4-byte header), for matching the stock client's cap lengths
+            // (docs/76 §7.11/§7.12). Host data, no secrets.
+            say("← INIT_REQUEST level \(r.level), \(r.capabilities.count) caps: " +
+                r.capabilities.map { String(format: "0x%02x", $0.id) + "[\($0.body.count + 4)]" }.joined(separator: " "))
         case .wd(.initResponseSent(let modules, let negotiated)):
             say("→ INIT_RESPONSE modules \(modules.joined(separator: ", ")); caps " +
-                negotiated.map { String(format: "0x%02x", $0.id) }.joined(separator: " "))
-        case .wd(.connected): say("WD connected, HT header \(session.wd.highThroughput ? "on" : "off")")
-        case .wd(.packet(let p)): if let channel = p.channel { channelWrites[channel, default: 0] += 1 }
+                negotiated.map { String(format: "0x%02x", $0.id) + "[\($0.body.count + 4)]" }.joined(separator: " ") +
+                " (\(WDCapabilityBlock.serialize(negotiated).count) B)")
+        case .wd(.packet(let p)):
+            if let channel = p.channel { channelWrites[channel, default: 0] += 1; break }
+            // Non-VC WD packets (docs/76 §7.14: the stock recording has 0x38 0f01 0f02 1301 1302 right before the host's
+            // GDT Syn). Session info (0x3B) only by tag; it carries user data.
+            wdTypes[p.type, default: 0] += 1
+            if wdTypes[p.type]! <= 6 {
+                let body = p.type == WDPacketType.sessionInfo ? String(decoding: p.payload.prefix(7), as: UTF8.self) : GDTHexLog.hex(p.payload.prefix(16))
+                say(String(format: "← WD 0x%02x ", p.type) + "\(p.payload.count) B: " + body)
+            }
+        case .wd(.connected(let rv, let rp, let ep, _)):
+            say("WD connected, HT header \(session.wd.highThroughput ? "on" : "off"), reducer v\(rv) powers \(rp)/\(ep)")
         case .wd(.failure(let text)): say("WD failure: \(text)")
         default: break
         }
@@ -1423,7 +1568,20 @@ func runClipFilesTest(ica: ICAFile) async throws {
     }
 
     var pasted = false, compared = false, deleted = false
-    if !fresh {
+    let noInput = env["ICA_NO_INPUT"] == "1"
+    if noInput {
+        // §7.14: no keyboard or mouse input at all. The stock host opens GDT at connect time (with CLIP_INIT), so wait for
+        // host GDT packets: up to 30 s after the clipboard became ready; once some came, until 10 s quiet (max 60 s).
+        say("ICA_NO_INPUT=1: no input is sent; waiting for host GDT traffic")
+        let waitStart = Date()
+        _ = await waitFor(session, 60) {
+            let n = session.gdt?.statistics.packets ?? 0
+            if n == 0 { return Date().timeIntervalSince(waitStart) >= 30 }
+            return gdtLastHost.map { Date().timeIntervalSince($0) >= 10 } ?? false
+        }
+        let n = await onSession(session) { session.gdt?.statistics.packets ?? 0 }
+        say("no-input wait over after \(Int(Date().timeIntervalSince(waitStart))) s: \(n) host GDT packets")
+    } else if !fresh {
         say("not a fresh logon by this run: no input is sent (this may be an existing session)")
     } else if !gotReady || target == nil {
         say("no Explorer window or no clipboard channel: no input is sent")
@@ -1596,6 +1754,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
         "cdm=\(cdmConfig == nil ? "off" : "on") cdm_connect=\(await onSession(session) { cdmConnect }) " +
         "ch_writes=[\(await onSession(session) { channelWrites.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",") })] " +
         "stubs=\(stubs.count) stub_writes=[\(stubWrites)] " +
+        "wd_types=[\(await onSession(session) { wdTypes.sorted { $0.key < $1.key }.map { String(format: "%02x", $0.key) + ":\($0.value)" }.joined(separator: ",") })] " +
         "clip_version=\(version) fresh=\(fresh) pasted=\(pasted) deleted=\(deleted) protocol_errors=\(protocolErrors) end=\"\(ending)\"")
 }
 
@@ -1611,6 +1770,10 @@ func nativeStoreClient() -> NativeStoreClient {
         deviceId: NativeDeviceId.loadOrCreate(path: sessionDir.appendingPathComponent("native-device-id").path),
         storePath: environment["ICA_NATIVE_STORE"].flatMap { $0.isEmpty ? nil : $0 } ?? env["CITRIX_STORE_PATH"])
     store.launcher = environment["ICA_NATIVE_LAUNCHER"].flatMap { $0.isEmpty ? nil : $0 }
+    // ICA_NATIVE_TRACE=1: token-flow trace on stderr (paths, realms, reasons; never tokens).
+    if environment["ICA_NATIVE_TRACE"] == "1" {
+        store.trace = { FileHandle.standardError.write(Data(("native: " + $0 + "\n").utf8)) }
+    }
     return store
 }
 
@@ -1695,7 +1858,14 @@ func sessionsCommand(_ args: [String]) async {
             let resources = try await store.resources()
             let list = try await api.list()
             let target = findSession(key, in: list)
-            guard TestSessionGate.allows(target, allowed: allowed, resources: resources) else {
+            // ICA_LOGOFF_EMPTY_OURS=1 (logoff only, on the user's explicit request): a disconnected
+            // session with no apps left (its last window was closed before the disconnect) that
+            // carries this device's id. The store then offers no reconnect, and the gate below
+            // can't name its apps.
+            let emptyOurs = sub == "logoff" && ProcessInfo.processInfo.environment["ICA_LOGOFF_EMPTY_OURS"] == "1"
+                && target.applications.isEmpty && target.connectionState == .disconnected
+                && (list.deviceId.map { !$0.isEmpty && target.deviceId == $0 } ?? false)
+            guard emptyOurs || TestSessionGate.allows(target, allowed: allowed, resources: resources) else {
                 fail("refused: session \(target.shortId) has apps [\(TestSessionGate.resolvedNames(target, resources: resources).joined(separator: ", "))]; "
                      + "only sessions whose apps are all in ICA_TEST_RESOURCES (\(allowed.joined(separator: ","))) may be touched")
             }

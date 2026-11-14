@@ -565,3 +565,192 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
         #expect(out.last?.id == WDCapability.vcPriority)
     }
 }
+
+/// docs/76 §7.11: the WD module's u16 @66 (reference 0x0101, read as the client product ID [I]) and its size check
+/// against the stock client's logged WD module length (88-byte fixed part + 10 bytes per bind entry + caps).
+@Suite struct ProductIDVariantTests {
+    static func driver(_ product: UInt16?) throws -> [UInt8] {
+        var c = WinstationDriver.Configuration()
+        c.logon.initialProgram = "#Explorer Citrix ABC"
+        if let product { c.wdProductID = product }
+        let wd = WinstationDriver(configuration: c)
+        wd.register(ThinwireEngine())
+        wd.register(SeamlessEngine(config: SeamlessEngine.Config()))
+        return try wd.buildModules().0[0]
+    }
+
+    @Test func referenceValueByDefault() throws {
+        let m = try Self.driver(nil)
+        #expect(Array(m[66...67]) == hex("01 01"))
+        #expect(Array(WDModules.wd(capabilities: [], channels: [])[66...67]) == hex("01 01"))
+    }
+
+    @Test func productIDReplacesOnlyOffset66() throws {
+        let plain = try Self.driver(nil), patched = try Self.driver(0x0052)
+        #expect(Array(patched[66...67]) == hex("52 00"))
+        #expect(plain.count == patched.count)
+        for i in plain.indices where !(66...67).contains(i) && !(28...31).contains(i) && !(40...47).contains(i) {
+            #expect(plain[i] == patched[i], "byte \(i)")   // header DOS time and the WD date/time may tick between builds
+        }
+    }
+
+    @Test func fixedPartIs86BytesAndTheTailMakesIt88LikeTheStockModule() {
+        // Stock log [B]: WD module 815 B, capabilities at offset 358, 457 B, 27 VCs: 358 = 88 + 27 × 10. Ours: 86 + 27 × 10.
+        let caps = [WDCapability(id: WDCapability.vcPriority)]
+        let channels = (0..<27).map { ("CTX\($0)", UInt8($0)) }
+        func capOffset(_ m: [UInt8]) -> Int { Int(m[84]) | Int(m[85]) << 8 }
+        func bindOffset(_ m: [UInt8]) -> Int { Int(m[74]) | Int(m[75]) << 8 }
+        let m = WDModules.wd(capabilities: caps, channels: channels)
+        #expect(bindOffset(m) == 86 && capOffset(m) == 86 + 27 * 10)
+        #expect(m.count == capOffset(m) + WDCapabilityBlock.serialize(caps).count)
+        let t = WDModules.wd(capabilities: caps, channels: channels, fixedTail: [0x52, 0x00])
+        #expect(Array(t[86...87]) == hex("52 00"))
+        #expect(bindOffset(t) == 88 && capOffset(t) == 358 && t.count == m.count + 2)
+        #expect(Array(t[88..<(88 + 270)]) == Array(m[86..<(86 + 270)]))
+    }
+
+    @Test func driverPassesTheTail() throws {
+        var c = WinstationDriver.Configuration()
+        c.logon.initialProgram = "#Explorer Citrix ABC"
+        c.wdFixedTail = [0x01, 0x00]
+        let wd = WinstationDriver(configuration: c)
+        wd.register(ThinwireEngine())
+        let m = try wd.buildModules().0[0]
+        #expect(Array(m[86...87]) == hex("01 00") && (Int(m[74]) | Int(m[75]) << 8) == 88)
+    }
+}
+
+/// docs/76 §7.12: client address in the TD module and the stock-form client name (discovery, `ICA_TD_ADDR`,
+/// `ICA_CLIENT_NAME`).
+@Suite struct ClientIdentityVariantTests {
+    static func modules(_ edit: (inout WinstationDriver.Configuration) -> Void) throws -> [[UInt8]] {
+        var c = WinstationDriver.Configuration()
+        c.logon.initialProgram = "#App"
+        edit(&c)
+        let wd = WinstationDriver(configuration: c)
+        wd.register(ThinwireEngine())
+        return try wd.buildModules().0
+    }
+
+    @Test func tdAddressIsZeroByDefault() throws {
+        let td = try Self.modules { $0.tdPort = 443 }[1]
+        #expect(td.count == 60)
+        #expect(Array(td[38...45]) == hex("02 00 01 bb 00 00 00 00"))
+        #expect(td[46...].allSatisfy { $0 == 0 })
+    }
+
+    @Test func tdCarriesTheClientAddressAndPort() throws {
+        let td = try Self.modules { $0.tdPort = 443; $0.tdClientIPv4 = [10, 1, 2, 3] }[1]
+        #expect(td.count == 60)
+        #expect(Array(td[38...45]) == hex("02 00 01 bb 0a 01 02 03"))
+        let own = try Self.modules { $0.tdPort = 443; $0.tdClientIPv4 = [10, 1, 2, 3]; $0.tdClientPort = 0xC001 }[1]
+        #expect(Array(own[40...45]) == hex("c0 01 0a 01 02 03"))
+        #expect(own[46...].allSatisfy { $0 == 0 })
+    }
+
+    @Test func parseAddress() {
+        #expect(WDClientIdentity.parseAddress("192.0.2.7")?.ipv4 == [192, 0, 2, 7])
+        #expect(WDClientIdentity.parseAddress("192.0.2.7")?.port == nil)
+        #expect(WDClientIdentity.parseAddress("198.51.100.1:1494")?.port == 1494)
+        for bad in ["", "1.2.3", "1.2.3.4.5", "1.2.3.256", "1.2.3.4:", "1.2.3.4:x", "a.b.c.d", "1..3.4", "1.2.3.4:70000"] {
+            #expect(WDClientIdentity.parseAddress(bad) == nil, "\(bad)")
+        }
+    }
+
+    @Test func primaryIPv4IsNotZeroWhenPresent() {
+        if let ip = WDClientIdentity.primaryIPv4() {
+            #expect(ip.count == 4 && ip != [0, 0, 0, 0])
+        }
+    }
+
+    @Test func clientNameInStockForm() {
+        #expect(WDClientIdentity.clientName(computerName: "Test Mac von Nutzer") == "Test_Mac_von_Nutzer")
+        #expect(WDClientIdentity.clientName(computerName: "host") == "host")
+        let long = WDClientIdentity.clientName(computerName: "A very long computer name here")
+        #expect(long == "A_very_long_computer" && long.utf16.count == 20)
+        #expect(WDClientIdentity.clientName(computerName: "Gerät Büro") == "Gerät_Büro")
+    }
+
+    @Test func clientNameGoesIntoTheUIModule() throws {
+        let short = try Self.modules { $0.logon.clientName = "MAC-ICA" }.last!
+        let long = try Self.modules { $0.logon.clientName = "Test_Mac_von_Nutzer" }.last!
+        #expect(long.count == short.count + 2 * (19 - 7))
+    }
+}
+
+/// docs/76 §7.12: cap 0x1E in the reference form (docs/30 §4.3) instead of a verbatim echo.
+@Suite struct Cap1EVariantTests {
+    static let server: [WDCapability] = [
+        WDCapability(id: 0x02, body: [0x07, 0x00]),
+        WDCapability(id: 0x1E, body: [0x00, 0x09, 0x08, 0x07, 0x06] + [UInt8](repeating: 0xAA, count: 20)),
+        WDCapability(id: 0x21, body: [0x40, 0x00]),
+    ]
+
+    @Test func offByDefault() {
+        #expect(!WDCapabilityPolicy().negotiate(server: Self.server).contains { $0.id == 0x1E })
+    }
+
+    @Test func referenceFormSetsByte4AndTheU32At5() {
+        var p = WDCapabilityPolicy()
+        p.capability1E = true
+        guard let cap = p.negotiate(server: Self.server).first(where: { $0.id == 0x1E }) else {
+            Issue.record("no 0x1E"); return
+        }
+        #expect(cap.bytes.count == 29)
+        #expect(Array(cap.bytes[0...8]) == hex("1d 00 1e 00 01 03 00 00 00"))
+        #expect(Array(cap.bytes[9...]) == [UInt8](repeating: 0xAA, count: 20))
+    }
+
+    @Test func shortBodyIsDropped() {
+        var p = WDCapabilityPolicy()
+        p.capability1E = true
+        #expect(!p.negotiate(server: [WDCapability(id: 0x1E, body: [1, 2])]).contains { $0.id == 0x1E })
+    }
+}
+
+/// docs/76 §7.13: the GDT module's max packet size (V39) and caps 0x12 / 0x14 with the stock client's versions (V41/V42).
+@Suite struct StockBuiltCapVariantTests {
+    static let server: [WDCapability] = [
+        WDCapability(id: 0x12, body: [0x03, 0x00]),
+        WDCapability(id: 0x14, body: [0x03, 0x00, 0x02, 0x00]),
+        WDCapability(id: 0x21, body: [0x40, 0x00]),
+        WDCapability(id: 0x14, body: [0x02, 0x00, 0x00, 0x00]),
+    ]
+
+    @Test func gdtMaxPacketSizeFollowsTheCommonPart() throws {
+        let c = try #require(GDTEngine.Config.fromEnvironment(["ICA_GDT": "1", "ICA_GDT_MAXPACKET": "4999"]))
+        #expect(c.maxPacketSize == 4999)
+        let m = GDTEngine(config: c).module(channel: 29, date: GDTModuleTests.exampleDate)
+        #expect(m.count == 50)
+        #expect(Array(m[36...39]) == hex("1D 00 00 00") && Array(m[48...49]) == hex("87 13"))
+        var both = c
+        both.vdData = [0xAA]
+        #expect(Array(GDTEngine(config: both).module(channel: 29, date: GDTModuleTests.exampleDate)[48...]) == hex("87 13 AA"))
+        let none = try #require(GDTEngine.Config.fromEnvironment(["ICA_GDT": "1", "ICA_GDT_MAXPACKET": "x"]))
+        #expect(none.maxPacketSize == nil)
+        #expect(GDTEngine(config: none).module(channel: 29, date: GDTModuleTests.exampleDate).count == 48)
+    }
+
+    @Test func defaultsKeepTheReferenceBodies() {
+        let caps = WDCapabilityPolicy().negotiate(server: Self.server)
+        #expect(caps.first { $0.id == 0x12 }?.bytes == hex("05 00 12 00 00"))
+        #expect(caps.first { $0.id == 0x14 }?.bytes == hex("08 00 14 00 01 00 01 00"))
+    }
+
+    @Test func credentialVersionIsAU16() {
+        var p = WDCapabilityPolicy()
+        p.credentialVersion = 2
+        let caps = p.negotiate(server: Self.server)
+        #expect(caps.first { $0.id == 0x12 }?.bytes == hex("06 00 12 00 02 00"))
+        #expect(caps.filter { $0.id == 0x14 }.count == 1)
+    }
+
+    @Test func unicodeKeyboardVersionAndMode() {
+        var p = WDCapabilityPolicy()
+        p.unicodeKeyboardReply = (3, 1)
+        let caps = p.negotiate(server: Self.server)
+        #expect(caps.filter { $0.id == 0x14 }.map(\.bytes) == [hex("08 00 14 00 03 00 01 00")])
+        p.unicodeKeyboardReply = (3, 2)
+        #expect(p.negotiate(server: Self.server).first { $0.id == 0x14 }?.bytes == hex("08 00 14 00 03 00 02 00"))
+    }
+}

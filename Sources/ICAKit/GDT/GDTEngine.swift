@@ -56,6 +56,10 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         /// VD-specific data after the 48-byte common part (docs/30 §5.5); empty by default. Variant V1 puts the
         /// stock client's "maxPacketSize 4999" there as u16 `87 13`, the way CTXMM carries 4996 (docs/98b §1.3).
         public var vdData: [UInt8] = []
+        /// The VC's maximum packet size as u16 LE right after the 48-byte common part, before `vdData` (docs/76 §7.13
+        /// V39). The stock client's GDT VD logs `GDT VC maxPacketSize:[4999]` in driverInfo, just before its module
+        /// record [B]; our CTXMM module carries its 4996 in the same place (docs/98b §1.3). nil (default) = none.
+        public var maxPacketSize: UInt16?
         /// Answer the host's first write if it looks like an init (≤ `initMaxSize` bytes, before we sent anything).
         public var initReply: InitReply?
         public var initMaxSize = 128
@@ -65,7 +69,7 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         public init() {}
 
         /// `ICA_GDT=1` enables the channel; `ICA_GDT_VERSION=N` sets min = max = N, `=L-H` min L and max H;
-        /// `ICA_GDT_VDDATA=<hex>` the VD data; `ICA_GDT_ECHO_INIT` see `InitReply`. Nil without `ICA_GDT=1` (no
+        /// `ICA_GDT_VDDATA=<hex>` the VD data; `ICA_GDT_MAXPACKET=N` the u16 max packet size; `ICA_GDT_ECHO_INIT` see `InitReply`. Nil without `ICA_GDT=1` (no
         /// module, no bind entry: default behaviour).
         public static func fromEnvironment(_ env: [String: String]) -> Config? {
             guard env["ICA_GDT"] == "1" else { return nil }
@@ -76,6 +80,7 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
                 if parts.count == 2, let low = parts[0], let high = parts[1] { c.versionLow = low; c.versionHigh = high }
             }
             if let text = env["ICA_GDT_VDDATA"], let bytes = GDTEngine.parseHex(text) { c.vdData = bytes }
+            if let text = env["ICA_GDT_MAXPACKET"], let value = UInt16(text) { c.maxPacketSize = value }
             c.initReply = InitReply(environment: env["ICA_GDT_ECHO_INIT"])
             return c
         }
@@ -145,6 +150,7 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         let identity = WDModuleIdentity(moduleClass: .vd, versionLow: config.versionLow, versionHigh: config.versionHigh,
                                         name: "", hostName: "ICA")
         var w = WDModules.vdHeader(identity, channel: channel, date: date)
+        if let size = config.maxPacketSize { w.u16(size) }
         w.raw(config.vdData)
         let bytes = w.bytes()
         moduleBytes = bytes

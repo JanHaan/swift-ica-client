@@ -282,6 +282,24 @@ public enum WDBuild {
         return l16(0x44, [0x02, 0x01] + block)
     }
 
+    /// Credential reply for cap 0x12 version 2 (host `44 03 01`; docs/76 §7.14, layout as observed in the stock
+    /// recording): `04 00`, eight u16 offsets counted from the byte after `04 00` (user, 0, domain, 0, password, 0,
+    /// ticket type, ticket; 0 = empty string, not written), then the UTF-16LE strings, each NUL terminated.
+    public static func credentialsV2(username: String, domain: String, password: String, ticketType: String, ticket: String,
+                                     limit: Int = 256) -> [UInt8] {
+        func z(_ s: String) -> [UInt8] { Array(s.utf16.prefix(limit)).flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] } + [0, 0] }
+        let fields: [String?] = [username, nil, domain, nil, password, nil, ticketType, ticket]
+        var offsets: [UInt16] = []
+        var strings: [UInt8] = []
+        let base = 2 * fields.count
+        for field in fields {
+            guard let field, !field.isEmpty else { offsets.append(0); continue }
+            offsets.append(UInt16(base + strings.count))
+            strings += z(field)
+        }
+        return l16(0x44, [0x04, 0x00] + offsets.flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] } + strings)
+    }
+
     /// Thinwire C2H packet `3A len16 sub data` (docs/40-thinwire.md §4.1).
     public static func thinwire(sub: UInt8, _ data: [UInt8]) -> [UInt8] { l16(0x3A, [sub] + data) }
 }

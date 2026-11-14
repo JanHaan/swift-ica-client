@@ -1,8 +1,9 @@
 import Foundation
 
-/// V3 reducer/expander frame format with compression powers 0 (docs/30-winstation.md §12.2):
-/// data segments front to back, then a trailer of descriptors written in reverse. Only
-/// uncompressed segments are produced and accepted; a compressed segment is an error.
+/// V3 reducer/expander frame format (docs/30-winstation.md §12.2): data segments front to back, then a
+/// trailer of descriptors written in reverse. Without a coder (`power` nil, the live client) only
+/// uncompressed segments are accepted; with a coder (§12.3) compressed and "recompress" segments are
+/// decoded / run through the model.
 public struct WDV3Expander {
     public enum Failure: Error, Equatable {
         case compressedSegment(channel: UInt8)
@@ -10,13 +11,39 @@ public struct WDV3Expander {
         case badVarint
         case segmentOverrun
         case virtualWriteTooLarge(Int)
+        case badSpecialCommand(UInt8)
+        /// Pseudo-channel 0x3D (Thinwire-aware model, §12.3) is not implemented; the rest of the frame is lost.
+        case thinwireAwareSegment
+        case coder(channel: UInt8, WDV3CoderError)
     }
 
     /// Fragments of VC writes not yet marked complete, per channel (0x3F = WD stream).
     private var pending: [UInt8: [UInt8]] = [:]
     public private(set) var specialCommands: [UInt8: Int] = [:]
+    /// Special commands seen, in order: command byte and its arguments (in read order).
+    public private(set) var specialLog: [(command: UInt8, arguments: [UInt8])] = []
+    /// ASSIGN CODER TO CHANNEL: channel → coder (model index).
+    public private(set) var assignments: [UInt8: Int] = [:]
+    public private(set) var coder: WDV3Coder?
+    /// Diagnostics: segments seen per kind.
+    public private(set) var compressedSegments = 0
+    public private(set) var recompressSegments = 0
+    public private(set) var thinwireAwareSegments = 0
+    /// Diagnostics: frames by number of bytes left between the data and the trailer (0…2 is normal).
+    public private(set) var leftoverBytes: [Int: Int] = [:]
+    /// Diagnostics hook: one line per segment.
+    public var trace: ((String) -> Void)?
+
+    /// `power` nil: no coder (compressed segments are an error). Otherwise the coder's history power (§12.3).
+    public init(power: Int?, options: WDV3CoderOptions = WDV3CoderOptions()) throws {
+        if let power { coder = try WDV3Coder(power: power, options: options) }
+    }
 
     public init() {}
+
+    private func model(for channel: UInt8) -> Int {
+        assignments[channel] ?? 0
+    }
 
     /// Expands one frame payload into WD stream bytes (VC writes get their 0x30/0x31 header back).
     public mutating func expand(_ frame: [UInt8]) throws -> [UInt8] {
@@ -30,9 +57,18 @@ public struct WDV3Expander {
             let channel = control >> 2
             if control == 0xF8 {
                 // Special command: u8 argument count, u8 command, arguments (read backwards).
+                guard back >= 1 else { throw Failure.badSpecialCommand(0xFF) }
                 let count = Int(frame[back])
                 let command = frame[back - 1]
+                guard back - 2 - count >= -1 else { throw Failure.badSpecialCommand(command) }
+                let arguments = (0..<count).map { frame[back - 2 - $0] }
                 specialCommands[command, default: 0] += 1
+                specialLog.append((command, arguments))
+                switch command {
+                case 0 where count >= 1: coder?.define(Int(arguments[0]))
+                case 1 where count >= 2: assignments[arguments[0]] = Int(arguments[1])
+                default: break
+                }
                 back -= 2 + count
                 continue
             }
@@ -45,12 +81,35 @@ public struct WDV3Expander {
                 value |= Int(byte) << shift  // the reference ORs the whole byte (continuation bit included)
                 shift += 7
             }
-            if compressed { throw Failure.compressedSegment(channel: channel) }
-            if value & 1 != 0 { throw Failure.recompressRequested(channel: channel) }
-            let length = value >> 1
-            guard data + length <= back + 1 else { throw Failure.segmentOverrun }
-            let segment = Array(frame[data..<(data + length)])
-            data += length
+            let segment: [UInt8]
+            if compressed {
+                guard coder != nil else { throw Failure.compressedSegment(channel: channel) }
+                if channel == 0x3D { thinwireAwareSegments += 1; throw Failure.thinwireAwareSegment }
+                compressedSegments += 1
+                do {
+                    let (output, consumed) = try coder!.decode(model: model(for: channel), length: value,
+                                                               from: frame, offset: data, end: back + 1)
+                    guard data + consumed <= back + 1 else { throw Failure.segmentOverrun }
+                    segment = output
+                    trace?("Z ch \(channel) c\(complete ? 1 : 0) m\(model(for: channel)) len \(value) used \(consumed) at \(data)/\(back + 1): "
+                           + output.prefix(32).map { String(format: "%02x", $0) }.joined())
+                    data += consumed
+                } catch let e as WDV3CoderError { throw Failure.coder(channel: channel, e) }
+            } else {
+                let length = value >> 1
+                guard data + length <= back + 1 else { throw Failure.segmentOverrun }
+                segment = Array(frame[data..<(data + length)])
+                data += length
+                trace?("\(value & 1 != 0 ? "R" : "U") ch \(channel) c\(complete ? 1 : 0) len \(length): "
+                       + segment.prefix(32).map { String(format: "%02x", $0) }.joined())
+                if value & 1 != 0 {
+                    guard coder != nil else { throw Failure.recompressRequested(channel: channel) }
+                    if channel == 0x3D { thinwireAwareSegments += 1; throw Failure.thinwireAwareSegment }
+                    recompressSegments += 1
+                    do { try coder!.encode(model: model(for: channel), segment) }
+                    catch let e as WDV3CoderError { throw Failure.coder(channel: channel, e) }
+                }
+            }
             if !complete {
                 pending[channel, default: []] += segment
                 continue
@@ -67,6 +126,7 @@ public struct WDV3Expander {
                 out += payload
             }
         }
+        leftoverBytes[back - data + 1, default: 0] += 1
         return out
     }
 }

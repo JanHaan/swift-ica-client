@@ -92,6 +92,29 @@ public struct WDCapabilityPolicy: Sendable {
     /// Server capabilities we otherwise drop, echoed with the server's body (discovery only, docs/76 §7.9 V22). Empty
     /// by default.
     public var echoCapabilities: Set<UInt16> = []
+    /// Negotiate cap 0x1E as docs/30 §4.3 describes the reference: the server's body with cap byte 4 (body byte 0) := 1
+    /// and the u32 at cap offset 5 := 3. The stock client sends a 29-byte cap in the 0x1E slot [B]. Off by default
+    /// (discovery only, docs/76 §7.12, icactl `ICA_WD_CAP1E=1`).
+    public var capability1E = false
+    /// Cap 0x12 as the stock client builds it: a 6-byte cap with this u16 version (stock: "set wd credential passing
+    /// version 2", 6 B [B], docs/76 §7.13). nil (default) = the reference's u8 version 0 (5 B). Discovery only (icactl
+    /// `ICA_WD_CREDVER`). [I] Version 2 may change how the host asks for credentials (the server offers 3 and logs no
+    /// layout); a refused logon is the expected failure.
+    public var credentialVersion: UInt16?
+    /// Cap 0x14 body as u16 version, u16 mode (stock: "g_iEUKSversion 3", 8 B [B], docs/76 §7.13). nil (default) = the
+    /// reference's version min(server, 1), mode 1. Discovery only (icactl `ICA_WD_EUKS=V[:M]`).
+    public var unicodeKeyboardReply: (version: UInt16, mode: UInt16)?
+
+    public static let cap1E: UInt16 = 0x1E
+
+    /// The 0x1E reply body for a server body (nil if the body is shorter than 5 bytes).
+    public static func reply1E(server body: [UInt8]) -> [UInt8]? {
+        guard body.count >= 5 else { return nil }
+        var out = body
+        out[0] = 1
+        out[1] = 3; out[2] = 0; out[3] = 0; out[4] = 0
+        return out
+    }
 
     public init() {}
 
@@ -118,11 +141,20 @@ public struct WDCapabilityPolicy: Sendable {
             case WDCapability.longCredentials:
                 result = WDCapability(id: cap.id)
             case WDCapability.credentialRequest where credentialRequest:
-                result = WDCapability(id: cap.id, body: [min(cap.body.first ?? 0, 0)])
+                if let v = credentialVersion {
+                    result = WDCapability(id: cap.id, body: [UInt8(v & 0xff), UInt8(v >> 8)])
+                } else {
+                    result = WDCapability(id: cap.id, body: [min(cap.body.first ?? 0, 0)])
+                }
             case WDCapability.unicodeKeyboard where unicodeKeyboard:
-                // Client offers version 1, mode 1; the reference reads single bytes at body 0 and 2.
-                let version = min(cap.body.first ?? 1, 1)
-                result = WDCapability(id: cap.id, body: [version, 0, 1, 0])
+                if let r = unicodeKeyboardReply {
+                    result = WDCapability(id: cap.id, body: [UInt8(r.version & 0xff), UInt8(r.version >> 8),
+                                                            UInt8(r.mode & 0xff), UInt8(r.mode >> 8)])
+                } else {
+                    // Client offers version 1, mode 1; the reference reads single bytes at body 0 and 2.
+                    let version = min(cap.body.first ?? 1, 1)
+                    result = WDCapability(id: cap.id, body: [version, 0, 1, 0])
+                }
             case WDCapability.hostOS where hostOSReply != nil:
                 let os = hostOSReply ?? 0
                 result = WDCapability(id: cap.id, body: [UInt8(os & 0xff), UInt8(os >> 8), 0, 0, 0, 0])
@@ -131,6 +163,8 @@ public struct WDCapabilityPolicy: Sendable {
             case WDCapability.vcCount where vcCountCapability:
                 let n = min(cap.u16(at: 0) ?? maxChannels, maxChannels)
                 result = WDCapability(id: cap.id, body: [UInt8(n & 0xff), UInt8(n >> 8)])
+            case Self.cap1E where capability1E:
+                result = Self.reply1E(server: cap.body).map { WDCapability(id: cap.id, body: $0) }
             case let id where echoCapabilities.contains(id) && id != WDCapability.vcCount:
                 result = WDCapability(id: cap.id, body: cap.body)
             default:

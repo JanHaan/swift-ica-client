@@ -101,6 +101,10 @@ public struct WDLogon: Sendable {
     public var seamless = true
     /// Font smoothing type in the UI v8 struct: 0 none, 1 standard, 2 ClearType.
     public var fontSmoothing: UInt16 = 2
+    /// `LogonTicket` / `LogonTicketType` of the launch file: only the version-2 credential reply carries them
+    /// (`WDBuild.credentialsV2`, discovery only). Ticket fragments: never log them.
+    public var logonTicket = ""
+    public var logonTicketType = ""
 
     public init() {}
 
@@ -111,9 +115,71 @@ public struct WDLogon: Sendable {
         password = ica["ClearPassword"] ?? ""
         initialProgram = ica["InitialProgram"] ?? ""
         launchReference = ica["LaunchReference"] ?? ""
+        logonTicket = ica["LogonTicket"] ?? ""
+        logonTicketType = ica["LogonTicketType"] ?? ""
         if let name = ica["ClientName"], !name.isEmpty { clientName = name }
         if let layout = ica["KeyboardLayout"].flatMap({ UInt32($0, radix: 16) }) { keyboardLayout = layout }
         seamless = ica["TWIMode"]?.lowercased() == "on"
+    }
+}
+
+/// Client address and name as the stock client reports them (docs/76 §7.12; discovery only, icactl `ICA_TD_ADDR`,
+/// `ICA_CLIENT_NAME`). The reference sends zeros in the TD address and its own client name.
+public enum WDClientIdentity {
+    /// `a.b.c.d` or `a.b.c.d:port` → IPv4 octets and the optional port; nil if malformed.
+    public static func parseAddress(_ text: String) -> (ipv4: [UInt8], port: UInt16?)? {
+        let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 2 else { return nil }
+        var port: UInt16?
+        if parts.count == 2 {
+            guard let p = UInt16(parts[1]) else { return nil }
+            port = p
+        }
+        let octets = parts[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var out: [UInt8] = []
+        for o in octets {
+            guard !o.isEmpty, o.count <= 3, o.allSatisfy(\.isASCII), let v = UInt8(o) else { return nil }
+            out.append(v)
+        }
+        return (out, port)
+    }
+
+    /// The IPv4 address the kernel would use as the source on the default route: a UDP socket is connected to a
+    /// documentation address (TEST-NET-1, RFC 5737) and read back with getsockname. Nothing is sent.
+    public static func primaryIPv4() -> [UInt8]? {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var target = sockaddr_in()
+        target.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        target.sin_family = sa_family_t(AF_INET)
+        target.sin_port = UInt16(9).bigEndian
+        target.sin_addr.s_addr = inet_addr("192.0.2.1")
+        let connected = withUnsafePointer(to: &target) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard connected == 0 else { return nil }
+        var local = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &local) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        guard named == 0 else { return nil }
+        let value = UInt32(bigEndian: local.sin_addr.s_addr)
+        let octets = [UInt8(value >> 24), UInt8((value >> 16) & 0xff), UInt8((value >> 8) & 0xff), UInt8(value & 0xff)]
+        return octets == [0, 0, 0, 0] ? nil : octets
+    }
+
+    /// The stock client's form of the computer name [B]: spaces become underscores; at most 20 UTF-16 units (the
+    /// UI module limit, docs/30 §5.6).
+    public static func clientName(computerName: String) -> String {
+        var name = ""
+        for ch in computerName.replacingOccurrences(of: " ", with: "_") {
+            guard name.utf16.count + String(ch).utf16.count <= 20 else { break }
+            name.append(ch)
+        }
+        return name
     }
 }
 
@@ -181,9 +247,14 @@ public enum WDModules {
         return w
     }
 
+    /// The reference's u16 at WD module offset 66 (docs/30 §5.3: "0x0101"). Read as the client product ID [I], 0x0101 =
+    /// 257 would be the HTML5 client's (docs/76 §7.11). Discovery may replace it (`Configuration.wdProductID`).
+    public static let referenceProductID: UInt16 = 0x0101
+
     /// WD module (§5.3). `channels` is the VC bind table (name, number).
     public static func wd(capabilities: [WDCapability], channels: [(String, UInt8)], serial: UInt32 = 0x149A_97F5,
-                          maxVirtualWrite: UInt16 = 5000, reducerVersion: UInt16 = 0, date: Date = Date()) -> [UInt8] {
+                          maxVirtualWrite: UInt16 = 5000, reducerVersion: UInt16 = 0, productID: UInt16 = WDModules.referenceProductID,
+                          fixedTail: [UInt8] = [], date: Date = Date()) -> [UInt8] {
         var w = header(.wd, date: date)
         let c = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: date)
         w.u32(serial)
@@ -202,7 +273,7 @@ public enum WDModules {
         w.u16(100)             // out-buffer count client
         w.u16(0xFFFF)
         w.u16(0xFFFF)
-        w.u16(0x0101)
+        w.u16(productID)       // @66: 0x0101 in the reference; [I] the client product ID (docs/76 §7.11)
         w.u32(0)
         w.u16(UInt16(channels.count))
         var table: [UInt8] = []
@@ -219,6 +290,9 @@ public enum WDModules {
         let block = WDCapabilityBlock.serialize(capabilities)
         w.u16(UInt16(block.count))
         w.reference(block)
+        // Discovery only (docs/76 §7.11): bytes after the 86-byte fixed part, before the bind table and the caps. The
+        // stock client's WD module has an 88-byte fixed part (815 B = 358 + 457, 358 = 88 + 27 × 10) [B][I].
+        w.raw(fixedTail)
         return w.bytes()
     }
 
@@ -537,6 +611,57 @@ public enum WDModules {
         w.u8(0x10)          // @92
         w.u16(offsets[10])  // @93 launch reference
         w.u16(offsets[11])  // @95 font smoothing struct
+        precondition(w.count == fixedEnd)
+        w.raw(pool)
+        return w.bytes()
+    }
+
+    /// UI module in the stock Mac client's layout (docs/76 §7.14, from the recorded INIT_RESPONSE's fixed fields; the
+    /// recorded strings are never used). Differences to `ui`: module name "ui", flags 0x34, no domain/user/password/"none" strings
+    /// (credentials go in the 0x44 reply), @83 = 0, @92 = 0x1F, a 9-byte longer fixed part with the font-smoothing struct
+    /// at 100 (outside the obfuscated pool), and a pool of 66 zero bytes, initial program, client name, product,
+    /// version and launch reference.
+    public static func uiStockForm(logon: WDLogon, seed: UInt8, date: Date = Date()) throws -> [UInt8] {
+        guard !logon.initialProgram.isEmpty, logon.initialProgram != "#" else { throw Failure.missingInitialProgram }
+        var w = header(WDModuleIdentity(moduleClass: .ui, versionLow: 1, versionHigh: 8, name: "ui", hostName: ""), date: date)
+        let fixedEnd = 106
+        let pieces: [[UInt8]] = [
+            [UInt8](repeating: 0, count: 66),
+            try utf16z(logon.initialProgram, limit: 256),
+            try utf16z(logon.clientName, limit: 20),
+            try utf16z(logon.productName, limit: 256),
+            try utf16z(logon.clientVersion, limit: 256),
+            try utf16z(logon.launchReference, limit: 256),
+        ]
+        var offsets: [UInt16] = []
+        var position = fixedEnd
+        for piece in pieces {
+            offsets.append(UInt16(position))
+            position += piece.count
+        }
+        var pool = pieces.flatMap { $0 }
+        WDObfuscation.obfuscate(&pool, seed: seed)
+        w.u32(0x34)                 // @36 flags
+        w.u32(logon.keyboardLayout) // @40
+        w.u8(1)                     // @44 pool obfuscated
+        w.u8(seed)                  // @45
+        w.zeros(10)                 // @46…@55: domain, user, password, "none", "" (none sent)
+        w.u16(offsets[1])           // @56 initial program
+        w.zeros(8)                  // @58…@65
+        w.u16(logon.clientBuild)    // @66
+        w.u16(offsets[2])           // @68 client name
+        w.u16(UInt16(fixedEnd))     // @70 pool start
+        w.u16(UInt16(pool.count))   // @72 pool length
+        w.u16(0)                    // @74
+        w.u16(1)                    // @76 encoding unicode
+        w.zeros(10)                 // @78…@87
+        w.u16(offsets[3])           // @88 product
+        w.u16(offsets[4])           // @90 version
+        w.u8(0x1F)                  // @92
+        w.u16(offsets[5])           // @93 launch reference
+        w.u16(100)                  // @95 font-smoothing struct
+        w.zeros(3)                  // @97
+        w.raw([6, 0, 1, 0, UInt8(logon.fontSmoothing & 0xff), UInt8(logon.fontSmoothing >> 8)])  // @100
         precondition(w.count == fixedEnd)
         w.raw(pool)
         return w.bytes()
