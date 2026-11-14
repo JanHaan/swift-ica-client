@@ -71,6 +71,13 @@ public final class NativeStoreClient: @unchecked Sendable {
     public private(set) var lastProtocol: String?
     /// The protocols the store offered in the last choices response (for logs).
     public private(set) var offeredProtocols: [String] = []
+    /// The StoreFront origin (scheme, host, port) the documents and challenges name, e.g. https://sf.internal.
+    /// `for-service-url` must use it: the token service checks a token's audience (scheme, host and port of
+    /// the URL it was requested for) against its own base URL and refuses a gateway-host audience with
+    /// `invalidAudience` (docs/15 §1.2). Learned from the first non-gateway URL seen; settable for experiments.
+    public var storeFrontOrigin: URL?
+    /// Non-secret token-flow trace (paths, realms, reasons, statuses); never tokens or bodies.
+    public var trace: ((String) -> Void)?
 
     var transport: Transport
     /// Tokens by realm (service id). Never logged.
@@ -103,11 +110,32 @@ public final class NativeStoreClient: @unchecked Sendable {
     /// The same path (and query) on the gateway origin: StoreFront documents return intranet URLs
     /// (docs/15 §0, black-box "Translate url for proxy mode=0").
     public func throughGateway(_ url: URL) -> URL {
+        learnOrigin(url)
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: true),
               let g = URLComponents(url: gateway, resolvingAgainstBaseURL: true) else { return url }
         components.scheme = g.scheme
         components.host = g.host
         components.port = g.port
+        return components.url ?? url
+    }
+
+    /// Remembers the StoreFront origin from a URL a document or challenge named (not the gateway's own).
+    func learnOrigin(_ url: URL) {
+        guard storeFrontOrigin == nil, let host = url.host, !host.isEmpty, host != gateway.host,
+              var c = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return }
+        c.path = "/"; c.query = nil; c.fragment = nil; c.user = nil; c.password = nil
+        storeFrontOrigin = c.url
+    }
+
+    /// The URL as the client "sees" the service (AUTH `for-service-url`): the same path and query on the
+    /// StoreFront origin; the gateway URL itself while no StoreFront origin is known.
+    public func serviceURL(_ url: URL) -> URL {
+        guard let origin = storeFrontOrigin, url.host == gateway.host,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: true),
+              let o = URLComponents(url: origin, resolvingAgainstBaseURL: true) else { return url }
+        components.scheme = o.scheme
+        components.host = o.host
+        components.port = o.port
         return components.url ?? url
     }
 
@@ -134,6 +162,7 @@ public final class NativeStoreClient: @unchecked Sendable {
             response = try await transport(method, target, headers, body ?? (method == "POST" ? Data() : nil), contentType)
             guard response.status == 401,
                   let challenge = CitrixAuthChallenge(header: response.header("WWW-Authenticate")) else { return response }
+            traceChallenge(challenge, method: method, url: target)
             try await authorize(challenge, serviceURL: target, depth: 0)
         }
         return response
@@ -142,11 +171,27 @@ public final class NativeStoreClient: @unchecked Sendable {
     /// The token of the protection space `url` belongs to (longest matching path prefix).
     func token(for url: URL) -> String? {
         let path = url.path
-        let match = spaces.filter { path.hasPrefix($0.prefix) }.max { $0.prefix.count < $1.prefix.count }
+        let match = spaces.filter { Self.path(path, isUnder: $0.prefix) }.max { $0.prefix.count < $1.prefix.count }
         return match.flatMap { tokens[$0.realm] }
     }
 
+    /// Prefix match on whole path segments: a hint `/Citrix/Store` covers `/Citrix/Store/…` but not
+    /// `/Citrix/StoreAuth/…` (the auth service of the same store sits next to it).
+    static func path(_ path: String, isUnder prefix: String) -> Bool {
+        guard path.hasPrefix(prefix) else { return false }
+        if prefix.hasSuffix("/") || path.count == prefix.count { return true }
+        return path[path.index(path.startIndex, offsetBy: prefix.count)] == "/"
+    }
+
+    func traceChallenge(_ c: CitrixAuthChallenge, method: String, url: URL) {
+        guard let trace else { return }
+        let hint = c.serviceRootHint.flatMap { URL(string: $0)?.path } ?? "-"
+        let locations = c.locations.compactMap { URL(string: $0)?.path }.joined(separator: "|")
+        trace("challenge \(method) \(url.path): realm=\(c.realm) reason=\(c.reason ?? "-") hint=\(hint) locations=\(locations)")
+    }
+
     func remember(_ challenge: CitrixAuthChallenge, serviceURL: URL) {
+        if let hint = challenge.serviceRootHint.flatMap(URL.init(string:)) { learnOrigin(hint) }
         let hintPath = challenge.serviceRootHint.flatMap { URL(string: $0)?.path }.flatMap { $0.isEmpty ? nil : $0 }
         let prefix = hintPath ?? serviceURL.deletingLastPathComponent().path
         spaces.removeAll { $0.prefix == prefix }
@@ -165,9 +210,12 @@ public final class NativeStoreClient: @unchecked Sendable {
         guard let location = challenge.locations.first.flatMap({ URL(string: $0) }).map(throughGateway) else {
             throw Failure.unexpected("challenge without locations")
         }
-        let body = Self.requestToken(forService: challenge.realm, serviceURL: serviceURL)
+        let forServiceURL = self.serviceURL(serviceURL)
+        trace?("requesttoken depth \(depth): for-service=\(challenge.realm) for-service-url=\(forServiceURL.host == gateway.host ? "gateway" : "storefront")\(forServiceURL.path) → \(location.path)")
+        let body = Self.requestToken(forService: challenge.realm, serviceURL: forServiceURL)
         var response = try await postToken(location, body: body, accept: Self.tokenAccept)
         if response.status == 401, let next = CitrixAuthChallenge(header: response.header("WWW-Authenticate")) {
+            traceChallenge(next, method: "POST", url: location)
             // The token service itself wants a (primary) token first.
             try await authorize(next, serviceURL: location, depth: depth + 1)
             response = try await postToken(location, body: body, accept: Self.tokenAccept)
@@ -181,11 +229,15 @@ public final class NativeStoreClient: @unchecked Sendable {
             }
             lastProtocol = choice.protocol
             response = try await postToken(throughGateway(choiceURL), body: body, accept: Self.protocolAccept)
+            trace?("\(choice.protocol) → \(response.status)")
         }
         guard response.status == 200, let token = Self.parseTokenResponse(response.body) else {
-            throw Failure.http("token request to \(location.path)", response.status, response.header("Content-Type"))
+            // The challenge's reason and realm are not secret and tell why a token was refused.
+            let why = CitrixAuthChallenge(header: response.header("WWW-Authenticate")).map { " reason=\($0.reason ?? "-") realm=\($0.realm)" } ?? ""
+            throw Failure.http("token request to \(location.path)\(why)", response.status, response.header("Content-Type"))
         }
         tokens[challenge.realm] = token
+        trace?("token for realm \(challenge.realm) (depth \(depth))")
     }
 
     func postToken(_ url: URL, body: Data, accept: String) async throws -> HTTPClient.Response {

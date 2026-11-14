@@ -55,6 +55,8 @@ private let endpointsXML = """
 """
 
 /// Scripted StoreFront behind a gateway: store realm S, auth realm A, CitrixAGBasic pass-through.
+/// Like the live token service, it checks the audience: a token requested for a `for-service-url` that is not
+/// on the StoreFront origin is refused with `invalidAudience` (docs/15 §1.2).
 private final class FakeStore: @unchecked Sendable {
     struct Request { let method: String; let url: URL; let headers: [String: String]; let body: String; let contentType: String? }
     var requests: [Request] = []
@@ -83,7 +85,12 @@ private final class FakeStore: @unchecked Sendable {
         case "/Citrix/Store/endpoints/v1":
             return reply(200, endpointsXML, url: url)
         case "/Citrix/StoreAuth/auth/v1/token":
-            if auth == "CitrixAuth PRIMARY", body.contains("<for-service>S</for-service>") {
+            if auth == "CitrixAuth WRONG-AUDIENCE" {
+                return reply(401, headers: challenge(realm: "A", location: "\(sf)/Citrix/StoreAuth/auth/v1/protocols",
+                                                    hint: "\(sf)/Citrix/StoreAuth/auth/v1/token", reason: "invalidAudience"), url: url)
+            }
+            if auth == "CitrixAuth PRIMARY", body.contains("<for-service>S</for-service>"),
+               body.contains("<for-service-url>\(sf)/Citrix/Store/resources/v2") {
                 return reply(200, tokenResponse("SECONDARY", lifetime: "0.01:00:00"), url: url)
             }
             return reply(401, headers: challenge(realm: "A", location: "\(sf)/Citrix/StoreAuth/auth/v1/protocols",
@@ -95,11 +102,13 @@ private final class FakeStore: @unchecked Sendable {
             return reply(300, "<requesttokenchoices xmlns=\"http://citrix.com/delivery-services/1-0/auth/requesttokenchoices\"><choices>\(list)</choices></requesttokenchoices>",
                          headers: ["Content-Type": "application/vnd.citrix.requesttokenchoices+xml"], url: url)
         case "/Citrix/StoreAuth/CitrixAGBasic/Authenticate":
-            return reply(200, tokenResponse("PRIMARY", lifetime: "0.20:00:00"), url: url)
+            let audience = body.contains("<for-service-url>\(sf)/Citrix/StoreAuth/auth/v1/token</for-service-url>")
+            return reply(200, tokenResponse(audience ? "PRIMARY" : "WRONG-AUDIENCE", lifetime: "0.20:00:00"), url: url)
         default:
             guard auth == "CitrixAuth SECONDARY" else {
+                // The live hint has no trailing slash, so it is a textual prefix of the auth service path too.
                 return reply(401, headers: challenge(realm: "S", location: "\(sf)/Citrix/StoreAuth/auth/v1/token",
-                                                    hint: "\(sf)/Citrix/Store/"), url: url)
+                                                    hint: "\(sf)/Citrix/Store"), url: url)
             }
             if url.path == "/Citrix/Store/resources/v2" { return reply(200, resourcesXML, url: url) }
             if url.path.contains("/launch/ica") {
@@ -172,6 +181,59 @@ private func launchSuccess(_ ica: String) -> String {
     let before = fake.requests.count
     _ = try await client.resources()
     #expect(fake.requests.count == before + 1)
+}
+
+@Test func tokensAreRequestedForTheStoreFrontURLNotTheGatewayURL() async throws {
+    let fake = FakeStore()
+    let client = fake.client()
+    _ = try await client.resources()
+    #expect(client.storeFrontOrigin?.absoluteString == "\(sf)/")
+    let tokenPosts = fake.requests.filter { $0.contentType == "application/vnd.citrix.requesttoken+xml" }
+    #expect(tokenPosts.count == 4)  // token (401), protocols (300), CitrixAGBasic (primary), token (secondary)
+    // On the wire everything goes to the gateway; the audience in the body is the StoreFront URL.
+    #expect(tokenPosts.allSatisfy { $0.url.host == "gateway.example" && $0.body.contains("<for-service-url>\(sf)/") })
+    #expect(!tokenPosts.contains { $0.body.contains("<for-service-url>https://gateway.example") })
+    #expect(tokenPosts.last?.body.contains("<for-service-url>\(sf)/Citrix/Store/resources/v2?clientName=MAC-ICA</for-service-url>") == true)
+    #expect(tokenPosts.last?.headers["Authorization"] == "CitrixAuth PRIMARY")
+}
+
+@Test func aGatewayAudienceIsRefusedWithTheChallengeReason() async throws {
+    let fake = FakeStore()
+    let client = fake.client()
+    client.storeFrontOrigin = gateway  // the old behaviour: for-service-url on the gateway host
+    do { _ = try await client.resources(); Issue.record("expected invalidAudience") } catch {
+        #expect("\(error)".contains("reason=invalidAudience realm=A") && "\(error)".contains("401"))
+        #expect(!"\(error)".contains("WRONG-AUDIENCE"))  // never the token
+    }
+}
+
+@Test func serviceURLMapsGatewayURLsBackToTheStoreFrontOrigin() throws {
+    let client = NativeStoreClient(http: HTTPClient(), gateway: gateway, clientName: "c", deviceId: "d")
+    let onGateway = URL(string: "https://gateway.example/Citrix/StoreAuth/auth/v1/token?x=1")!
+    #expect(client.serviceURL(onGateway) == onGateway)  // no StoreFront origin known yet
+    _ = client.throughGateway(URL(string: "https://sf.internal:8443/Citrix/Store/discovery")!)
+    #expect(client.storeFrontOrigin?.absoluteString == "https://sf.internal:8443/")
+    #expect(client.serviceURL(onGateway).absoluteString == "https://sf.internal:8443/Citrix/StoreAuth/auth/v1/token?x=1")
+    // The gateway's own URLs never become the StoreFront origin, and the first origin stays.
+    _ = client.throughGateway(URL(string: "https://other.internal/Citrix/Store/")!)
+    #expect(client.storeFrontOrigin?.host == "sf.internal")
+}
+
+@Test func protectionSpacesMatchWholePathSegments() throws {
+    #expect(NativeStoreClient.path("/Citrix/Store/resources/v2", isUnder: "/Citrix/Store"))
+    #expect(NativeStoreClient.path("/Citrix/Store", isUnder: "/Citrix/Store"))
+    #expect(NativeStoreClient.path("/Citrix/Store/x", isUnder: "/Citrix/Store/"))
+    #expect(!NativeStoreClient.path("/Citrix/StoreAuth/auth/v1/token", isUnder: "/Citrix/Store"))
+    #expect(!NativeStoreClient.path("/Citrix/Sto", isUnder: "/Citrix/Store"))
+}
+
+@Test func theStoreTokenIsNotSentToTheAuthService() async throws {
+    let fake = FakeStore()
+    let client = fake.client()
+    _ = try await client.resources()
+    #expect(client.token(for: URL(string: "https://gateway.example/Citrix/Store/resources/v2")!) == "SECONDARY")
+    #expect(client.token(for: URL(string: "https://gateway.example/Citrix/StoreAuth/auth/v1/protocols")!) == nil)
+    #expect(client.token(for: URL(string: "https://gateway.example/Citrix/StoreAuth/auth/v1/token")!) == "PRIMARY")
 }
 
 @Test func noGatewayProtocolIsAnErrorNotAPasswordPost() async throws {
