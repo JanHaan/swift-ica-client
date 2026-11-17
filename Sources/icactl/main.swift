@@ -42,7 +42,8 @@ func printResponse(_ response: HTTPClient.Response, limit: Int) {
 
 let env: Env
 do { env = try Env(path: envPath) } catch { fail("cannot read \(envPath)") }
-try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+// 0700 even when it exists: cookie jars, TOTP state, ICA files and the lab scripts' logs live here (security review L-12).
+PrivateFile.ensureDirectory(sessionDir)
 let http = HTTPClient()
 /// Direct mode (docs/16): CITRIX_STOREFRONT_URL names the store (its Receiver for Web site, e.g.
 /// https://storefront.example/Citrix/StoreWeb/, or just the server, which is probed); no gateway. It wins over
@@ -183,7 +184,8 @@ case "list":
     }
 
 case "launch":
-    // icactl launch <resource name>  — saves the ICA file to .session/last.ica and prints it redacted
+    // icactl launch <resource name>  — saves the ICA file to .session/last.ica and prints it redacted. The saved file is
+    // the full, single-use file for a stock-client run: its consumer deletes it after use (security review L-12).
     guard let name = args.first ?? env["CITRIX_RESOURCE"] else { fail("usage: icactl launch <resource name>") }
     let store = storeClient()
     do {
@@ -2057,10 +2059,10 @@ func nativeStoreClient() -> NativeStoreClient {
     return store
 }
 
-/// Writes an ICA file into .session/ with 0600.
+/// Writes an ICA file into .session/ with 0600, tickets and other secrets redacted (security review L-12).
 func saveICA(_ text: String, as name: String) {
     let path = sessionDir.appendingPathComponent(name).path
-    FileManager.default.createFile(atPath: path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
+    FileManager.default.createFile(atPath: path, contents: Data(ICAFile.redactedText(text).utf8), attributes: [.posixPermissions: 0o600])
 }
 
 /// D110 store attestation: whether the store's Sessions/List showed no session at all for this user right before
