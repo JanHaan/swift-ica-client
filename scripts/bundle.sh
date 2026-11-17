@@ -130,7 +130,15 @@ adhoc() {
     echo "note: $1; signing ad-hoc (saved secrets use the app-enforced Touch ID check)" >&2
     # Inside-out, no --deep: --deep would re-sign the helper template without the hardened runtime.
     codesign --force --options runtime --sign - "$helper" >/dev/null 2>&1 || echo "warning: ad-hoc signing of the helper template failed" >&2
-    codesign --force --sign - "$app" >/dev/null 2>&1 || echo "warning: ad-hoc signing failed" >&2
+    # Release: hardened runtime as in a Developer ID build (security review L-16), with the release entitlements,
+    # which the runtime needs for the microphone and camera (neither is restricted, so an ad-hoc signature carries
+    # them). Debug stays without the runtime so a debugger can attach.
+    if [ "$config" = release ]; then
+        codesign --force --options runtime --entitlements "$root/signing/ICAViewer.release.entitlements" --sign - "$app" \
+            >/dev/null 2>&1 || echo "warning: ad-hoc signing failed" >&2
+    else
+        codesign --force --sign - "$app" >/dev/null 2>&1 || echo "warning: ad-hoc signing failed" >&2
+    fi
 }
 if [ "${ICA_SIGN:-}" = adhoc ]; then
     adhoc "ICA_SIGN=adhoc"

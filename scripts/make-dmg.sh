@@ -87,8 +87,10 @@ codesign -dv "$helper" 2>&1 | grep -q 'flags=.*runtime' || die "hardened runtime
 if [ "$mode" = adhoc ] || [ -z "${ICA_RELEASE_PROFILE:-}" ]; then
     [ ! -e "$app/Contents/embedded.provisionprofile" ] || die "provisioning profile in bundle"
 fi
+# Every distributed build, ad hoc included, runs with the hardened runtime (security review L-16).
+codesign -dv "$app" 2>&1 | grep -q 'flags=.*runtime' || die "hardened runtime missing"
+codesign -d --entitlements - "$app" 2>/dev/null | grep -q get-task-allow && die "get-task-allow in the entitlements"
 if [ "$mode" = developer-id ]; then
-    codesign -dv "$app" 2>&1 | grep -q 'flags=.*runtime' || die "hardened runtime missing"
     codesign -d --entitlements - "$app" 2>/dev/null | grep -q get-task-allow && die "get-task-allow in release entitlements"
     # Notarization: the nested template needs the same Developer ID team, a secure timestamp, no get-task-allow.
     team="$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
