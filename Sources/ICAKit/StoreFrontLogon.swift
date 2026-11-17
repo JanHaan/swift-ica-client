@@ -171,7 +171,7 @@ public struct StoreFrontLogon: FormLogonFlow {
 
     /// `<authMethods><method name="ExplicitForms" url="ExplicitAuth/Login"/>…</authMethods>` [P].
     static func parseAuthMethods(_ data: Data) -> [AuthMethod] {
-        guard let doc = try? XMLDocument(data: data),
+        guard let doc = SafeXML.document(data),
               let nodes = try? doc.nodes(forXPath: "//*[local-name()='method']") else { return [] }
         return nodes.compactMap { node in
             guard let e = node as? XMLElement, let name = e.attribute(forName: "name")?.stringValue,

@@ -632,7 +632,7 @@ struct FormResponse {
     var requirements: [Requirement]
 
     init(_ response: HTTPClient.Response) throws {
-        guard let document = try? XMLDocument(data: response.body) else {
+        guard let document = SafeXML.document(response.body) else {
             throw GatewayLogon.Failure.unexpectedResponse(
                 "HTTP \(response.status) \(response.header("Content-Type") ?? "") from \(response.url.path)")
         }

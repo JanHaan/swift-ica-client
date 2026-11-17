@@ -415,7 +415,7 @@ public final class NativeStoreClient: @unchecked Sendable {
 
     // MARK: Parsing
 
-    static func document(_ data: Data) -> XMLDocument? { try? XMLDocument(data: data) }
+    static func document(_ data: Data) -> XMLDocument? { SafeXML.document(data) }
 
     /// Elements anywhere with this local name.
     static func all(_ name: String, in node: XMLNode) -> [XMLNode] {
