@@ -125,8 +125,10 @@ public struct ClipboardStagingPlan: Equatable, Sendable {
             assigned[comps.joined(separator: "/").lowercased()] = ours
             kinds[ours.lowercased()] = false
             plan.files[i] = ours
-            plan.totalBytes += e.size
-            guard plan.totalBytes <= maxTotal else { throw Failure.tooLarge(maxTotal) }
+            // Sizes are the host's 64-bit nFileSize words: a sum that wraps is over any limit (it used to trap).
+            let (sum, overflow) = plan.totalBytes.addingReportingOverflow(e.size)
+            guard !overflow, sum <= maxTotal else { throw Failure.tooLarge(maxTotal) }
+            plan.totalBytes = sum
             if comps.count == 1 {
                 itemIndex[ours] = plan.items.count
                 plan.items.append(Item(path: ours, isDirectory: false, files: [i]))
@@ -345,8 +347,11 @@ public struct ClipboardTransferPolicy: Equatable, Sendable {
         return total > lazyMax ? .background : .lazy
     }
 
-    /// Free space needed on the staging volume: the files plus 10 % headroom.
-    public static func needed(total: UInt64) -> UInt64 { total + total / 10 }
+    /// Free space needed on the staging volume: the files plus 10 % headroom (saturating: `total` comes from the host).
+    public static func needed(total: UInt64) -> UInt64 {
+        let (sum, overflow) = total.addingReportingOverflow(total / 10)
+        return overflow ? .max : sum
+    }
 
     /// False only when the free space is known and short (nil free space: unknown, the write fails if it must).
     public static func enoughSpace(free: Int64?, total: UInt64) -> Bool {
