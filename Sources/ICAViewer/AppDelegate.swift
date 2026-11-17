@@ -665,16 +665,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launcher?.setStatus(String(format: byUser ? loc("%@: disconnected", "%@: getrennt") : loc("%@: session ended", "%@: Sitzung beendet"),
                                    displayName(controller.name)))
         guard sessions.isEmpty else { return }
-        if terminating {
-            AppQuit.reply("last session ended")
-        } else if byUser || connectionCenter?.isVisible == true || launching || !launchQueue.isEmpty {
-            // The user disconnected it, or is working in the Connection Center: stay.
-            vlog("last connection ended; staying (\(byUser ? "disconnected by the user" : "Connection Center open"))")
-            if byUser, connectionCenter?.isVisible != true { launcher?.showWindow(nil) }
-        } else {
-            // The last session is over and its windows are gone: quit cleanly.
+        if terminating { return AppQuit.reply("last session ended") }
+        // Stay while the user works in Settings or the Connection Center, and after a failed interactive launch (its
+        // error is on the launcher); quit when the last app closed (LastSessionPolicy, mac-C's VM scenario).
+        let decision = LastSessionPolicy.decide(.init(
+            byUser: byUser, userWindowOpen: connectionCenter?.isVisible == true || settings?.window?.isVisible == true,
+            launchPending: launching || !launchQueue.isEmpty, appeared: controller.reachedSeamless,
+            automated: autoLaunch != nil || LaunchPolicy.envAutomated()))
+        switch decision {
+        case .quit:
             vlog("last session ended; quitting")
             AppQuit.request("last session ended")
+        case .stay(let reason, let showLauncher):
+            vlog("last connection ended; staying (\(reason))")
+            if showLauncher { launcher?.showWindow(nil) }
         }
     }
 
