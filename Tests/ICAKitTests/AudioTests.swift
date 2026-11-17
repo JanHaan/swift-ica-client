@@ -833,3 +833,12 @@ private func code3Packet(_ frames: [Data]) -> Data {
         }
     }
 }
+
+@Test func audioVersion4AddDeviceAndCredits() {
+    // D145: ADD_DEVICE layout (docs/98 §8) and the version-4 credits.
+    #expect(AudioReply.addDevice(1, capture: false, name: "Mac") == [0x86, 1, 1, 1, 0xFF, 0, 0, 0, 0, 0x0B, 0x00, 0x4D, 0, 0x61, 0, 0x63, 0, 0, 0, 0, 0])
+    #expect(AudioReply.addDevice(2, capture: true, isDefault: false, name: "M").prefix(5) == [0x86, 2, 2, 1, 0x00])
+    #expect(AudioReply.enumeratedCredits(devices: [1, 2]) == [[0x80, 2, 0, 0, 1], [0x80, 2, 1, 0, 1], [0x80, 2, 2, 0, 1], [0x80, 1, 0, 0, 1]])
+    #expect(WDModules.audio(versionHigh: 4, date: Date(timeIntervalSince1970: 0))[5] == 4)
+    #expect(WDModules.audio(date: Date(timeIntervalSince1970: 0))[5] == AudioWire.versionHigh)
+}

@@ -398,8 +398,10 @@ public enum WDModules {
     /// (0x10 playback with RW V2, 0x11 adds the microphone). The bind entry `CTXCAM \0 13 00` comes from the WD
     /// module's table.
     public static func audio(capabilities: UInt32 = AudioWire.Caps.playback, channel: UInt8 = AudioWire.channelNumber,
-                             date: Date = Date()) -> [UInt8] {
-        var w = vdHeader(.audio, channel: channel, date: date)
+                             versionHigh: UInt8 = AudioWire.versionHigh, date: Date = Date()) -> [UInt8] {
+        var identity = WDModuleIdentity.audio
+        identity.versionHigh = versionHigh   // 4: device enumeration (D145)
+        var w = vdHeader(identity, channel: channel, date: date)
         w.u16(AudioWire.bufferBudget)
         w.u8(AudioWire.vdFlag)
         w.u32(capabilities)

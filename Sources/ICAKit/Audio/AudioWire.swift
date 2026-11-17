@@ -331,6 +331,20 @@ public enum AudioReply {
         [credit(.command, count: AudioWire.initialCredits), credit(.buffer, count: AudioWire.initialCredits)]
     }
 
+    /// ADD_DEVICE (version ≥ 4, §8): `86 <dev> <type> 01 <FF default | 00> 00 00 00 00 0B 00` + the UTF-16LE name, NUL, and
+    /// two more zero bytes. Type 1 = playback, 2 = capture.
+    public static func addDevice(_ device: UInt8, capture: Bool, isDefault: Bool = true, name: String) -> [UInt8] {
+        var out: [UInt8] = [0x86, device, capture ? 2 : 1, 0x01, isDefault ? 0xFF : 0x00, 0, 0, 0, 0, 0x0B, 0x00]
+        for unit in name.utf16 { out += [UInt8(unit & 0xFF), UInt8(unit >> 8)] }
+        out += [0, 0, 0, 0]
+        return out
+    }
+
+    /// The version-4 credits after the ADD_DEVICEs (§4.1): buffer 256 channel-wide, buffer 256 per device, then command 256.
+    public static func enumeratedCredits(devices: [UInt8]) -> [[UInt8]] {
+        [credit(.buffer, count: 0x100)] + devices.map { credit(.buffer, device: $0, count: 0x100) } + [credit(.command, count: 0x100)]
+    }
+
     /// `81 <dev> <reason>`.
     public static func resetDevice(_ device: UInt8, reason: UInt8) -> [UInt8] { [0x81, device, reason] }
 

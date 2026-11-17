@@ -151,6 +151,11 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         public var creditIdleFlush = AudioWire.creditIdleFlush
         /// Announce and serve the capture device (caps bit 0x01). Needs `captureSource` at OPEN time.
         public var microphone = false
+        /// Version 4 with device enumeration (D145, experimental): the module announces versions 1…4, and when the host
+        /// answers INIT with ≥ 4 the client sends ADD_DEVICE for playback (dev 1) and, with `microphone`, capture (dev 2),
+        /// as the stock client does; the VDA seems to create the session's recording endpoint only from such an ADD_DEVICE
+        /// (mac-D, D138). `ICA_AUDIO_V4=1`.
+        public var enumeration = false
         /// The Opus subformats AudioToolbox encodes (capture CAPINFO reply).
         public var opusEncodeSubformats: Set<UInt16> = OpusSupport.encodableSubformats
 
@@ -238,7 +243,8 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
 
     /// The 55-byte module (§1.4).
     public func module(channel: UInt8, date: Date) -> [UInt8] {
-        let bytes = WDModules.audio(capabilities: config.announcedCapabilities, channel: channel, date: date)
+        let bytes = WDModules.audio(capabilities: config.announcedCapabilities, channel: channel,
+                                    versionHigh: config.enumeration ? 4 : AudioWire.versionHigh, date: date)
         diagnostics.moduleBytes = bytes
         onEvent?(.module(bytes))
         return bytes
@@ -346,13 +352,25 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             flushGeneration += 1
             diagnostics.readWriteV2 = version >= 3 && (caps ?? 0) & AudioWire.Caps.readWriteV2 != 0
                 && config.capabilities & AudioWire.Caps.readWriteV2 != 0
-            for credit in AudioReply.initialCredits { send(credit) }
+            let enumerate = config.enumeration && version >= 4
+            if enumerate {
+                var devices: [UInt8] = [AudioWire.playbackDevice]
+                send(AudioReply.addDevice(AudioWire.playbackDevice, capture: false, name: "Mac"))
+                if config.microphone {
+                    send(AudioReply.addDevice(AudioWire.captureDevice, capture: true, name: "Mac Microphone"))
+                    devices.append(AudioWire.captureDevice)
+                }
+                for credit in AudioReply.enumeratedCredits(devices: devices) { send(credit) }
+            } else {
+                for credit in AudioReply.initialCredits { send(credit) }
+            }
             diagnostics.initialCreditsSent = true
             var text = String(format: "INIT version %d byte2 0x%02x", version, reserved)
             if let caps { text += String(format: " caps 0x%08x", caps) }
-            text += " → credits 128 commands / 128 buffers sent"
+            text += enumerate ? " → ADD_DEVICE dev 1 (playback)\(config.microphone ? ", dev 2 (capture)" : ""), credits 256 sent"
+                              : " → credits 128 commands / 128 buffers sent"
             if diagnostics.readWriteV2 { text += "; RW V2 on" }
-            if version >= 4 { text += "; NOTE: version ≥ 4 although we announced max 2, kept legacy devices 1/2" }
+            if version >= 4, !config.enumeration { text += "; NOTE: version ≥ 4 although we announced max 2, kept legacy devices 1/2" }
             log(text)
 
         case let .requestCapInfo(device, listOffset, formats):

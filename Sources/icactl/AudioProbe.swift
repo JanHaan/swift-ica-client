@@ -21,6 +21,7 @@ func runAudioProbe(ica: ICAFile, app: TestApp) async throws {
     audioConfig.codecs = AudioSettings.load(env: env).codecs
     audioConfig.capabilities = AudioWire.Caps.playback
     audioConfig.microphone = mic
+    audioConfig.enumeration = env["ICA_AUDIO_V4"] == "1"   // version 4 + ADD_DEVICE (D145)
     var config = WinstationDriver.Configuration()
     config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: env)
     config.logon = WDLogon(ica: ica)
