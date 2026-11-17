@@ -269,12 +269,14 @@ final class PrintJobsController: NSObject, NSWindowDelegate {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         let number = current.number
-        if let preview = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") {
-            NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: configuration) { _, error in
-                if let error { vlog("print: job \(number): Preview did not open: \(error.localizedDescription)") }
-            }
-        } else {
-            NSWorkspace.shared.open(url)
+        // Preview only, never the default PDF app (security review L-13); without Preview the job keeps the print panel.
+        guard let preview = PrintDocument.viewer(lookUp: { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }) else {
+            vlog("print: job \(number): Preview not found; the job stays for Print…")
+            NSSound.beep()
+            return
+        }
+        NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: configuration) { _, error in
+            if let error { vlog("print: job \(number): Preview did not open: \(error.localizedDescription)") }
         }
         vlog("print: job \(number): opened in Preview (file kept until quit)")
         finishCurrent(deleteFile: false)

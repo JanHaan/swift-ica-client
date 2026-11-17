@@ -59,6 +59,12 @@ public enum PrintDocument {
                              hasEOF: endsWithEOF(data), producerLength: producer?.count ?? 0))
     }
 
+    /// Which app may open a host's PDF: Preview only (sandboxed, no PDF JavaScript). Without it the job keeps only the
+    /// print panel; it never goes to the default PDF app, which may be a reader that runs the document's scripts
+    /// (security review L-13).
+    public static let viewerBundleIdentifier = "com.apple.Preview"
+    public static func viewer(lookUp: (String) -> URL?) -> URL? { lookUp(viewerBundleIdentifier) }
+
     /// Longest file name produced, in UTF-8 bytes including ".pdf" (APFS allows 255).
     public static let maxFileNameBytes = 200
 
