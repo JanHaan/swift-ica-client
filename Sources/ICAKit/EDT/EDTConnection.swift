@@ -6,9 +6,14 @@ import Foundation
 ///   the byte stream is cut into packets of at most `payloadSize` bytes (each a whole message, position `11`);
 ///   the receiver acknowledges cumulatively every `ackInterval`, reports gaps at once with a NAK (and repeats it),
 ///   and answers each ACK2; the sender retransmits NAKed packets first, and everything unacknowledged after an RTO.
-/// - Congestion control, deliberately conservative: a packet window starting at `initialWindow`, slow start to
-///   `ssthresh`, then +1 packet per window acknowledged; on a loss event (NAK or RTO) at most once per RTT the window
-///   halves (RTO: back to `initialWindow`). The peer's advertised buffer caps it too.
+/// - Congestion control (D135): a packet window from `initialWindow`, slow start to the first loss, then +12.5 % per
+///   RTT while the RTT stays near its minimum, else +1 packet per RTT; a decrease (×0.875, at most once per RTT) only on
+///   congestion: ≥ 10 % of the window lost in one epoch or the RTT up by half, so random loss of a few percent does not
+///   throttle it; an RTO drops to `initialWindow`. The peer's advertised buffer caps the window.
+/// - Pacing (D135): packets leave at window/RTT per second (a token bucket refilled on every call, at most two ticks'
+///   worth at once), so an ACK never releases a burst.
+/// - Path MTU (D135): data starts at `minPacketSize` and is raised by binary-search probes (type 0x20) that the VDA
+///   echoes as type 0x21 of the same size [L]; without any echo, `fallbackPacketSize`. Probes from the peer are echoed.
 /// Pure: datagrams go out through `send`, time comes from the `now` arguments; the owner runs `tick` every ~10 ms.
 public final class EDTConnection {
     public enum State: Equatable, Sendable {
@@ -30,8 +35,19 @@ public final class EDTConnection {
         /// MTU of 1280, so the default fits it (the stock client offers 1500 and gets IP-fragmented, docs/80 §6).
         public var maxPacketSize: UInt32 = 1280
         public var flowWindow: UInt32 = 8192
+        /// Path MTU discovery (D135): data starts at `minPacketSize` (IPv4's guaranteed 576) and probes go up to the
+        /// negotiated size; with no echo at all, `fallbackPacketSize` (the negotiated size if smaller). Off: the
+        /// negotiated size from the start.
+        public var probeMTU = true
+        public var minPacketSize = 576
+        public var fallbackPacketSize = 1280
+        /// Rate pacing (D135).
+        public var pacing = true
+        /// Multiplicative decrease on congestion, and the loss share of an epoch that counts as congestion.
+        public var decrease: Double = 0.875
+        public var congestionLossShare: Double = 0.1
         /// Handshake retry interval and count [I] (the stock client never needed a retry).
-        public var handshakeRetry: Double = 0.25
+        public var handshakeRetry: Double = 0.1
         public var handshakeAttempts = 12
         /// Keep-alive when nothing was sent this long (the VDA: 1.006 s) [B].
         public var keepAliveInterval: Double = 1
@@ -70,9 +86,13 @@ public final class EDTConnection {
     public let config: Config
     public private(set) var state: State = .idle
     public private(set) var cookie: UInt32?
-    /// Negotiated packet size (the smaller of both offers) and the data bytes per packet (minus IP+UDP 28, EDT 16).
+    /// Negotiated packet size (the smaller of both offers), the size data uses now (raised by probes), and the data
+    /// bytes per packet (minus IP+UDP 28, EDT 16).
     public private(set) var packetSize: Int
-    public var payloadSize: Int { packetSize - 28 - EDTPacket.headerSize }
+    public private(set) var sendPacketSize: Int
+    public var payloadSize: Int { sendPacketSize - 28 - EDTPacket.headerSize }
+    /// Probe results for the log: (size, answered).
+    public private(set) var probeLog: [(size: Int, answered: Bool)] = []
     public private(set) var stats = Stats()
     public var keepAlivesReceived: Int { stats.keepAlivesReceived }
     /// Smoothed RTT and its variation, seconds.
@@ -92,6 +112,7 @@ public final class EDTConnection {
     public var log: (String) -> Void = { _ in }
 
     private var start: Double = 0
+    private var offer: UInt32 = 1280
     private var lastSent: Double = 0
     private var lastReceived: Double = 0
     private var attempts = 0
@@ -109,6 +130,18 @@ public final class EDTConnection {
     private var lastProgress: Double = 0
     private var backoff: Double = 1
     private var lastDecrease: Double = -1
+    private var minRTT: Double = .infinity
+    private var epochStart: Double = 0
+    private var epochLosses = 0
+    private var tokens: Double = 4
+    private var lastRefill: Double = 0
+    // Path MTU probing.
+    private var probing: (size: Int, counter: UInt32, sentAt: Double, tries: Int)?
+    private var probeLow = 0
+    private var probeHigh = 0
+    private var probeCounter: UInt32 = 0x100
+    private var probeReplies = 0
+    private var probeDone = false
 
     // Receiver.
     private var rcvNext: UInt32?
@@ -118,10 +151,16 @@ public final class EDTConnection {
     private var lastAckAt: Double = 0
     private var ackNumber: UInt32 = 1
     private var acksAwaiting: [UInt32: Double] = [:]
+    // Receive-side estimates reported in every full ACK (UDT [P]): the sender's rate control grows from them (D135).
+    private var lastArrival: Double?
+    private var arrivalIntervals: [Double] = []
+    private var pairStart: (seq: UInt32, at: Double)?
+    private var pairIntervals: [Double] = []
 
     public init(config: Config) {
         self.config = config
         packetSize = Int(config.maxPacketSize)
+        sendPacketSize = Int(config.maxPacketSize)
         sndNext = config.initialSequence
         sndUna = config.initialSequence
         window = config.initialWindow
@@ -141,14 +180,16 @@ public final class EDTConnection {
 
     // MARK: Public API
 
-    public func connect(now: Double) {
+    /// `maxPacketSize`: the offer for this connection (EDTStream passes the route's interface MTU), else the config's.
+    public func connect(now: Double, maxPacketSize: Int? = nil) {
         guard state == .idle else { return }
         start = now
         lastReceived = now
+        offer = UInt32(max(config.minPacketSize, min(65_535, maxPacketSize ?? Int(config.maxPacketSize))))
         let h = EDTHandshake(version: 4, initialSequence: config.initialSequence, connectionType: 1, socketID: config.socketID,
                              cookie: 0, peerIPv4: config.peerIPv4)
         var hs = h
-        hs.maxPacketSize = config.maxPacketSize
+        hs.maxPacketSize = offer
         hs.flowWindow = config.flowWindow
         sendHandshake(hs, now: now)
         set(.induction)
@@ -189,7 +230,7 @@ public final class EDTConnection {
             var conclusion = EDTHandshake(version: 7, initialSequence: config.initialSequence, connectionType: -1,
                                           socketID: config.socketID, cookie: h.cookie, peerIPv4: config.peerIPv4,
                                           ext: (config.socketID, config.initialSequence))
-            conclusion.maxPacketSize = config.maxPacketSize
+            conclusion.maxPacketSize = offer
             conclusion.flowWindow = config.flowWindow
             attempts = 0
             sendHandshake(conclusion, now: now)
@@ -197,12 +238,22 @@ public final class EDTConnection {
         case (.conclusion, _) where packet.controlType == .handshake:
             guard let h = packet.handshake, h.connectionType == -1, h.socketID != 0 else { return }
             rcvNext = h.initialSequence
-            packetSize = max(576, min(Int(config.maxPacketSize), Int(h.maxPacketSize)))
+            packetSize = max(config.minPacketSize, min(Int(offer), Int(h.maxPacketSize)))
+            sendPacketSize = config.probeMTU ? min(packetSize, config.minPacketSize) : packetSize
             peerWindow = Double(max(16, min(h.flowWindow, 65536)))
             lastProgress = now
-            log("EDT connected: server socket \(String(format: "%08x", h.socketID)), packet size \(packetSize) (payload \(payloadSize) B), "
-                + "peer flow window \(h.flowWindow), peer ISN \(h.initialSequence)")
+            lastRefill = now
+            epochStart = now
+            log("EDT connected: server socket \(String(format: "%08x", h.socketID)), packet size \(packetSize) (offered \(offer)), "
+                + "sending at \(sendPacketSize)\(config.probeMTU ? " until probed" : ""), peer flow window \(h.flowWindow), peer ISN \(h.initialSequence)")
             set(.connected(serverSocket: h.socketID))
+            if config.probeMTU && packetSize > sendPacketSize {
+                probeLow = sendPacketSize
+                probeHigh = packetSize
+                sendProbe(size: packetSize, server: h.socketID, now: now)
+            } else {
+                probeDone = true
+            }
             pump(now: now)
         case (.connected(let server), .data(let seq, _, _, _, _, _, let payload)):
             receiveData(seq, payload, server: server, now: now)
@@ -233,6 +284,7 @@ public final class EDTConnection {
                 return set(.closed(reason: "peer silent for \(Int(config.idleTimeout)) s"))
             }
             if now - lastAckAt >= config.ackInterval { sendAck(server: server, now: now, force: false) }
+            probeTimeout(server: server, now: now)
             repeatNaks(server: server, now: now)
             checkRTO(now: now)
             pump(now: now)
@@ -246,6 +298,7 @@ public final class EDTConnection {
 
     private func receiveData(_ seq: UInt32, _ payload: [UInt8], server: UInt32, now: Double) {
         stats.dataReceived += 1
+        noteArrival(seq, now: now)
         guard let expected = rcvNext else { return }
         let d = Self.diff(seq, expected)
         if d < 0 || buffered[seq] != nil {
@@ -289,6 +342,8 @@ public final class EDTConnection {
         ack.rtt = UInt32(rtt * 1e6)
         ack.rttVariance = UInt32(rttVar * 1e6)
         ack.availableBuffer = UInt32(max(16, Int(config.flowWindow) - buffered.count))
+        ack.receiveRate = UInt32(min(Double(UInt32.max), arrivalRate))
+        ack.linkCapacity = UInt32(min(Double(UInt32.max), linkCapacity))
         acksAwaiting[ackNumber] = now
         if acksAwaiting.count > 64 { acksAwaiting = acksAwaiting.filter { now - $0.value < 5 } }
         ackNumber = ackNumber &+ 1
@@ -312,6 +367,39 @@ public final class EDTConnection {
         guard !due.isEmpty else { return }
         for s in due { rcvLoss[s] = now }
         sendNak(due.sorted { Self.diff($0, $1) < 0 }, server: server, now: now)
+    }
+
+    // MARK: Receive-side estimates (UDT [P], D135)
+
+    /// Arrival intervals of the last 16 data packets and the gaps of packet pairs (sequence ≡ 0 then ≡ 1 mod 16, which
+    /// a UDT sender sends back to back): the packet arrival rate and the link capacity, in packets per second.
+    private func noteArrival(_ seq: UInt32, now: Double) {
+        if let last = lastArrival {
+            arrivalIntervals.append(now - last)
+            if arrivalIntervals.count > 16 { arrivalIntervals.removeFirst() }
+        }
+        lastArrival = now
+        if seq & 0xF == 0 {
+            pairStart = (seq, now)
+        } else if seq & 0xF == 1, let p = pairStart, seq == Self.add(p.seq, 1) {
+            pairIntervals.append(now - p.at)
+            if pairIntervals.count > 16 { pairIntervals.removeFirst() }
+            pairStart = nil
+        }
+    }
+
+    /// Packets per second from the median-filtered intervals (UDT: intervals within 1/8…8× the median), 0 if unknown.
+    public var arrivalRate: Double { Self.rate(arrivalIntervals, minimum: 8) }
+    public var linkCapacity: Double { Self.rate(pairIntervals, minimum: 4) }
+
+    static func rate(_ intervals: [Double], minimum: Int) -> Double {
+        guard intervals.count >= minimum else { return 0 }
+        let median = intervals.sorted()[intervals.count / 2]
+        guard median > 0 else { return 0 }
+        let kept = intervals.filter { $0 > median / 8 && $0 < median * 8 }
+        guard kept.count > intervals.count / 2 else { return 0 }
+        let mean = kept.reduce(0, +) / Double(kept.count)
+        return mean > 0 ? 1 / mean : 0
     }
 
     // MARK: Control from the peer
@@ -343,12 +431,18 @@ public final class EDTConnection {
                 lossList.insert(s)
                 lost += 1
             }
-            if lost > 0 { lossEvent(now: now, timeout: false) }
+            if lost > 0 { lossEvent(now: now, timeout: false, lost: lost) }
             pump(now: now)
         case .shutdown?:
             set(.closed(reason: "peer shutdown"))
         case .handshake?:
             break  // a late handshake reply
+        case .mtuProbe?:
+            // The peer probes its path to us: echo it at the same size [I] (the VDA does so for ours [L]).
+            let probe = EDTPacket.control(type: type, reserved: 0, info: info, timestamp: 0, destination: server, body: body)
+            if let reply = probe.mtuProbeReply(destination: server) { emit(reply, now: now) }
+        case .mtuProbeReply?:
+            probeAnswered(size: body.count + EDTPacket.headerSize + 28, server: server, now: now)
         default:
             stats.unknownControl += 1
             if stats.unknownControl <= 5 { log("EDT unknown control type \(String(format: "0x%04x", type)): info \(info), \(body.count) B \(hex(body.prefix(24)))") }
@@ -357,6 +451,7 @@ public final class EDTConnection {
 
     private func updateRTT(_ sample: Double) {
         guard sample > 0, sample < 10 else { return }
+        minRTT = min(minRTT, sample)
         rttVar = 0.75 * rttVar + 0.25 * abs(sample - rtt)
         rtt = 0.875 * rtt + 0.125 * sample
     }
@@ -375,22 +470,39 @@ public final class EDTConnection {
         sndUna = next
         lastProgress = now
         backoff = 1
-        // Slow start, then additive increase.
-        if window < ssthresh { window += Double(acked) } else { window += Double(acked) / window }
+        // Slow start to the first loss; then +12.5 % per RTT while the RTT stays near its minimum (no queue
+        // building), else +1 packet per RTT.
+        if window < ssthresh {
+            window += Double(acked)
+        } else if minRTT.isFinite, rtt < 1.25 * minRTT + 0.002 {
+            window += Double(acked) * 0.125
+        } else {
+            window += Double(acked) / window
+        }
         window = min(window, config.maxWindow)
         pump(now: now)
     }
 
-    private func lossEvent(now: Double, timeout: Bool) {
+    /// `lost`: packets newly reported lost (NAK). A decrease needs a congestion signal: in the current epoch (one RTT)
+    /// at least `congestionLossShare` of the window lost, or the RTT up by half over its minimum. Random loss of a few
+    /// percent alone does not shrink the window (retransmission repairs it); it only ends slow start.
+    private func lossEvent(now: Double, timeout: Bool, lost: Int = 0) {
         if timeout {
             ssthresh = max(config.initialWindow, window / 2)
             window = config.initialWindow
             lastDecrease = now
-        } else if now - lastDecrease >= rtt {
-            ssthresh = max(config.initialWindow / 2, window / 2)
-            window = max(4, window / 2)
-            lastDecrease = now
+            return
         }
+        if now - epochStart >= max(rtt, 0.01) { epochStart = now; epochLosses = 0 }
+        epochLosses += lost
+        if window < ssthresh { ssthresh = window }
+        let heavy = Double(epochLosses) >= max(3, config.congestionLossShare * window)
+        let queueing = minRTT.isFinite && rtt > 1.5 * minRTT + 0.005
+        guard heavy || queueing, now - lastDecrease >= rtt else { return }
+        window = max(4, window * config.decrease)
+        ssthresh = window
+        lastDecrease = now
+        epochLosses = 0
     }
 
     private var rto: Double { min(config.maxRTO, max(config.minRTO, rtt + 4 * rttVar)) * backoff }
@@ -406,12 +518,28 @@ public final class EDTConnection {
         pump(now: now)
     }
 
+    private func refill(now: Double) {
+        guard config.pacing else { return }
+        let rate = min(window, peerWindow) / max(rtt, 0.002)   // packets per second
+        tokens = min(max(2, rate * 0.02), tokens + (now - lastRefill) * rate)
+        lastRefill = now
+    }
+
+    private func takeToken() -> Bool {
+        guard config.pacing else { return true }
+        guard tokens >= 1 else { return false }
+        tokens -= 1
+        return true
+    }
+
     private func pump(now: Double) {
         guard case .connected(let server) = state else { return }
+        refill(now: now)
         let limit = Int(min(window, peerWindow))
         // Retransmissions first, oldest first.
         if !lossList.isEmpty {
             for s in lossList.sorted(by: { Self.diff($0, $1) < 0 }) {
+                guard takeToken() else { break }
                 lossList.remove(s)
                 guard var entry = inFlight[s] else { continue }
                 entry.sentAt = now
@@ -422,7 +550,7 @@ public final class EDTConnection {
                            destination: server, payload: entry.payload), now: now)
             }
         }
-        while inFlight.count < limit, pendingHead < pendingBytes.count {
+        while inFlight.count < limit, pendingHead < pendingBytes.count, takeToken() {
             let n = min(payloadSize, pendingBytes.count - pendingHead)
             let chunk = Array(pendingBytes[pendingHead..<(pendingHead + n)])
             pendingHead += n
@@ -446,6 +574,62 @@ public final class EDTConnection {
         if nextMessage == 0 { nextMessage = 1 }
         emit(packet, now: now)
     }
+
+    // MARK: Path MTU probing (D135)
+
+    private var probeWait: Double { max(0.3, 3 * rtt) }
+
+    /// `size`: the IP packet size under test (the datagram is `size - 28` bytes).
+    private func sendProbe(size: Int, server: UInt32, now: Double) {
+        probeCounter &+= 1
+        let tries = (probing?.size == size ? probing!.tries : 0) + 1
+        probing = (size, probeCounter, now, tries)
+        emit(EDTPacket.mtuProbe(destination: server, counter: probeCounter, size: size - 28), now: now)
+    }
+
+    private func probeAnswered(size: Int, server: UInt32, now: Double) {
+        guard let p = probing, size == p.size else { return }
+        probeReplies += 1
+        probing = nil
+        probeLog.append((size, true))
+        probeLow = max(probeLow, size)
+        if size > sendPacketSize {
+            sendPacketSize = size
+            log("EDT path MTU: \(size) B answered, sending at \(size) (payload \(payloadSize) B)")
+        }
+        nextProbe(server: server, now: now)
+    }
+
+    private func probeTimeout(server: UInt32, now: Double) {
+        guard let p = probing, now - p.sentAt >= probeWait else { return }
+        if p.tries < 2 { return sendProbe(size: p.size, server: server, now: now) }
+        probing = nil
+        probeLog.append((p.size, false))
+        if probeReplies == 0 && p.size <= config.minPacketSize {
+            // No echo even at the minimum: a peer without probe replies. Use the usual safe size.
+            probeDone = true
+            sendPacketSize = min(packetSize, config.fallbackPacketSize)
+            return log("EDT path MTU: no probe answered; sending at \(sendPacketSize) without probing")
+        }
+        probeHigh = p.size - 1
+        nextProbe(server: server, now: now)
+    }
+
+    private func nextProbe(server: UInt32, now: Double) {
+        if probeHigh - probeLow < 16 {
+            if probeReplies == 0, probeLog.last?.size != config.minPacketSize {
+                // Nothing answered yet: check the minimum itself before concluding (fallback above).
+                return sendProbe(size: config.minPacketSize, server: server, now: now)
+            }
+            probeDone = true
+            return log("EDT path MTU: done, sending at \(sendPacketSize) B (probes: "
+                       + probeLog.map { "\($0.size)\($0.answered ? "+" : "-")" }.joined(separator: " ") + ")")
+        }
+        let mid = ((probeLow + probeHigh + 1) / 2) & ~3
+        sendProbe(size: max(probeLow + 4, mid), server: server, now: now)
+    }
+
+    public var mtuProbingDone: Bool { probeDone }
 
     // MARK: Helpers
 

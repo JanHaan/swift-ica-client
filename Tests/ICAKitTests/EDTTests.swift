@@ -81,6 +81,7 @@ private final class FakeVDA {
     let vda = FakeVDA()
     var config = EDTConnection.Config(peerIPv4: [192, 0, 2, 20], socketID: 0x0D40_DFE7, initialSequence: 0x12EC_2685)
     config.idleTimeout = 20
+    config.probeMTU = false
     let c = EDTConnection(config: config)
     var outbox: [[UInt8]] = []
     c.send = { outbox.append($0) }
@@ -173,10 +174,12 @@ private final class FakeVDA {
 }
 
 /// A connected client with captured output (data packets parsed).
-private func connected(window: Double = 16) -> (EDTConnection, () -> [EDTPacket], FakeVDA) {
+private func connected(window: Double = 16, probe: Bool = false, pacing: Bool = false) -> (EDTConnection, () -> [EDTPacket], FakeVDA) {
     let vda = FakeVDA()
     var config = EDTConnection.Config(peerIPv4: [192, 0, 2, 20], socketID: 5, initialSequence: 1000)
     config.initialWindow = window
+    config.probeMTU = probe
+    config.pacing = pacing
     let c = EDTConnection(config: config)
     var out: [[UInt8]] = []
     c.send = { out.append($0) }
@@ -219,7 +222,7 @@ private func ackFrom(_ vda: FakeVDA, next: UInt32, number: UInt32 = 1) -> [UInt8
     #expect(c.unacknowledgedPackets == 0)
 }
 
-@Test func edtNakRetransmitsAndHalvesTheWindowOncePerRTT() {
+@Test func edtNakRetransmitsAndShrinksTheWindowOncePerRTTOnHeavyLoss() {
     let (c, take, vda) = connected(window: 16)
     c.write([UInt8](repeating: 1, count: 1236 * 10), now: 1)
     _ = take()
@@ -229,9 +232,10 @@ private func ackFrom(_ vda: FakeVDA, next: UInt32, number: UInt32 = 1) -> [UInt8
     let resent = take().compactMap { p -> UInt32? in if case .data(let s, _, _, _, _, _, _) = p { return s } else { return nil } }
     #expect(resent == [1002, 1003, 1004, 1007])
     #expect(c.stats.dataRetransmitted == 4)
-    #expect(c.window == 8)
-    c.receive(nak.bytes, now: 1.03)                                  // the same loss event: no second halving
-    #expect(c.window == 8)
+    // 4 of a 16-packet window lost in one epoch (≥ 10 %): congestion, ×0.875 (slow start ends at the first loss).
+    #expect(c.window == 14)
+    c.receive(nak.bytes, now: 1.03)                                  // the same epoch: no second decrease
+    #expect(c.window == 14)
     _ = vda
 }
 
@@ -261,6 +265,117 @@ private func ackFrom(_ vda: FakeVDA, next: UInt32, number: UInt32 = 1) -> [UInt8
     c.sendMessage([0xAA], now: 2)
     #expect(take().first == .data(sequence: 1000, position: 3, inOrder: false, message: 1, timestamp: 2_000_000,
                                   destination: vda.socket, payload: [0xAA]))
+}
+
+@Test func edtRandomLossDoesNotShrinkALargeWindow() {
+    // D135: one lost packet in a 200-packet window is random loss (< 10 %, RTT flat): repaired, no decrease.
+    let (c, take, vda) = connected(window: 200)
+    c.write([UInt8](repeating: 3, count: 1236 * 200), now: 1)
+    _ = take()
+    c.receive(EDTPacket.control(type: EDTControlType.nak.rawValue, reserved: 0, info: 0, timestamp: 0, destination: 5,
+                                body: EDTLossList.encode([1050])).bytes, now: 1.02)
+    #expect(c.window == 200 && c.stats.dataRetransmitted == 1)
+    _ = vda
+}
+
+@Test func edtPacingSpreadsTheWindowOverTheRTT() {
+    // D135: with pacing a full window does not leave at once: the bucket allows ~2 ticks' worth (≥ 2 packets).
+    let (c, take, _) = connected(window: 64, pacing: true)
+    c.write([UInt8](repeating: 4, count: 1236 * 64), now: 1)
+    let first = take().filter { if case .data = $0 { return true } else { return false } }.count
+    #expect(first < 64 && first >= 2)
+    // Ticks across one RTT (0.1 s by default) release the rest.
+    var total = first
+    for i in 1...12 { c.tick(now: 1 + Double(i) * 0.01); total += take().filter { if case .data = $0 { return true } else { return false } }.count }
+    #expect(total == 64)
+}
+
+@Test func edtPathMTUProbesUpAndUsesTheAnsweredSize() {
+    // D135: data starts at 576; the VDA answers a 1280 probe → data at 1280 (1236 B payload).
+    let (c, take, vda) = connected(probe: true)
+    #expect(c.sendPacketSize == 576 && c.payloadSize == 532)
+    c.tick(now: 0.4)                                   // the first probe went out with the handshake; its retry now
+    let probe = take().first { $0.controlType == .mtuProbe }!
+    #expect(probe.bytes.count == 1280 - 28)
+    c.receive(probe.mtuProbeReply(destination: 5)!.bytes, now: 0.02)
+    #expect(c.sendPacketSize == 1280 && c.payloadSize == 1236 && c.mtuProbingDone)
+    _ = vda
+}
+
+@Test func edtPathMTUSearchesDownWhenBigProbesAreLost() {
+    // The 1280 probe is lost twice; the search then narrows on answered/lost probes, ending within 16 bytes.
+    var config = EDTConnection.Config(peerIPv4: [192, 0, 2, 20], socketID: 6, initialSequence: 1)
+    config.probeMTU = true
+    let c = EDTConnection(config: config)
+    var out: [[UInt8]] = []
+    c.send = { out.append($0) }
+    let vda = FakeVDA()
+    c.connect(now: 0, maxPacketSize: 1280)
+    c.receive(vda.reply(to: out.removeLast())!, now: 0)
+    c.receive(vda.reply(to: out.removeLast())!, now: 0)
+    let pathMTU = 1100
+    var t = 0.0
+    for _ in 0..<40 {
+        let probes = out.compactMap { try? EDTPacket.parse($0) }.filter { $0.controlType == .mtuProbe }
+        out = []
+        for p in probes where p.bytes.count + 28 <= pathMTU { c.receive(p.mtuProbeReply(destination: 6)!.bytes, now: t) }
+        t += 0.35
+        c.tick(now: t)
+        if c.mtuProbingDone { break }
+    }
+    #expect(c.mtuProbingDone)
+    #expect(c.sendPacketSize <= pathMTU && c.sendPacketSize > pathMTU - 20)
+}
+
+@Test func edtWithoutProbeRepliesFallsBackTo1280() {
+    var config = EDTConnection.Config(peerIPv4: [192, 0, 2, 20], socketID: 7, initialSequence: 1)
+    config.probeMTU = true
+    let c = EDTConnection(config: config)
+    var out: [[UInt8]] = []
+    c.send = { out.append($0) }
+    let vda = FakeVDA()
+    c.connect(now: 0, maxPacketSize: 1500)
+    c.receive(vda.reply(to: out.removeLast())!, now: 0)
+    c.receive(vda.reply(to: out.removeLast())!, now: 0)
+    var t = 0.0
+    for _ in 0..<80 where !c.mtuProbingDone { t += 0.35; c.tick(now: t) }
+    #expect(c.mtuProbingDone && c.sendPacketSize == 1280)
+}
+
+@Test func edtEchoesThePeersProbes() {
+    let (c, take, _) = connected()
+    let probe = EDTPacket.mtuProbe(destination: 5, counter: 9, size: 1000)
+    c.receive(probe.bytes, now: 1)
+    let reply = take().first { $0.controlType == .mtuProbeReply }
+    #expect(reply?.bytes.count == 1000 && reply?.mtuProbeFields?.counter == 9)
+}
+
+@Test func edtAcksReportArrivalRateAndLinkCapacity() {
+    // D135: a UDT sender sizes its window from the receive rate in our ACKs (0 kept the VDA at ~16 packets per RTT).
+    let (c, take, _) = connected()
+    func data(_ seq: UInt32) -> [UInt8] {
+        EDTPacket.data(sequence: seq, position: 3, inOrder: false, message: 1, timestamp: 0, destination: 5, payload: [0]).bytes
+    }
+    // The fake VDA's ISN is ours (1000): pairs at 1008/1009 and 1024/1025 come back to back (0.1 ms), the rest 1 ms apart.
+    var t = 1.0
+    for seq in UInt32(1000)..<1040 {
+        let pairSecond = seq & 0xF == 1
+        t += pairSecond ? 0.0001 : 0.001
+        c.receive(data(seq), now: t)
+    }
+    #expect(abs(c.arrivalRate - 1000) < 150)          // ~1 ms apart (the pair gaps are filtered out)
+    #expect(c.linkCapacity == 0)                        // 1008 is not ≡ 0 mod 16 here: only 1024/1025 → too few pairs
+    c.tick(now: t + 0.02)
+    let ack = take().compactMap(EDTAck.init).last
+    #expect(ack.map { abs(Double($0.receiveRate) - 1000) < 150 } == true)
+}
+
+@Test func edtLinkCapacityFromPacketPairs() {
+    var gaps = [Double](repeating: 0.0001, count: 8)
+    #expect(abs(EDTConnection.rate(gaps, minimum: 4) - 10_000) < 1)
+    gaps[0] = 0.01                                       // an outlier (≥ 8× the median) is ignored
+    #expect(abs(EDTConnection.rate(gaps, minimum: 4) - 10_000) < 1)
+    #expect(EDTConnection.rate([0.001, 0.001], minimum: 4) == 0)
 }
 
 @Test func edtFeatureIsOffByDefault() {

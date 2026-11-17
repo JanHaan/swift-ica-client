@@ -25,6 +25,8 @@ public enum EDTControlType: UInt16, Sendable {
     case handshake = 0, keepAlive = 1, ack = 2, nak = 3, congestionWarning = 4, shutdown = 5, ack2 = 6, dropRequest = 7
     /// Not in the UDT draft: MTU probes right after a switch-over (docs/80 §6) [B].
     case mtuProbe = 0x20
+    /// The VDA's answer to a probe: the same size, the probe's counter and length echoed (docs/80 §6) [L].
+    case mtuProbeReply = 0x21
 }
 
 /// The 48-byte handshake body (+ the 8-byte EDT extension in the second round) (docs/80 §4.1) [B].
@@ -158,9 +160,16 @@ public enum EDTPacket: Equatable, Sendable {
         return h
     }
 
-    /// (counter, declared rest length) of an MTU probe.
+    /// The reply to a probe (ours to the VDA's, or a test VDA's): type 0x21, the probe's body unchanged [L].
+    public func mtuProbeReply(destination: UInt32) -> EDTPacket? {
+        guard case .control(let type, _, let info, _, _, let body) = self, type == EDTControlType.mtuProbe.rawValue else { return nil }
+        return .control(type: EDTControlType.mtuProbeReply.rawValue, reserved: 0, info: info, timestamp: 0, destination: destination, body: body)
+    }
+
+    /// (counter, declared rest length) of an MTU probe or probe reply.
     public var mtuProbeFields: (counter: UInt32, rest: UInt32)? {
-        guard case .control(let type, _, _, _, _, let body) = self, type == EDTControlType.mtuProbe.rawValue, body.count >= 12 else { return nil }
+        guard case .control(let type, _, _, _, _, let body) = self,
+              type == EDTControlType.mtuProbe.rawValue || type == EDTControlType.mtuProbeReply.rawValue, body.count >= 12 else { return nil }
         func u32(_ i: Int) -> UInt32 { UInt32(body[i]) << 24 | UInt32(body[i + 1]) << 16 | UInt32(body[i + 2]) << 8 | UInt32(body[i + 3]) }
         return (u32(4), u32(8))
     }

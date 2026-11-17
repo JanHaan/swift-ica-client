@@ -399,6 +399,22 @@ case "cdmtest-explorer":
         fail("\(error)")
     }
 
+case "bulkprobe":
+    // icactl bulkprobe [seconds] — bulk throughput, independent of GDT (D135, BulkProbe.swift): a noise window in the lab's
+    // Command Prompt; transport bytes per second; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1). ICA_EDT=1 for EDT.
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("bulkprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let bulkSeconds = args.first.flatMap(Int.init) ?? 30
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == "Command Prompt" }) else { fail("no resource named Command Prompt") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runBulkProbe(ica: ica, seconds: bulkSeconds)
+    } catch {
+        fail("\(error)")
+    }
+
 case "edtprobe":
     // icactl edtprobe <vda-ipv4> [port] [seconds] — EDT handshake only (D130, EDTProbe.swift); needs ICA_EDT=1.
     guard EDTFeature.enabled() else { fail("edtprobe needs ICA_EDT=1 (EDT is experimental)") }

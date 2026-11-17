@@ -62,7 +62,28 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
         self.queue = queue
         let ip = host.split(separator: ".").compactMap { UInt8($0) }
         edt = EDTConnection(config: config ?? EDTConnection.Config(peerIPv4: ip.count == 4 ? ip : [0, 0, 0, 0]))
-        connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .udp)
+        // Don't fragment (D135): an oversized probe must be lost, not fragmented, or path MTU discovery would lie.
+        let parameters = NWParameters.udp
+        if let ip = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.disableFragmentation = true }
+        connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
+    }
+
+    /// True once the EDT handshake completed (queue).
+    public private(set) var isConnected = false
+
+    /// MTU of a network interface (link-layer `if_data`), e.g. 1280 for Tailscale's utun.
+    public static func interfaceMTU(_ name: String) -> Int? {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ifa = cursor {
+            defer { cursor = ifa.pointee.ifa_next }
+            guard String(cString: ifa.pointee.ifa_name) == name, let addr = ifa.pointee.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_LINK), let data = ifa.pointee.ifa_data else { continue }
+            return Int(data.assumingMemoryBound(to: if_data.self).pointee.ifi_mtu)
+        }
+        return nil
     }
 
     private func now() -> Double {
@@ -86,7 +107,9 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
             edt.onState = { [weak self] state in
                 guard let self else { return }
                 switch state {
-                case .connected: finish(.success(()))
+                case .connected:
+                    self.isConnected = true
+                    finish(.success(()))
                 case .closed(let why):
                     finish(.failure(Failure.handshake(why)))
                     self.fail(Failure.closed(why))
@@ -99,7 +122,12 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
                 case .ready:
                     self.receiveLoop()
                     self.startTimer()
-                    self.edt.connect(now: self.now())
+                    // Offer the route's interface MTU (at most 1500), so the VDA's packets fit our first hop (D135).
+                    let name = self.connection.currentPath?.availableInterfaces.first?.name
+                    let mtu = name.flatMap(Self.interfaceMTU)
+                    let offer = min(1500, mtu ?? Int(self.edt.config.maxPacketSize))
+                    self.log("EDT: route via \(name ?? "?") (MTU \(mtu.map(String.init) ?? "?")): offering packet size \(offer)")
+                    self.edt.connect(now: self.now(), maxPacketSize: offer)
                 case .failed(let error):
                     finish(.failure(Failure.handshake("\(error)")))
                     self.fail(Failure.closed("\(error)"))

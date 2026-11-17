@@ -507,6 +507,8 @@ public final class CGPTransport: @unchecked Sendable {
         public var connectTimeout: TimeInterval = 20
         /// EDT handshake budget before falling back to TCP (D132; the VDA answers in milliseconds).
         public var edtHandshakeTimeout: TimeInterval = 3
+        /// EDT wins the start race if its handshake completes within max(this, 3 × the TCP connect time) (D135).
+        public var edtRaceWindow: Duration = .milliseconds(300)
         public var firstReadTimeout: TimeInterval = 20
         public var livenessInterval: TimeInterval = 5
         public var livenessMinimum: TimeInterval = 25
@@ -775,24 +777,69 @@ public final class CGPTransport: @unchecked Sendable {
         }
     }
 
-    /// EDT first when configured and not failed before, else TCP(+TLS) (D132).
+    /// EDT and TCP(+TLS) race (D135): both connect at once; EDT wins if its handshake completes within
+    /// max(`edtRaceWindow`, 3 × the TCP connect time): two round trips against TCP's one, plus a lost handshake packet's
+    /// retry (live: 1.5× lost the race under 50–100 ms and 1–2 % loss). Else TCP is used and the EDT connection closed. Without an EDT
+    /// target (or after EDT failed in this session) TCP alone.
     private func openStream() async throws -> ICAByteStream {
-        if let target = edtTarget, !onQueue({ edtFailed }) {
-            let edt = EDTStream(host: target.host, port: target.port, queue: queue)
-            edt.log = { [weak self] in self?.log($0) }
-            do {
-                try await edt.connect(timeout: timing.edtHandshakeTimeout)
-                return edt
-            } catch {
-                perform { [self] in
-                    edtFailed = true
-                    log("\(error): falling back to TCP for this session")
-                }
-            }
+        let tcp = TLSStream(host: host, port: port, tls: tls, queue: queue)
+        guard let target = edtTarget, !onQueue({ edtFailed }) else {
+            try await tcp.connect(timeout: timing.connectTimeout)
+            return tcp
         }
-        let stream = TLSStream(host: host, port: port, tls: tls, queue: queue)
-        try await stream.connect(timeout: timing.connectTimeout)
-        return stream
+        let edt = EDTStream(host: target.host, port: target.port, queue: queue)
+        edt.log = { [weak self] in self?.log($0) }
+        let started = ContinuousClock.now
+        let edtTask = Task { () -> Error? in
+            do { try await edt.connect(timeout: self.timing.edtHandshakeTimeout); return nil } catch { return error }
+        }
+        let tcpState = RaceResult()
+        let tcpTask = Task { () -> (Error?, Duration) in
+            var result: (Error?, Duration)
+            do { try await tcp.connect(timeout: self.timing.connectTimeout); result = (nil, ContinuousClock.now - started) }
+            catch { result = (error, ContinuousClock.now - started) }
+            tcpState.set(result)
+            return result
+        }
+        func ms(_ d: Duration) -> Int { Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000) }
+        // Wait for EDT within the window (re-evaluated once TCP is up).
+        var tcpTime: Duration?
+        while true {
+            if onQueue({ edt.isConnected }) {
+                let elapsed = ContinuousClock.now - started
+                Task { if case (nil, _) = await tcpTask.value { tcp.close() } }
+                log("EDT won the race: handshake in \(ms(elapsed)) ms\(tcpTime.map { ", TCP connected in \(ms($0)) ms" } ?? "")")
+                return edt
+            }
+            let limit = max(timing.edtRaceWindow, tcpTime.map { $0 * 3 } ?? .seconds(timing.edtHandshakeTimeout))
+            if ContinuousClock.now - started >= limit { break }
+            if tcpTime == nil, let done = tcpState.value {
+                if done.0 != nil { break }   // TCP failed: wait for EDT alone below
+                tcpTime = done.1
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        let (tcpError, tcpElapsed) = await tcpTask.value
+        if tcpError == nil {
+            edt.close()
+            edtTask.cancel()
+            perform { [self] in
+                log("EDT lost the race: no handshake within \(ms(max(timing.edtRaceWindow, tcpElapsed * 3))) ms; TCP connected in \(ms(tcpElapsed)) ms")
+            }
+            return tcp
+        }
+        // TCP failed: EDT if it still connects.
+        if await edtTask.value == nil { return edt }
+        perform { [self] in edtFailed = true }
+        throw tcpError!
+    }
+
+    /// The TCP side's outcome, readable while the race loop polls (any thread).
+    private final class RaceResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: (Error?, Duration)?
+        func set(_ r: (Error?, Duration)) { lock.lock(); result = r; lock.unlock() }
+        var value: (Error?, Duration)? { lock.lock(); defer { lock.unlock() }; return result }
     }
 
     private func install(_ stream: ICAByteStream) {
