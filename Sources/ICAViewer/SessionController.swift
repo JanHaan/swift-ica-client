@@ -162,7 +162,11 @@ final class SessionController: NSObject {
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
                                  printing: Self.printingConfig(), audio: Self.audioConfig(),
                                  webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless),
-                                 gdt: Self.gdtConfig())
+                                 gdt: Self.gdtConfig(), requireTLS: StoreService.sessionsRequireTLS)
+        if !session.plan.tls {
+            vlog("session \(logName(name)): the server's ICA file asks for an unencrypted connection (TLS off, "
+                 + "\(session.plan.route.rawValue) route); keystrokes and screen use basic ICA encryption only")
+        }
         refused = RefusedFeatureMonitor(app: name, requested: RefusedFeatureMonitor.requested(session))
         super.init()
         refused.register(self)

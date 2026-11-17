@@ -295,7 +295,12 @@ final class StoreService: @unchecked Sendable {
     /// nil until the user enters one.
     private(set) var gateway: URL?
     /// What `gateway` points at; nil until probed (`resolveAccount`).
-    private(set) var accountKind: AccountKind?
+    private(set) var accountKind: AccountKind? {
+        didSet { Self.sessionsRequireTLS = accountKind != .storeFront }
+    }
+    /// A gateway account (or one not probed yet, which counts as a gateway): its sessions connect over TLS only,
+    /// never plain TCP (ICAConnectPlan.refusal, security review F-05). Main thread.
+    nonisolated(unsafe) static var sessionsRequireTLS = true
     /// The login window; set by the app delegate. Throws if the user cancels.
     var interactiveLogon: (@MainActor () async throws -> Void)?
     var store: StoreClient? {
@@ -339,6 +344,7 @@ final class StoreService: @unchecked Sendable {
             ? envAccount ?? saved : saved ?? envAccount
         gateway = chosen?.0
         accountKind = chosen?.1
+        Self.sessionsRequireTLS = accountKind != .storeFront
         vlog("account: \(gateway?.host ?? "none") (\(accountKind?.rawValue ?? "kind not probed")); logon: \(usesEnvCredentials ? ".env" : "login window")")
         http.trace = { vlog("http " + $0) }   // paths and cookie names only (HTTPClient redacts query values)
         if Demo.enabled { return }   // demo mode touches neither the disk nor the network

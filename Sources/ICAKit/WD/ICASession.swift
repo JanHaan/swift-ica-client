@@ -102,8 +102,9 @@ public final class ICASession: @unchecked Sendable {
     public init(ica: ICAFile, configuration: WinstationDriver.Configuration, clipboard: ClipboardEngine.Config? = nil,
                 cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
                 webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil, gdt: GDTEngine.Config? = nil,
-                extraEngines: [VirtualChannelEngine] = [], acr: ACRReconnect? = nil) throws {
+                extraEngines: [VirtualChannelEngine] = [], acr: ACRReconnect? = nil, requireTLS: Bool = false) throws {
         do { plan = try ICAConnectPlan(ica: ica) } catch { throw Failure.unusableFile("\(error)") }
+        if let refusal = plan.refusal(requireTLS: requireTLS) { throw Failure.unusableFile(refusal) }
         host = plan.host
         port = plan.port
         var config = configuration

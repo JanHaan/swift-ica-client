@@ -64,6 +64,16 @@ public struct ICAConnectPlan: Equatable, Sendable, CustomStringConvertible {
 
     public var usesCGP: Bool { if case .cgp = framing { true } else { false } }
 
+    /// Why this plan must not be connected when the account requires TLS (a NetScaler Gateway account: its ICA
+    /// files always go through the gateway over TLS), or nil. A plain-TCP route there would carry the logon ticket,
+    /// keystrokes and screen with basic (XOR) encryption only; refusing it is never a silent downgrade
+    /// (security review F-05). Direct StoreFront accounts may connect plain ICA as the server's file says.
+    public func refusal(requireTLS: Bool) -> String? {
+        guard requireTLS, !tls else { return nil }
+        return "the ICA file asks for an unencrypted connection (SSLEnable off, \(route.rawValue) route) on a gateway "
+            + "account, which always connects over TLS; not connected"
+    }
+
     public var description: String {
         let what: String
         switch framing {
