@@ -19,6 +19,11 @@ final class TWCache {
     private var oversized: [Int: [UInt8]] = [:]
     /// Decoded copies keyed by slot.
     private var decoded: [Int: TWBitmap] = [:]
+    /// Nominal size of `decoded` (4 bytes per pixel).
+    private(set) var decodedBytes = 0
+    /// At most this much decoded bitmap data is kept: a few bytes of RLE decode to up to 256 MiB, and 256 of those
+    /// would pin 64 GiB (security review F-03). A miss only costs a decode.
+    static let decodedByteBudget = 512 << 20
 
     var log: ((String) -> Void)?
 
@@ -40,6 +45,7 @@ final class TWCache {
         walkCounter = 0
         oversized = [:]
         decoded = [:]
+        decodedBytes = 0
         isConfigured = true
     }
 
@@ -71,7 +77,7 @@ final class TWCache {
         let off = start & ringMask
         slots[slot] = off
         slotValid[slot] = true
-        decoded[slot] = nil
+        dropDecoded(slot)
         oversized[slot] = nil
         writePos = start + 4 + bytes.count
         if bytes.count > maxObject {
@@ -88,7 +94,7 @@ final class TWCache {
     func extendLast(_ bytes: UnsafeBufferPointer<UInt8>) {
         guard isConfigured, nextHandle > 0 else { log?("Thinwire: cache extend without an object"); return }
         let slot = (nextHandle - 1) & handleMask
-        decoded[slot] = nil
+        dropDecoded(slot)
         if var big = oversized[slot] {
             big.append(contentsOf: bytes)
             oversized[slot] = big
@@ -98,12 +104,14 @@ final class TWCache {
         let start = slots[slot]
         let oldLength = readU32(at: start)
         let newLength = oldLength + bytes.count
-        var at = writePos & ringMask
-        if at < start { at += ringSize }
+        // An object is contiguous from its slot (the ring keeps maxObject + 100 bytes of slack past its end), so the
+        // append goes right after it. The masked write position said the same for objects shorter than the ring, but
+        // with a host-chosen ring smaller than an object it pointed back into the object's own length word.
+        let at = start + 4 + oldLength
         writePos += bytes.count
         if newLength > maxObject || at + bytes.count > ring.count {
             log?("Thinwire: cache extend to \(newLength) bytes exceeds the maximum \(maxObject)")
-            var big = Array(ring[(start + 4)..<(start + 4 + oldLength)])
+            var big = at <= ring.count ? Array(ring[(start + 4)..<at]) : []
             big.append(contentsOf: bytes)
             oversized[slot] = big
             return
@@ -123,7 +131,7 @@ final class TWCache {
                     data.withUnsafeBufferPointer { newObject($0) }
                 }
             } else {
-                decoded[slot] = nil
+                dropDecoded(slot)
             }
             walkCounter += 1
         }
@@ -141,6 +149,10 @@ final class TWCache {
         return Array(ring[(off + 4)..<(off + 4 + length)])
     }
 
+    private func dropDecoded(_ slot: Int) {
+        if let old = decoded.removeValue(forKey: slot) { decodedBytes -= old.width * old.height * 4 }
+    }
+
     func decodedBitmap(_ handle: Int) -> TWBitmap? {
         guard isConfigured else { return nil }
         return decoded[handle & handleMask]
@@ -148,7 +160,14 @@ final class TWCache {
 
     func storeDecoded(_ bitmap: TWBitmap, for handle: Int) {
         guard isConfigured else { return }
-        if decoded.count >= 256 { decoded.removeAll(keepingCapacity: true) }
+        let size = bitmap.width * bitmap.height * 4
+        guard size <= Self.decodedByteBudget else { return }
+        if let old = decoded[handle & handleMask] { decodedBytes -= old.width * old.height * 4 }
+        if decoded.count >= 256 || decodedBytes + size > Self.decodedByteBudget {
+            decoded.removeAll(keepingCapacity: true)
+            decodedBytes = 0
+        }
         decoded[handle & handleMask] = bitmap
+        decodedBytes += size
     }
 }
