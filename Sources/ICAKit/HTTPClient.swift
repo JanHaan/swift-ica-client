@@ -142,6 +142,21 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         return request
     }
 
+    /// `ICA_EXTRA_CA_FILE` (D144): a server certificate from the lab's own CA is accepted in addition to the system
+    /// trust store; the host name and chain are still checked. Without the variable, the system's default handling.
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge)
+        async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              !ExtraTrust.anchors.isEmpty, let trust = challenge.protectionSpace.serverTrust else {
+            return (.performDefaultHandling, nil)
+        }
+        guard ExtraTrust.evaluate(trust) else {
+            trace("TLS: \(challenge.protectionSpace.host) not trusted (system store + ICA_EXTRA_CA_FILE)")
+            return (.cancelAuthenticationChallenge, nil)
+        }
+        return (.useCredential, URLCredential(trust: trust))
+    }
+
     // MARK: Transport security (security review F-04)
 
     /// A redirect may not leave HTTPS for plain HTTP (any host).

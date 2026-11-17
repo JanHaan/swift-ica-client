@@ -33,6 +33,7 @@ public final class TLSStream: @unchecked Sendable {
     static func tlsOptions() -> NWProtocolTLS.Options {
         let options = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(options.securityProtocolOptions, .TLSv12)
+        ExtraTrust.apply(to: options)   // ICA_EXTRA_CA_FILE (lab CA, D144); nothing otherwise
         return options
     }
 
