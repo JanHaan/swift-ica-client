@@ -111,9 +111,8 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
 
     private let stack = NSStackView()
     private let status = NSTextField(labelWithString: "")
-    private let quitPopup = NSPopUpButton()
-    private let offerBox = NSButton(checkboxWithTitle: loc("Offer reconnect at start", "Beim Start Verbinden anbieten"),
-                                    target: nil, action: nil)
+    /// Shown only when it saves clicks: two or more sessions can be reconnected (one has its own Reconnect).
+    private let reconnectAllButton = NSButton(title: loc("Reconnect All", "Alle erneut verbinden"), target: nil, action: nil)
     private var actions: [Int: () -> Void] = [:]
     private var demoRows: [Row]?
 
@@ -150,21 +149,18 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         scroll.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let reconnectAll = NSButton(title: loc("Reconnect All", "Alle wiederverbinden"), target: self, action: #selector(reconnectAll))
+        // The quit choice and the reconnect offer are settings: Settings ▸ General (docs/ux/audit.md U5).
+        reconnectAllButton.target = self
+        reconnectAllButton.action = #selector(reconnectAll)
+        reconnectAllButton.isHidden = true
         let refresh = NSButton(title: loc("Refresh", "Aktualisieren"), target: self, action: #selector(refreshClicked))
-        for b in [reconnectAll, refresh] { b.bezelStyle = .rounded }
-        offerBox.state = ReconnectAtStart.stored == .ask ? .on : .off
-        offerBox.target = self
-        offerBox.action = #selector(offerChanged)
-        let quitLabel = NSTextField(labelWithString: loc("When quitting:", "Beim Beenden:"))
-        quitPopup.addItems(withTitles: QuitAction.allCases.map(\.title))
-        quitPopup.selectItem(at: QuitAction.allCases.firstIndex(of: QuitAction.stored) ?? 0)
-        quitPopup.target = self
-        quitPopup.action = #selector(quitActionChanged)
+        refresh.keyEquivalent = "r"
+        refresh.keyEquivalentModifierMask = .command
+        for b in [reconnectAllButton, refresh] { b.bezelStyle = .rounded }
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [reconnectAll, refresh, status, NSView(), offerBox, quitLabel, quitPopup])
+        let bar = NSStackView(views: [refresh, status, NSView(), reconnectAllButton])
         bar.orientation = .horizontal
         bar.spacing = 8
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 10, right: 12)
@@ -340,6 +336,9 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
 
     private func render(_ rows: [Row]) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let reconnectable = demoRows != nil ? rows.filter { $0.group == .disconnected }.count
+            : storeRows.filter { $0.state == .disconnected && !$0.joinAmbiguous && $0.reconnect != nil }.count
+        reconnectAllButton.isHidden = reconnectable < 2
         actions.removeAll()
         var tag = 0
         func button(_ title: String, _ action: @escaping () -> Void) -> NSButton {
@@ -519,19 +518,6 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
 
     private func refreshSoon() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.refresh() }
-    }
-
-    @objc private func offerChanged() {
-        guard demoRows == nil else { return }
-        ReconnectAtStart.stored = offerBox.state == .on ? .ask : .never
-        vlog("reconnect at start: \(ReconnectAtStart.stored.rawValue)")
-    }
-
-    @objc private func quitActionChanged() {
-        let index = quitPopup.indexOfSelectedItem
-        guard QuitAction.allCases.indices.contains(index), demoRows == nil else { return }
-        QuitAction.stored = QuitAction.allCases[index]
-        vlog("quit action: \(QuitAction.stored.rawValue)")
     }
 
     // MARK: Store actions by id (§5.2, §5.3)

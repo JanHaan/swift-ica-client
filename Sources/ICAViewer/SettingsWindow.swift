@@ -2,7 +2,10 @@ import AppHostKit
 import AppKit
 import ICAKit
 
-/// Settings (Cmd-,): gateway, username, password, passcode mode with TOTP secret, forget all, and
+/// Settings (Cmd-,) in the Mac settings-window style (HIG, Settings; docs/ux/audit.md U5): four toolbar panes
+/// (General, Account, Devices, Display) with SF Symbols, the window titled by the pane, the last pane restored,
+/// and every change applied at once, with no Save or Cancel (text fields when editing ends). Contents:
+/// gateway, username, password, passcode mode with TOTP secret, forget all, and
 /// display scaling (Windows scaling, client scaling; D29, docs/80 §4). Secrets are written to the
 /// Keychain only; the fields never show stored values. Scaling applies at connect; saving a change
 /// while sessions run offers to reconnect them. The shared folder (client drive M, docs/95 §A, D32)
@@ -16,7 +19,7 @@ import ICAKit
 /// applies at once). After a connection drop (docs/90 §9.6, D86): reconnect automatically (default) or ask; applies at
 /// the next drop. "Copy files through the clipboard" (D90, docs/75): default on; applies at the next connect.
 @MainActor
-final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
+final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, NSWindowDelegate {
     private let service: StoreService
     /// Demo mode (ICAVIEWER_DEMO=1): example data, nothing is read from or written to settings or Keychain.
     private let demo: Bool
@@ -55,7 +58,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                     de: "Im Finder kopieren und in der Sitzung einsetzen, oder umgekehrt. Gilt ab der nächsten Verbindung.")
     static let clipLimitHint = Text(en: "Larger copies from the session are fetched in the background with a progress window; above this size ICA Viewer asks first. Copies from the Mac to the session stop at this size.",
                                     de: "Größere Kopien aus der Sitzung werden im Hintergrund mit Fortschrittsfenster geholt; ab dieser Größe fragt ICA Viewer vorher. Kopien vom Mac in die Sitzung enden bei dieser Größe.")
-    static let dropAutomatic = Text(en: "Reconnect automatically", de: "Automatisch neu verbinden")
+    static let dropAutomatic = Text(en: "Reconnect automatically", de: "Automatisch erneut verbinden")
     static let dropAsk = Text(en: "Ask", de: "Fragen")
     static let dropHint = Text(en: "After a longer network drop, ICA Viewer reconnects your session through the store, waiting up to 10 minutes for the network. Short drops always resume by themselves.",
                                de: "Nach einem längeren Netzwerkausfall verbindet ICA Viewer die Sitzung über den Store neu und wartet bis zu 10 Minuten auf das Netzwerk. Kurze Ausfälle werden immer von selbst überbrückt.")
@@ -69,6 +72,31 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                    de: "Globaler Kurzbefehl: öffnet den Launcher aus jeder App.")
     static let shortcutTaken = Text(en: "Another app already uses this shortcut; choose another one.",
                                     de: "Eine andere App nutzt diesen Kurzbefehl bereits; bitte einen anderen wählen.")
+    static let offerTitle = Text(en: "Offer to reconnect disconnected sessions", de: "Erneutes Verbinden getrennter Sitzungen anbieten")
+    static let staleHint = Text(en: "Open sessions keep their scaling until they reconnect; your apps keep running.",
+                                de: "Offene Sitzungen behalten ihre Skalierung bis zum erneuten Verbinden; die Apps laufen weiter.")
+
+    /// The panes, in toolbar order.
+    enum Pane: Int, CaseIterable {
+        case general, account, devices, display
+        var title: Text {
+            switch self {
+            case .general: Text(en: "General", de: "Allgemein")
+            case .account: Text(en: "Account", de: "Account")
+            case .devices: Text(en: "Devices", de: "Geräte")
+            case .display: Text(en: "Display", de: "Anzeige")
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .general: "gearshape"
+            case .account: "person.crop.circle"
+            case .devices: "externaldrive.connected.to.line.below"
+            case .display: "display"
+            }
+        }
+        static let defaultsKey = "settingsPane"
+    }
     /// Row labels (column 0), in grid order.
     static let rowLabels: [String: Text] = [
         "gateway": Text(en: "Gateway or store:", de: "Gateway oder Store:"), "user": Text(en: "User name:", de: "Benutzername:"),
@@ -81,6 +109,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         "network": Text(en: "Network:", de: "Netzwerk:"),
         "clipboard": Text(en: "Clipboard:", de: "Zwischenablage:"),
         "drop": Text(en: "Connection drop:", de: "Verbindungsabbruch:"),
+        "quit": Text(en: "When quitting:", de: "Beim Beenden:"), "start": Text(en: "At sign-in:", de: "Bei Anmeldung:"),
     ]
 
     private let protectBox = NSButton(checkboxWithTitle: T.protectTitle.shown, target: nil, action: nil)
@@ -98,7 +127,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// Up to two lines: why the current (or last) session uses 1x, and what this Mac's screens get with
     /// the chosen scaling (or why that falls back).
     private let scalingNote = NSTextField(wrappingLabelWithString: " ")
-    private var contentStack: NSStackView?
+    /// While `load()` fills the controls: no saving.
+    private var loading = false
     private let shareBox = NSButton(checkboxWithTitle: T.shareTitle.shown, target: nil, action: nil)
     private let folderPath = NSTextField(labelWithString: "")
     private let chooseFolderButton = NSButton(title: loc("Choose…", "Auswählen …"), target: nil, action: nil)
@@ -119,11 +149,17 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let dockHint = NSTextField(wrappingLabelWithString: "")
     private let shortcutPopup = NSPopUpButton()
     private let shortcutHint = NSTextField(wrappingLabelWithString: "")
+    private let quitPopup = NSPopUpButton()
+    private let offerBox = NSButton(checkboxWithTitle: T.offerTitle.shown, target: nil, action: nil)
+    private let reconnectNowButton = NSButton(title: loc("Reconnect Now", "Jetzt erneut verbinden"), target: nil, action: nil)
+    private let staleNote = NSTextField(wrappingLabelWithString: T.staleHint.shown)
+    private var reconnectRow: NSGridRow?
+    private let tabs = SettingsTabs()
     /// One per popup item: nil = automatic, else the device (possibly a stored one that is not connected).
     private var cameraChoices: [CameraDevices.Device?] = [nil]
     private let cameraAccessNote = NSTextField(wrappingLabelWithString: "")
     private var cameraObservers: [NSObjectProtocol] = []
-    private var cameraGrid: NSGridView?
+    private var cameraNoteRow: NSGridRow?
     private var timer: Timer?
     /// Secret read from the Keychain for the preview only; dropped after one period.
     private var previewTOTP: TOTP?
@@ -134,9 +170,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         self.demo = demo
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = loc("Settings", "Einstellungen")
+        window.title = Pane.general.title.shown
+        window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
         build()
     }
 
@@ -151,8 +189,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         }
         load()
         observeCameras()
+        let first = window?.isVisible != true
         showWindow(nil)
-        window?.center()
+        if first { window?.center() }
         NSApp.activate()
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -160,13 +199,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         }
     }
 
-    override func close() {
+    /// A field still being edited is applied first (its editing ends), then the secrets are dropped.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.makeFirstResponder(nil)
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
         timer?.invalidate()
         timer = nil
         clearSecrets()
         cameraObservers.forEach(NotificationCenter.default.removeObserver)
         cameraObservers = []
-        super.close()
     }
 
     private func clearSecrets() {
@@ -180,7 +224,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             f.delegate = self
             f.widthAnchor.constraint(equalToConstant: 260).isActive = true
         }
-        gatewayField.placeholderString = "gateway.example.com or storefront.example.com/Citrix/StoreWeb"
+        gatewayField.placeholderString = loc("gateway.example.com or storefront.example.com/Citrix/StoreWeb",
+                                         "gateway.example.com oder storefront.example.com/Citrix/StoreWeb")
         usernameField.contentType = .username
         passwordField.contentType = .password
         secretField.placeholderString = loc("Base32 secret", "Base32-Geheimnis")
@@ -277,101 +322,137 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         previewRow.spacing = 8
         let folderRow = NSStackView(views: [folderPath, chooseFolderButton, revealFolderButton])
         folderRow.spacing = 6
-        let grid = NSGridView(views: [
+        quitPopup.addItems(withTitles: QuitAction.allCases.map(\.title))
+        staleNote.textColor = .secondaryLabelColor
+        staleNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        staleNote.preferredMaxLayoutWidth = widths.column1
+        reconnectNowButton.target = self
+        reconnectNowButton.action = #selector(reconnectNow)
+        let staleRow = NSStackView(views: [staleNote, reconnectNowButton])
+        staleRow.orientation = .vertical
+        staleRow.alignment = .leading
+        staleRow.spacing = 6
+        let empty = NSGridCell.emptyContentView
+        let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
+                              target: self, action: #selector(forgetAll))
+
+        let general = grid(widths, [
+            [label("shortcut"), shortcutPopup], [empty, shortcutHint],
+            [label("dock"), dockBox], [empty, dockHint],
+            [label("quit"), quitPopup],
+            [label("start"), offerBox],
+            [label("drop"), dropPopup], [empty, hint(T.dropHint)],
+        ])
+        let account = grid(widths, [
             [label("gateway"), gatewayField],
             [label("user"), usernameField],
             [label("password"), passwordField],
-            [NSGridCell.emptyContentView, protectBox],
+            [empty, protectBox],
             [label("passcode"), promptRadio],
-            [NSGridCell.emptyContentView, totpRadio],
+            [empty, totpRadio],
             [label("secret"), secretField],
             [label("code"), params],
-            [NSGridCell.emptyContentView, previewRow],
+            [empty, previewRow],
+        ])
+        let devices = grid(widths, [
+            [label("clipboard"), clipFilesBox], [empty, hint(T.clipFilesHint)],
+            [empty, clipLimitPopup], [empty, hint(T.clipLimitHint)],
+            [label("share"), shareBox], [empty, folderRow], [empty, readOnlyBox],
+            [label("print"), printBox], [empty, hint(T.printHint)], [empty, printActionPopup],
+            [label("audio"), audioBox], [empty, hint(T.audioHint)], [empty, micBox], [empty, hint(T.micHint)],
+            [label("camera"), cameraBox], [empty, cameraPopup], [empty, hint(T.cameraHint)], [empty, cameraAccessNote],
+        ])
+        cameraNoteRow = devices.row(at: devices.numberOfRows - 1)
+        cameraNoteRow?.isHidden = true   // shown only when the camera list needs an access hint
+        let display = grid(widths, [
             [label("windows"), windowsScalingPopup],
             [label("client"), clientScalingPopup],
-            [NSGridCell.emptyContentView, scalingNote],
-            [label("share"), shareBox],
-            [NSGridCell.emptyContentView, folderRow],
-            [NSGridCell.emptyContentView, readOnlyBox],
-            [label("print"), printBox],
-            [NSGridCell.emptyContentView, hint(T.printHint)],
-            [NSGridCell.emptyContentView, printActionPopup],
-            [label("audio"), audioBox],
-            [NSGridCell.emptyContentView, hint(T.audioHint)],
-            [NSGridCell.emptyContentView, micBox],
-            [NSGridCell.emptyContentView, hint(T.micHint)],
-            [label("camera"), cameraBox],
-            [NSGridCell.emptyContentView, cameraPopup],
-            [NSGridCell.emptyContentView, hint(T.cameraHint)],
-            [NSGridCell.emptyContentView, cameraAccessNote],
-            [label("network"), compressBox],
-            [NSGridCell.emptyContentView, hint(T.compressHint)],
-            [label("clipboard"), clipFilesBox],
-            [NSGridCell.emptyContentView, hint(T.clipFilesHint)],
-            [NSGridCell.emptyContentView, clipLimitPopup],
-            [NSGridCell.emptyContentView, hint(T.clipLimitHint)],
-            [label("drop"), dropPopup],
-            [NSGridCell.emptyContentView, hint(T.dropHint)],
-            [label("dock"), dockBox],
-            [NSGridCell.emptyContentView, dockHint],
-            [label("shortcut"), shortcutPopup],
-            [NSGridCell.emptyContentView, shortcutHint],
+            [empty, scalingNote],
+            [empty, staleRow],
+            [label("network"), compressBox], [empty, hint(T.compressHint)],
         ])
-        grid.rowSpacing = 8
+        reconnectRow = display.row(at: 3)
+        reconnectRow?.isHidden = true
+        digitsPopup.setAccessibilityLabel(loc("Passcode digits", "Passcode-Stellen"))
+        periodField.setAccessibilityLabel(loc("Passcode period in seconds", "Passcode-Gültigkeit in Sekunden"))
+        algorithmPopup.setAccessibilityLabel(loc("Passcode algorithm", "Passcode-Algorithmus"))
+        for g in [general, account, devices, display] { Access.labelControls(in: g) }
+
+        // Every control applies its change at once.
+        for c in [shortcutPopup, dockBox, quitPopup, offerBox, dropPopup, compressBox, clipFilesBox, clipLimitPopup] as [NSControl] {
+            c.target = self
+            c.action = #selector(generalChanged)
+        }
+        readOnlyBox.target = self
+        readOnlyBox.action = #selector(shareChanged)
+        printActionPopup.target = self
+        printActionPopup.action = #selector(printChanged)
+        micBox.target = self
+        micBox.action = #selector(audioChanged)
+        cameraPopup.target = self
+        cameraPopup.action = #selector(cameraChanged)
+        protectBox.target = self
+        protectBox.action = #selector(accountChanged)
+
+        let status = self.status
+        status.preferredMaxLayoutWidth = widths.column0 + 8 + widths.column1
+        let accountFooter = NSStackView(views: [status, forget])
+        accountFooter.orientation = .vertical
+        accountFooter.alignment = .leading
+        accountFooter.spacing = 10
+        let panes: [(Pane, [NSView])] = [(.general, [general]), (.account, [account, accountFooter]),
+                                         (.devices, [devices]), (.display, [display])]
+        for (pane, views) in panes {
+            let stack = NSStackView(views: views)
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 16
+            stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+            stack.widthAnchor.constraint(equalToConstant: 20 + widths.column0 + 8 + widths.column1 + 20).isActive = true
+            let vc = NSViewController()
+            vc.view = stack
+            let item = NSTabViewItem(viewController: vc)
+            item.label = pane.title.shown
+            item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: nil)
+            tabs.addTabViewItem(item)
+        }
+        tabs.tabStyle = .toolbar
+        tabs.onSelect = { [weak self] in self?.paneSelected() }
+        let stored = UserDefaults.standard.integer(forKey: Pane.defaultsKey)
+        tabs.selectedTabViewItemIndex = Pane(rawValue: stored) == nil ? 0 : stored
+        window?.contentViewController = tabs
+        updateScalingNote()
+        paneSelected()
+    }
+
+    /// A two-column grid (label, control) with the spacing rule used in every pane: 14 pt above a labelled row,
+    /// 2 pt above a hint, 6 pt above a further control of the same row group.
+    private func grid(_ widths: (column0: CGFloat, column1: CGFloat), _ rows: [[NSView]]) -> NSGridView {
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 0
         grid.columnSpacing = 8
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .trailing
         // Column widths from the widest text in either language (`columnWidths`), so nothing is clipped
-        // or truncated in English or German; same 20 pt margin left and right.
+        // or truncated in English or German, and every pane has the same width.
         grid.column(at: 0).width = widths.column0
         grid.column(at: 1).width = widths.column1
-        grid.row(at: 4).topPadding = 8
-        grid.row(at: 9).topPadding = 12
-        grid.row(at: 12).topPadding = 12
-        grid.row(at: 15).topPadding = 12
-        grid.row(at: 16).topPadding = 0   // hint lines sit close under their checkbox
-        grid.row(at: 18).topPadding = 12
-        grid.row(at: 19).topPadding = 0
-        grid.row(at: 21).topPadding = 0
-        grid.row(at: 22).topPadding = 12
-        grid.row(at: 24).topPadding = 0
-        grid.row(at: 25).topPadding = 0
-        grid.row(at: 25).isHidden = true   // shown only when the camera list needs an access hint
-        grid.row(at: 26).topPadding = 12
-        grid.row(at: 27).topPadding = 0
-        grid.row(at: 28).topPadding = 12
-        grid.row(at: 29).topPadding = 0
-        grid.row(at: 30).topPadding = 8
-        grid.row(at: 31).topPadding = 0
-        grid.row(at: 32).topPadding = 12
-        grid.row(at: 33).topPadding = 0
-        cameraGrid = grid
-
-        let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
-                              target: self, action: #selector(forgetAll))
-        let cancel = NSButton(title: loc("Cancel", "Abbrechen"), target: self, action: #selector(cancelClicked))
-        cancel.keyEquivalent = "\u{1b}"
-        let save = NSButton(title: loc("Save", "Sichern"), target: self, action: #selector(saveClicked))
-        save.keyEquivalent = "\r"
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let buttons = NSStackView(views: [forget, spacer, cancel, save])
-        buttons.spacing = 8
-
-        let stack = NSStackView(views: [grid, status, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
-        stack.widthAnchor.constraint(equalToConstant: 20 + widths.column0 + grid.columnSpacing + widths.column1 + 20).isActive = true
-        for v in [status, buttons] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
+        for r in 1..<grid.numberOfRows {
+            let labelled = (grid.cell(atColumnIndex: 0, rowIndex: r).contentView as? NSTextField)?.stringValue.isEmpty == false
+            let isHint = (grid.cell(atColumnIndex: 1, rowIndex: r).contentView as? NSTextField).map { !$0.isEditable && $0.font?.pointSize == NSFont.smallSystemFontSize } ?? false
+            grid.row(at: r).topPadding = labelled ? 14 : isHint ? 2 : 6
         }
-        window?.contentView = stack
-        contentStack = stack
-        updateScalingNote()
-        window?.setContentSize(stack.fittingSize)
+        return grid
+    }
+
+    /// The pane changed: window title, size, the stored choice.
+    private func paneSelected() {
+        let index = max(tabs.selectedTabViewItemIndex, 0)
+        if let pane = Pane(rawValue: index) {
+            window?.title = pane.title.shown
+            if !demo { UserDefaults.standard.set(index, forKey: Pane.defaultsKey) }
+        }
+        fitWindow(animate: window?.isVisible == true)
     }
 
     /// Column widths: column 0 fits the widest row label, column 1 the widest checkbox, radio button or
@@ -396,18 +477,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         return widths
     }
 
-    /// Fits the window to its content (the scaling note changes height), keeping the top edge.
-    private func fitWindow() {
-        guard let window, let stack = contentStack else { return }
-        stack.layoutSubtreeIfNeeded()
-        let size = stack.fittingSize
+    /// Fits the window to the current pane (panes differ in height; the scaling note and the camera hint change
+    /// it), keeping the top edge. Animated only when visible and Reduce Motion is off.
+    private func fitWindow(animate: Bool = false) {
+        let index = tabs.selectedTabViewItemIndex
+        guard let window, index >= 0, let view = tabs.tabViewItems[index].viewController?.view else { return }
+        view.layoutSubtreeIfNeeded()
+        let size = view.fittingSize
         let content = window.contentRect(forFrameRect: window.frame)
         guard abs(content.height - size.height) > 0.5 || abs(content.width - size.width) > 0.5 else { return }
         let frame = window.frameRect(forContentRect: NSRect(x: content.minX, y: content.maxY - size.height, width: size.width, height: size.height))
-        window.setFrame(frame, display: window.isVisible)
+        let motion = animate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        window.setFrame(frame, display: window.isVisible, animate: motion)
     }
 
     private func loadDemo() {
+        loading = true
+        defer { loading = false }
         gatewayField.stringValue = Demo.gateway
         usernameField.stringValue = Demo.username
         passwordField.stringValue = Demo.password
@@ -448,6 +534,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         folderPath.stringValue = (sharedFolder.path as NSString).abbreviatingWithTildeInPath
         folderPath.toolTip = sharedFolder.path
         folderPath.textColor = on ? .labelColor : .disabledControlTextColor
+        if !loading { saveDriveMapping() }
     }
 
     @objc private func chooseFolder() {
@@ -477,6 +564,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     private func saveDriveMapping() {
+        guard !demo else { return }
         var settings = CDMSettings.load(env: [:])
         settings.enabled = shareBox.state == .on
         settings.readOnly = readOnlyBox.state == .on
@@ -494,9 +582,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         printChanged()
     }
 
-    @objc private func printChanged() { printActionPopup.isEnabled = printBox.state == .on }
+    @objc private func printChanged() {
+        printActionPopup.isEnabled = printBox.state == .on
+        if !loading { savePrinting() }
+    }
 
     private func savePrinting() {
+        guard !demo else { return }
         var settings = PrintSettings.load(env: [:])
         settings.enabled = printBox.state == .on
         settings.action = printActionPopup.indexOfSelectedItem == 1 ? .preview : .printDialog
@@ -508,6 +600,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     // MARK: Audio
 
     private func saveAudio() {
+        guard !demo else { return }
         var settings = AudioSettings.load(env: [:])
         settings.enabled = audioBox.state == .on
         settings.microphone = micBox.state == .on
@@ -517,6 +610,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     private func saveCamera() {
+        guard !demo else { return }
         var settings = WebcamSettings.load(env: [:])
         settings.enabled = cameraBox.state == .on
         let index = cameraPopup.indexOfSelectedItem
@@ -541,13 +635,29 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         dropPopup.selectItem(at: AutoReconnect.Mode.allCases.firstIndex(of: drop) ?? 0)
         let overridden = !demo && HelperManager.setting.source == .environment
         dockHint.stringValue = T.dockHint.shown + (overridden ? " " + T.dockOverride.shown : "")
+        quitPopup.selectItem(at: QuitAction.allCases.firstIndex(of: demo ? .ask : QuitAction.stored) ?? 0)
+        offerBox.state = (demo || ReconnectAtStart.stored == .ask) ? .on : .off
         let hotKey = demo ? LauncherHotKey.standard : GlobalHotKey.stored
         shortcutPopup.selectItem(at: LauncherHotKey.choices.firstIndex(of: hotKey) ?? 0)
         let taken = !demo && GlobalHotKey.shared.state == .taken
         shortcutHint.stringValue = T.shortcutHint.shown + (taken ? " " + T.shortcutTaken.shown : "")
     }
 
+    @objc private func generalChanged() { if !loading { saveDockApps() } }
+
+    /// General and the on/off settings of Devices and Display that live in UserDefaults; only what changed is written.
     private func saveDockApps() {
+        guard !demo else { return }
+        let quit = QuitAction.allCases.indices.contains(quitPopup.indexOfSelectedItem) ? QuitAction.allCases[quitPopup.indexOfSelectedItem] : .ask
+        if QuitAction.stored != quit {
+            QuitAction.stored = quit
+            vlog("quit action: \(quit.rawValue)")
+        }
+        let offer: ReconnectAtStart = offerBox.state == .on ? .ask : .never
+        if ReconnectAtStart.stored != offer {
+            ReconnectAtStart.stored = offer
+            vlog("reconnect at start: \(offer.rawValue)")
+        }
         let compress = compressBox.state == .on
         if CompressionSetting.stored != compress {
             CompressionSetting.stored = compress
@@ -575,13 +685,19 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             vlog("helper apps: saved \(on ? "on" : "off"); applies at the next start of ICA Viewer")
         }
         let index = shortcutPopup.indexOfSelectedItem
-        guard LauncherHotKey.choices.indices.contains(index) else { return }
+        guard LauncherHotKey.choices.indices.contains(index), LauncherHotKey.choices[index] != GlobalHotKey.stored else { return }
         GlobalHotKey.shared.change(to: LauncherHotKey.choices[index])
+        let taken = GlobalHotKey.shared.state == .taken
+        shortcutHint.stringValue = T.shortcutHint.shown + (taken ? " " + T.shortcutTaken.shown : "")
+        fitWindow()
     }
 
     // MARK: Camera choice (docs/98b §10.5)
 
-    @objc private func cameraChanged() { cameraPopup.isEnabled = cameraBox.state == .on }
+    @objc private func cameraChanged() {
+        cameraPopup.isEnabled = cameraBox.state == .on
+        if !loading { saveCamera() }
+    }
 
     /// Fills the popup: "Automatic" first, then the connected devices; a stored device that is not connected stays
     /// listed (marked) so the choice is not lost. Discovery only: no device is opened, no permission is asked.
@@ -605,8 +721,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         cameraChanged()
         let note = demo ? nil : CameraDevices.accessHint(listEmpty: devices.isEmpty)
         cameraAccessNote.stringValue = note ?? ""
-        if let grid = cameraGrid, grid.row(at: 25).isHidden != (note == nil) {
-            grid.row(at: 25).isHidden = note == nil
+        if let row = cameraNoteRow, row.isHidden != (note == nil) {
+            row.isHidden = note == nil
             fitWindow()
         }
     }
@@ -631,7 +747,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     /// The microphone goes through the same channel: without session audio there is none.
-    @objc private func audioChanged() { micBox.isEnabled = audioBox.state == .on
+    @objc private func audioChanged() {
+        micBox.isEnabled = audioBox.state == .on
+        if !loading { saveAudio() }
     }
 
     // MARK: Scaling
@@ -654,7 +772,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                client: c > 0 ? .fixed(ScalingSettings.clientChoices[c - 1]) : .auto)
     }
 
-    @objc private func scalingChanged() { updateScalingNote() }
+    @objc private func scalingChanged() {
+        updateScalingNote()
+        if !loading { saveScaling() }
+    }
 
     /// The scaling note: first why the running (else the last) session uses 1x, if it fell back; then
     /// what the current screens get with the chosen settings, also when no session is connected.
@@ -680,27 +801,35 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         fitWindow()
     }
 
-    /// Saves the scaling choice; if running sessions connected with other settings, offers to reconnect
-    /// them now (disconnect and relaunch; never a logoff).
+    /// Saves the scaling choice. Running sessions that connected with other settings keep them; the pane then
+    /// shows a note and Reconnect Now (disconnect and relaunch; never a logoff) instead of an alert.
     private func saveScaling() {
+        guard !demo else { return }
         let settings = selectedScaling
         settings.save()
-        let stale = SessionController.running.filter { $0.differs(from: settings) }
-        guard !stale.isEmpty else { return }
-        let alert = NSAlert()
-        alert.messageText = loc("Reconnect now to apply?", "Jetzt neu verbinden, um die Änderung anzuwenden?")
-        alert.informativeText = loc("Scaling applies when a session connects. Reconnecting disconnects \(stale.map { displayName($0.name) }.joined(separator: ", ")) and connects again with the new scaling; the session is not logged off and your apps keep running.",
-                                    "Die Skalierung gilt beim Verbinden. Beim Neuverbinden wird \(stale.map { displayName($0.name) }.joined(separator: ", ")) getrennt und mit der neuen Skalierung wieder verbunden; die Sitzung wird nicht abgemeldet, die Apps laufen weiter.")
-        alert.addButton(withTitle: loc("Reconnect Now", "Jetzt neu verbinden"))
-        alert.addButton(withTitle: loc("Later", "Später"))
-        if alert.runModal() == .alertFirstButtonReturn {
-            stale.forEach { $0.reconnectToApplySettings() }
-        } else {
-            vlog("scaling: saved \(settings); applies at the next connect")
-        }
+        vlog("scaling: saved \(settings); applies at the next connect")
+        updateStale()
+    }
+
+    private func updateStale() {
+        let settings = selectedScaling
+        let stale = demo ? [] : SessionController.running.filter { $0.differs(from: settings) }
+        guard reconnectRow?.isHidden != stale.isEmpty else { return }
+        reconnectRow?.isHidden = stale.isEmpty
+        fitWindow()
+    }
+
+    @objc private func reconnectNow() {
+        let stale = SessionController.running.filter { $0.differs(from: selectedScaling) }
+        vlog("scaling: reconnecting \(stale.count) session(s) to apply")
+        stale.forEach { $0.reconnectToApplySettings() }
+        reconnectRow?.isHidden = true
+        fitWindow()
     }
 
     private func load() {
+        loading = true
+        defer { loading = false; updateStale() }
         let s = credentials.settings.load()
         gatewayField.stringValue = s.account != nil ? LoginWindowController.shown(s.account, kind: s.accountKind)
             : LoginWindowController.shown(service.gateway, kind: service.accountKind)
@@ -747,6 +876,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     }
 
     @objc private func modeChanged(_ sender: NSButton? = nil) {
+        if sender === promptRadio, !loading, !demo, storedSecretHost != nil {
+            // Applied at once, this deletes the stored secret: ask first (ISO 9241-110 5.6.2.6).
+            confirmForgetSecret()
+            return
+        }
         if sender === totpRadio { promptRadio.state = .off }
         if sender === promptRadio { totpRadio.state = .off }
         let totp = totpRadio.state == .on
@@ -754,11 +888,54 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         // Default: protect the password when the TOTP secret is stored next to it.
         if sender === totpRadio { protectBox.state = .on }
         updatePreview()
+        // The TOTP choice is applied once a valid secret is there (typed now or stored); the prompt choice at once.
+        if sender != nil, !loading, totpRadio.state == .off || !secretField.stringValue.isEmpty || storedSecretHost != nil { saveAccount() }
     }
+
+    /// The host whose TOTP secret is in the Keychain, if any.
+    private var storedSecretHost: String? {
+        guard let host = LoginSettings.accountURL(from: gatewayField.stringValue)?.host ?? service.gateway?.host,
+              credentials.secrets.contains(.totpSecret, host: host) else { return nil }
+        return host
+    }
+
+    private func confirmForgetSecret() {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = loc("Delete the saved TOTP secret?", "Gespeichertes TOTP-Geheimnis löschen?")
+        alert.informativeText = loc("You then enter the passcode at each sign-in. To generate codes again, you need the secret from your IT department.",
+                                    "Danach geben Sie den Passcode bei jeder Anmeldung ein. Um wieder Codes zu erzeugen, brauchen Sie das Geheimnis von Ihrer IT-Abteilung.")
+        alert.addButton(withTitle: loc("Delete", "Löschen"))
+        alert.addButton(withTitle: loc("Cancel", "Abbrechen"))
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if response == .alertFirstButtonReturn {
+                self.totpRadio.state = .off
+                self.promptRadio.state = .on
+                self.modeChanged()
+                self.saveAccount()
+            } else {
+                self.promptRadio.state = .off
+                self.totpRadio.state = .on
+            }
+        }
+    }
+
+    @objc private func accountChanged() { if !loading { saveAccount() } }
 
     @objc private func paramsChanged() {
         previewTOTP = nil
         updatePreview()
+        if !loading, totpRadio.state == .on, storedSecretHost != nil || !secretField.stringValue.isEmpty { saveAccount() }
+    }
+
+    /// Text fields apply when editing ends (Return, Tab, another control, closing the window).
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard !loading, let field = obj.object as? NSTextField else { return }
+        if field === secretField, secretField.stringValue.isEmpty { return }
+        if field === passwordField, passwordField.stringValue.isEmpty { return }
+        if field === periodField, totpRadio.state == .off { return }
+        saveAccount()
     }
 
     private var lengths: [ObjectIdentifier: Int] = [:]
@@ -837,10 +1014,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         status.stringValue = loc("Saved credentials for \(host) were deleted.", "Gespeicherte Anmeldedaten für \(host) wurden gelöscht.")
     }
 
-    @objc private func cancelClicked() { close() }
-
-    @objc private func saveClicked() {
-        if demo { close(); return }
+    /// Address, user name, password and passcode settings: one `apply` (it may ask for Touch ID when the
+    /// password's protection changes). A typed password or secret goes to the Keychain and leaves the field.
+    private func saveAccount() {
+        guard !demo else { return }
         let s = currentSettings
         let password = FieldText.clean(passwordField.stringValue, password: true, final: true)
         let secret = FieldText.clean(secretField.stringValue, password: false, final: true)
@@ -859,22 +1036,24 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                     // A new address keeps the kind `apply` derived (a store path), else it is probed at sign-in.
                     service.setGateway(url, kind: saved.accountKind)
                 }
-                close()
-                saveDriveMapping()
-                savePrinting()
-                saveAudio()
-                saveCamera()
-                saveDockApps()
-                saveScaling()
-            } catch CredentialError.invalidTOTPSecret {
-                status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",
-                                         "Bitte ein gültiges TOTP-Geheimnis (Base32) eingeben oder „Passcode bei jeder Anmeldung eingeben“ wählen.")
-            } catch CredentialError.noGateway {
-                status.stringValue = loc("Enter the gateway or store address first.", "Bitte zuerst die Gateway- oder Store-Adresse eingeben.")
+                if !password.isEmpty || !secret.isEmpty {
+                    clearSecrets()
+                    let host = saved.gatewayHost
+                    let saved = loc("saved (type to replace)", "gespeichert (zum Ersetzen eingeben)")
+                    if !password.isEmpty { passwordField.placeholderString = saved }
+                    if !secret.isEmpty, host != nil { secretField.placeholderString = saved }
+                }
+                status.stringValue = Self.keychainNote
             } catch {
-                status.stringValue = "\(error)"
+                vlog("settings: not saved: \(error)")
+                status.stringValue = UserMessage.text(for: error)
             }
+            fitWindow()
         }
+    }
+
+    static var keychainNote: String {
+        loc("Secrets are stored only in the Keychain (this Mac, no iCloud).", "Geheimnisse liegen nur im Schlüsselbund (dieser Mac, kein iCloud).")
     }
 }
 
@@ -919,4 +1098,15 @@ func scalingSummary(_ layout: ScalingLayout) -> String {
     let percents = layout.monitors.map { "\($0.windowsPercent) %" }.joined(separator: " / ")
     return loc("Session \(layout.width)×\(layout.height) px, client \(scales), Windows \(percents).",
                "Sitzung \(layout.width)×\(layout.height) px, Client \(scales), Windows \(percents).")
+}
+
+/// Settings panes as a toolbar (NSTabViewController, `.toolbar` style); tells the window controller when the pane
+/// changes, so it can set the title and the size.
+final class SettingsTabs: NSTabViewController {
+    var onSelect: (() -> Void)?
+
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        onSelect?()
+    }
 }
