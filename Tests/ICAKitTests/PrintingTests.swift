@@ -579,6 +579,14 @@ private func makePDF(pages: Int, title: String? = nil, password: String? = nil) 
         #expect(PrintTestGate.mayConfirm(confirmEnv: true, dialogGate: ok, screenshotSaved: shot, confirmCreated: shot.addingTimeInterval(-60)) != .proceed)
     }
 
+    @Test func labAutoConfirmOnlyAgainstADirectStore() {
+        // D114: the lab confirms by itself; never through a gateway (the company farm), and only with "lab".
+        #expect(PrintTestGate.labAutoConfirm(confirmValue: "lab", directStore: true))
+        #expect(!PrintTestGate.labAutoConfirm(confirmValue: "lab", directStore: false))
+        #expect(!PrintTestGate.labAutoConfirm(confirmValue: "1", directStore: true))
+        #expect(!PrintTestGate.labAutoConfirm(confirmValue: nil, directStore: true))
+    }
+
     @Test func confirmationFilePerRun() throws {
         let a = PrintTestGate.newRunID(), b = PrintTestGate.newRunID()
         #expect(a != b && a.count == 12)

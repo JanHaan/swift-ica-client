@@ -44,6 +44,13 @@ public enum PrintTestGate {
         return .proceed
     }
 
+    /// `ICA_PRINTTEST_CONFIRM=lab` (D114): the lab confirms itself after the screenshot, but only against a direct store
+    /// (the lab has no gateway and no paper printers; its other printers only offer a Save dialog). Never through a
+    /// gateway (the company farm), whatever the value.
+    public static func labAutoConfirm(confirmValue: String?, directStore: Bool) -> Bool {
+        confirmValue == "lab" && directStore
+    }
+
     /// Date of the confirmation file, or nil. A symlink or anything but a regular file does not count.
     public static func confirmationDate(at url: URL) -> Date? {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),

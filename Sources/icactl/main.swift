@@ -393,6 +393,23 @@ case "cdmtest-explorer":
         fail("\(error)")
     }
 
+case "policyprobe":
+    // icactl policyprobe [resource] — which redirections the host opens for this user (backlog 1.9, PolicyProbe.swift):
+    // clipboard, drives (empty read-only folder), printers, audio playback announced; no input; logoff. Lab only
+    // (ICA_ALLOW_ANY_RESOURCE=1, default "Notepad"). ICA_POLICYPROBE_EXPECT=on|off makes it a pass/fail check.
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("policyprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let probeApp = testApp(args.first ?? "Notepad", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "policyprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == probeApp.resource }) else { fail("no resource named \(probeApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runPolicyProbe(ica: ica, app: probeApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "printtest":
     // icactl printtest [resource] — client printing test, Notepad only (docs/97 §10 L1–L5): announces the PDF-mode
     // CTXCPM module and logs every host command. In a session this run logged on itself: types a test line in
@@ -400,15 +417,19 @@ case "printtest":
     // with ICA_PRINTTEST_CONFIRM=1 and .session/printtest-confirm-<runid> created after that screenshot (the run id is
     // logged) presses Enter and saves the job to .session/printtest.pdf, otherwise Esc. No Ctrl+P at all unless the
     // host sent an ENUM and a *PDF* printer/driver name over CTXCPM (PrintTestGate). Never saves the document.
-    let name = args.first ?? "Notepad"
-    guard name == "Notepad" else { fail("printtest is limited to \"Notepad\"") }
+    // Lab (D114): `printtest WordPad` with ICA_ALLOW_ANY_RESOURCE=1; ICA_PRINTTEST_CONFIRM=lab confirms by itself after the
+    // screenshot, only against a direct store.
+    let printApp = testApp(args.first ?? "Notepad", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "printtest")
+    let confirmValue = ProcessInfo.processInfo.environment["ICA_PRINTTEST_CONFIRM"]
+    let labConfirm = PrintTestGate.labAutoConfirm(confirmValue: confirmValue, directStore: storeFront != nil)
+    if confirmValue == "lab", !labConfirm { fail("ICA_PRINTTEST_CONFIRM=lab only against a direct (lab) store") }
     let store = storeClient()
     do {
         let resources = try await store.resources()
-        guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
+        guard let resource = resources.first(where: { $0.name == printApp.resource }) else { fail("no resource named \(printApp.resource)") }
         guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runPrintTest(ica: ica, confirm: ProcessInfo.processInfo.environment["ICA_PRINTTEST_CONFIRM"] == "1")
+        try await runPrintTest(ica: ica, confirm: confirmValue == "1" || labConfirm, labConfirm: labConfirm, app: printApp)
     } catch {
         fail("\(error)")
     }
@@ -644,9 +665,12 @@ default:
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl cdmtest-explorer [resource] drive mapping in a lab Explorer ("File Explorer"): temp folder as M:, list, copy
                                          a file inside it, mkdir, delete both, links leading outside; Mac-side checks
-      icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
+      icactl policyprobe [resource]      lab: which redirections the host opens (clipboard, drives, printers, audio), no
+                                         input, logoff; ICA_POLICYPROBE_EXPECT=on|off for pass/fail
+      icactl printtest [resource]        printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
                                          .session/printtest-dialog.png, then Esc; ICA_PRINTTEST_CONFIRM=1: Enter only once
-                                         .session/printtest-confirm-<runid> appears (120 s), job to .session/printtest.pdf
+                                         .session/printtest-confirm-<runid> appears (120 s), job to .session/printtest.pdf;
+                                         lab: a lab app (WordPad) and ICA_PRINTTEST_CONFIRM=lab (direct store only)
       icactl audiotest [resource]        audio test in "Notepad": CTXCAM log (INIT, credits, formats), Notepad's
                                          "cannot find" sound via keys, decoded audio to .session/audiotest.wav; never
                                          opens the microphone; ICA_AUDIOTEST_PLAY=1 also plays it aloud
@@ -2464,7 +2488,7 @@ func runCDMTest(ica: ICAFile, save: Bool) async throws {
 
 // MARK: - Printing test (docs/97 §10)
 
-func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
+func runPrintTest(ica: ICAFile, confirm: Bool, labConfirm: Bool = false, app: TestApp) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let dialogPNG = sessionDir.appendingPathComponent("printtest-dialog.png")
     let jobPDF = sessionDir.appendingPathComponent("printtest.pdf")
@@ -2578,11 +2602,7 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
 
     try await session.start()
     let notepad: () -> UInt32? = {
-        appWindows.first { id in
-            if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == "notepad.exe" }
-            let key = windowsSeen.appKey(id)?.lowercased() ?? ""
-            return key.contains("notepad") || key == "app:editor abc"
-        }
+        appWindows.first { app.matches(executable: windowsSeen.single($0, seamless.model), appKey: windowsSeen.appKey($0)) }
     }
     // L1/L2: what the host sends on ch 4 without any print (it should speak first, at session start).
     let found = await waitFor(session, 150) { logon.isFresh && notepad() != nil }
@@ -2606,12 +2626,24 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
         try await Task.sleep(nanoseconds: 1_000_000_000)
         key(0x01)
     } else if let target {
-        let scratch = NotepadScratch(session: session, target: target)
-        if try await scratch.open() {
+        // Notepad: a scratch tab of this run (NotepadScratch); other apps (WordPad): the blank document of the fresh logon.
+        let scratch: NotepadScratch? = app.executables.contains("notepad.exe") ? NotepadScratch(session: session, target: target) : nil
+        var ready = true
+        if let scratch {
+            ready = try await scratch.open()
+        } else {
+            session.send { _, twi in twi.activate(windowId: target) }
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            let others = await onSession(session) { seamless.model.windows.values.filter { $0.kind == .appWindow && $0.id != target }.map(\.title) }
+            let title = await onSession(session) { seamless.model.windows[target]?.title ?? "" }
+            ready = others.isEmpty && app.isDocumentTitle(title)
+            say("\(app.resource) window \(target) \"\(title)\"; other windows \(others)\(ready ? "" : ": no input")")
+        }
+        if ready {
             let line = "CTXCPM printtest " + ISO8601DateFormatter().string(from: Date())
             say("(a) type a test line (\(line.count) chars), Ctrl+P")
             type(line)
-            scratch.markTyped()
+            scratch?.markTyped()
             try await Task.sleep(nanoseconds: 1_000_000_000)
             let before = await onSession(session) { Set(windowsAdded.map(\.id)) }
             key(0x19, ctrl: true)
@@ -2629,7 +2661,10 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
                 // Gate 2: a confirmation file for THIS run, created after the orchestrator viewed THIS screenshot.
                 let confirmFile = sessionDir.appendingPathComponent(PrintTestGate.confirmFileName(runID: runID))
                 var created: Date?
-                if confirm, shot != nil {
+                if labConfirm, let shot {
+                    say("lab: confirmed by ICA_PRINTTEST_CONFIRM=lab (direct store, no paper printers)")
+                    created = shot
+                } else if confirm, shot != nil {
                     say("waiting up to \(Int(PrintTestGate.confirmTimeout)) s for \(confirmFile.path) (run \(runID)); create it only after checking "
                         + "that \(dialogPNG.lastPathComponent) shows the client PDF printer selected")
                     let deadline = Date().addingTimeInterval(PrintTestGate.confirmTimeout)
@@ -2668,10 +2703,12 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
                 try? FileManager.default.removeItem(at: confirmFile)
                 try await Task.sleep(nanoseconds: 2_000_000_000)
             }
-            steps.append(try await scratch.clear())
-            say(steps.last!)
+            if let scratch {
+                steps.append(try await scratch.clear())
+                say(steps.last!)
+            }
         } else {
-            steps.append("Ctrl+N: an unexpected window appeared; Esc, no further input")
+            steps.append(scratch != nil ? "Ctrl+N: an unexpected window appeared; Esc, no further input" : "\(app.resource): not a blank document alone; no input")
             say(steps.last!)
         }
     }
@@ -2710,6 +2747,10 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
     say("fresh logon: \(fresh)")
     for step in steps { say("  " + step) }
     say("end: \(ending)")
+    // PASS: one job that is a usable PDF, and the logoff.
+    let pdfOK = await onSession(session) { jobs.first.map { if case .success = PrintDocument.inspect($0.data) { true } else { false } } ?? false }
+    let pass = fresh && pdfOK && ending.hasPrefix("logged off")
+    say("RESULT: \(pass ? "PASS" : "FAIL") printtest \(app.resource): fresh \(fresh), PDF job \(pdfOK), end: \(ending)")
 }
 
 // MARK: - Audio test (docs/98 §14)
