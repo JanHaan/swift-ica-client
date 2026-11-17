@@ -43,6 +43,9 @@ final class RefusedFeatureMonitor: @unchecked Sendable {
     nonisolated(unsafe) private static var registry: [ObjectIdentifier: RefusedFeatureMonitor] = [:]
 
     private let app: String
+    /// The session runs without TLS (a direct store's file with SSLEnable off; a gateway account never connects so,
+    /// D126): one more line, first, in the same small style (security review L-05). No notice, no setting.
+    private let unencrypted: Bool
     /// Main thread only.
     private var status: RedirectionStatus
     private var key: ObjectIdentifier?
@@ -51,8 +54,9 @@ final class RefusedFeatureMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var pendingChannels: Set<UInt8>
 
-    init(app: String, requested: Set<RedirectionFeature>) {
+    init(app: String, requested: Set<RedirectionFeature>, unencrypted: Bool = false) {
         self.app = app
+        self.unencrypted = unencrypted
         status = RedirectionStatus(requested: requested)
         pendingChannels = Set(requested.map(\.channel))
         vlog("redirections announced: " + RedirectionFeature.allCases.filter(requested.contains).map(\.rawValue).joined(separator: ", "))
@@ -70,9 +74,12 @@ final class RefusedFeatureMonitor: @unchecked Sendable {
     }
 
     /// Main thread: Connection Center lines of an open session (empty when nothing is refused).
+    /// Connection Center line for a session without TLS (wording with mac-E, backlog "Security (mac-F)").
+    static var unencryptedLine: String { loc("Connection: not encrypted", "Verbindung: nicht verschlüsselt") }
+
     static func lines(for key: ObjectIdentifier) -> [String] {
         guard let m = registry[key] else { return [] }
-        return m.status.refused(at: ProcessInfo.processInfo.systemUptime).map(\.blockedLine)
+        return (m.unencrypted ? [unencryptedLine] : []) + m.status.refused(at: ProcessInfo.processInfo.systemUptime).map(\.blockedLine)
     }
 
     func register(_ owner: AnyObject) {

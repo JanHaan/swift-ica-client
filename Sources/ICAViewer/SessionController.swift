@@ -167,7 +167,7 @@ final class SessionController: NSObject {
             vlog("session \(logName(name)): the server's ICA file asks for an unencrypted connection (TLS off, "
                  + "\(session.plan.route.rawValue) route); keystrokes and screen use basic ICA encryption only")
         }
-        refused = RefusedFeatureMonitor(app: name, requested: RefusedFeatureMonitor.requested(session))
+        refused = RefusedFeatureMonitor(app: name, requested: RefusedFeatureMonitor.requested(session), unencrypted: !session.plan.tls)
         super.init()
         refused.register(self)
         keyboard.controller = self
