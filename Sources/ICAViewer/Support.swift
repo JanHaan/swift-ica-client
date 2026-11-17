@@ -279,7 +279,7 @@ func displayName(_ name: String) -> String {
     Demo.screenshotMode ? DisplayName.censored(name, replacing: censorRules) : name
 }
 
-/// Login, resource list and launch through the gateway.
+/// Login, resource list and launch through the gateway, or directly at a StoreFront store (docs/16).
 /// Logon: with CITRIX_USERNAME and CITRIX_PASSWORD in `.env`, non-interactively as `icactl` does
 /// (automated tests); otherwise through the login window, with the settings and Keychain as source.
 final class StoreService: @unchecked Sendable {
@@ -291,11 +291,27 @@ final class StoreService: @unchecked Sendable {
     let http = HTTPClient()
     let env: Env?
     let credentials: LoginCredentials
-    /// Gateway root URL (`https://host/`); nil until the user enters one.
+    /// The account address: a gateway root URL (`https://host/`), or a StoreFront store URL (`accountKind`);
+    /// nil until the user enters one.
     private(set) var gateway: URL?
+    /// What `gateway` points at; nil until probed (`resolveAccount`).
+    private(set) var accountKind: AccountKind?
     /// The login window; set by the app delegate. Throws if the user cancels.
     var interactiveLogon: (@MainActor () async throws -> Void)?
-    var store: StoreClient? { gateway.map { StoreClient(http: http, base: URL(string: "welcome/", relativeTo: $0)!.absoluteURL) } }
+    var store: StoreClient? {
+        guard let gateway else { return nil }
+        if accountKind == .storeFront {
+            // Direct store (docs/16 §2): an expired store session signs in again (login window or .env).
+            return StoreClient(http: http, directBase: gateway) { [weak self] in try await self?.logon() }
+        }
+        return StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    }
+
+    /// The forms logon for the account: nFactor at the gateway, or explicit authentication at the store.
+    func formLogon() -> FormLogonFlow? {
+        guard let gateway else { return nil }
+        return accountKind == .storeFront ? StoreFrontLogon(http: http, base: gateway) : GatewayLogon(http: http, base: gateway)
+    }
 
     /// ICAVIEWER_LOGIN_AUTOFILL=1: always use the login window (test mode, see LoginWindowController).
     static let autofill = ProcessInfo.processInfo.environment["ICAVIEWER_LOGIN_AUTOFILL"] == "1"
@@ -312,26 +328,41 @@ final class StoreService: @unchecked Sendable {
         credentials = LoginCredentials(settings: UserDefaultsSettingsStore(), secrets: keychain)
         credentials.log = { vlog($0) }
         let settings = Demo.enabled ? LoginSettings() : credentials.settings.load()
+        // CITRIX_STOREFRONT_URL: a store without a gateway (docs/16), as in icactl; it wins over CITRIX_GATEWAY_URL.
+        let envStore = env?["CITRIX_STOREFRONT_URL"].flatMap(LoginSettings.storeFrontURL(from:))
         let envGateway = env?["CITRIX_GATEWAY_URL"].flatMap(LoginSettings.gatewayURL(from:))
-        if env?["CITRIX_USERNAME"] != nil && env?["CITRIX_PASSWORD"] != nil && !Self.autofill {
-            gateway = envGateway ?? settings.gateway
-        } else {
-            gateway = settings.gateway ?? envGateway
-        }
-        vlog("gateway: \(gateway?.host ?? "none"); logon: \(usesEnvCredentials ? ".env" : "login window")")
+        let envAccount: (URL, AccountKind?)? = envStore.map { ($0, $0.path.lowercased().contains("/citrix/") ? .storeFront : nil) }
+            ?? envGateway.map { ($0, .gateway) }
+        // A saved address without a kind predates direct mode: a gateway (no probe, the gateway path is unchanged).
+        let saved: (URL, AccountKind?)? = settings.account.map { ($0, settings.accountKind ?? .gateway) }
+        let chosen = env?["CITRIX_USERNAME"] != nil && env?["CITRIX_PASSWORD"] != nil && !Self.autofill
+            ? envAccount ?? saved : saved ?? envAccount
+        gateway = chosen?.0
+        accountKind = chosen?.1
+        vlog("account: \(gateway?.host ?? "none") (\(accountKind?.rawValue ?? "kind not probed")); logon: \(usesEnvCredentials ? ".env" : "login window")")
         http.trace = { vlog("http " + $0) }   // paths and cookie names only (HTTPClient redacts query values)
         if Demo.enabled { return }   // demo mode touches neither the disk nor the network
         try? FileManager.default.createDirectory(at: Paths.sessionDir, withIntermediateDirectories: true)
         try? http.loadCookies(from: Paths.cookieFile)
     }
 
-    /// Changes the gateway and stores it in the settings.
-    func setGateway(_ url: URL) {
+    /// Changes the account address (kind nil: probe at the next `resolveAccount`) and stores it in the settings.
+    func setGateway(_ url: URL, kind: AccountKind? = nil) {
         if url.host != gateway?.host { http.clearCookies() }
         gateway = url
+        accountKind = kind
         var settings = credentials.settings.load()
         settings.gatewayURL = url.absoluteString
+        settings.accountKind = kind
         credentials.settings.save(settings)
+    }
+
+    /// Probes an address whose kind is not known yet (docs/16 §3): gateway logon page or StoreFront store.
+    func resolveAccount() async throws {
+        guard let url = gateway, accountKind == nil else { return }
+        let found = try await AccountProbe(http: http).probe(url)
+        vlog("account: \(found.url.host ?? "?") is a \(found.kind == .gateway ? "NetScaler Gateway" : "StoreFront store (direct)")")
+        setGateway(found.url, kind: found.kind)
     }
 
     /// Logs on at the gateway (`.env` or the login window).
@@ -345,10 +376,18 @@ final class StoreService: @unchecked Sendable {
         try? http.saveCookies(to: Paths.cookieFile)
     }
 
-    /// nFactor logon with username, password and TOTP passcode from `.env`.
+    /// nFactor logon with username, password and TOTP passcode from `.env`; at a direct store the explicit logon
+    /// with username, password and CITRIX_DOMAIN (docs/16 §2.3).
     private func envLogon() async throws {
+        try await resolveAccount()
         guard let env, let gateway, let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
             throw Failure.config("CITRIX_USERNAME and CITRIX_PASSWORD must be set in .env")
+        }
+        if accountKind == .storeFront {
+            let qualified = user.contains("\\") || user.contains("@") ? user : Self.envUsername(env, user)
+            try await StoreFrontLogon(http: http, base: gateway)
+                .logon(.init(username: qualified, password: password, domain: env["CITRIX_DOMAIN"]))
+            return
         }
         let totp = Self.envTOTP(env)
         guard let totp else { throw Failure.config("CITRIX_TOTP_SECRET must be set in .env") }

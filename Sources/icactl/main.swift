@@ -43,14 +43,37 @@ func printResponse(_ response: HTTPClient.Response, limit: Int) {
 
 let env: Env
 do { env = try Env(path: envPath) } catch { fail("cannot read \(envPath)") }
-guard let gatewayText = env["CITRIX_GATEWAY_URL"], !gatewayText.isEmpty else {
-    fail("CITRIX_GATEWAY_URL is not set: add CITRIX_GATEWAY_URL=https://<your gateway> to \(envPath)")
-}
-guard let gateway = URL(string: gatewayText + "/"), gateway.scheme == "https", gateway.host != nil else {
-    fail("bad CITRIX_GATEWAY_URL (expected https://<host>)")
-}
 try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
 let http = HTTPClient()
+/// Direct mode (docs/16): CITRIX_STOREFRONT_URL names the store (its Receiver for Web site, e.g.
+/// https://storefront.example/Citrix/StoreWeb/, or just the server, which is probed); no gateway. It wins over
+/// CITRIX_GATEWAY_URL. `gateway` is then the StoreFront origin (for `req` and the native API).
+let storeFront: URL? = await {
+    guard let text = env["CITRIX_STOREFRONT_URL"] else { return nil }
+    guard let url = LoginSettings.storeFrontURL(from: text) else { fail("bad CITRIX_STOREFRONT_URL (expected http(s)://<host>/Citrix/<Store>Web/)") }
+    if url.path.lowercased().contains("/citrix/") { return url }
+    do {
+        let found = try await AccountProbe(http: http).probe(url)
+        guard found.kind == .storeFront else { fail("CITRIX_STOREFRONT_URL points at a NetScaler Gateway; set CITRIX_GATEWAY_URL instead") }
+        FileHandle.standardError.write(Data("store: \(found.url.path)\n".utf8))
+        return found.url
+    } catch {
+        fail("\(error)")
+    }
+}()
+let gateway: URL
+if let storeFront {
+    gateway = AccountProbe.root(of: storeFront)
+} else {
+    guard let gatewayText = env["CITRIX_GATEWAY_URL"], !gatewayText.isEmpty else {
+        fail("CITRIX_GATEWAY_URL is not set: add CITRIX_GATEWAY_URL=https://<your gateway> (or CITRIX_STOREFRONT_URL=<store URL> "
+             + "for a store without a gateway) to \(envPath)")
+    }
+    guard let url = URL(string: gatewayText + "/"), url.scheme == "https", url.host != nil else {
+        fail("bad CITRIX_GATEWAY_URL (expected https://<host>)")
+    }
+    gateway = url
+}
 try? http.loadCookies(from: cookiePath)
 // The store's device id cookie survives the empty-jar gateway logon (docs/90 §8.6); ICA_NO_DEVICE_ID=1
 // turns that off (§11 item 7: is the id new after an empty-jar logon?).
@@ -67,6 +90,20 @@ let nativeMode = command == "native" || ProcessInfo.processInfo.environment["ICA
 if nativeMode && http.userAgent == nil { http.userAgent = NativeStoreClient.defaultUserAgent }
 
 switch command {
+case "login" where storeFront != nil:
+    // Direct mode: explicit logon at the store (docs/16 §2); the native API logs on per token request instead.
+    if nativeMode {
+        print("direct native mode: no login step; `icactl native …` logs on with CITRIX_USERNAME/CITRIX_PASSWORD")
+        break
+    }
+    do {
+        try await StoreFrontLogon(http: http, base: storeFront!).logon(envCredentials())
+        try http.saveCookies(to: cookiePath)
+        print("logged on at the store; cookies: \(http.cookieNames.joined(separator: ", "))")
+    } catch {
+        fail("\(error)")
+    }
+
 case "login":
     guard let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
         fail("CITRIX_USERNAME and CITRIX_PASSWORD must be set in .env")
@@ -122,7 +159,7 @@ case "req":
     }
 
 case "list":
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         try http.saveCookies(to: cookiePath)
@@ -139,7 +176,7 @@ case "list":
 case "launch":
     // icactl launch <resource name>  — saves the ICA file to .session/last.ica and prints it redacted
     guard let name = args.first ?? env["CITRIX_RESOURCE"] else { fail("usage: icactl launch <resource name>") }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name })
@@ -165,7 +202,7 @@ case "connect", "session":
         fail("live tests are limited to \"Calculator\"")
     }
     let seconds = Double(ProcessInfo.processInfo.environment["ICA_DUMP_SECONDS"] ?? "") ?? 20
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
@@ -200,7 +237,7 @@ case "droptest":
     let blackhole = ProcessInfo.processInfo.environment["ICA_TEST_BLACKHOLE_AFTER"] != nil
     let dropEnv = ProcessInfo.processInfo.environment["ICA_TEST_DROP_AFTER"] ?? ProcessInfo.processInfo.environment["ICA_DROP_AFTER"]
     let dropAfter = blackhole ? nil : dropEnv.flatMap(Double.init) ?? 15
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
@@ -220,7 +257,7 @@ case "cliptest":
     // (Ctrl+A, Ctrl+C, compare). Input only in a session this run logged on itself; never saves.
     let name = args.first ?? "Notepad"
     guard name == "Notepad" else { fail("cliptest is limited to \"Notepad\"") }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
@@ -305,7 +342,7 @@ case "cdmtest":
     // \\Client\M$\cdmtest-saved.txt. Only paths on the mapped drive are ever typed.
     let name = args.first ?? "Notepad"
     guard name == "Notepad" else { fail("cdmtest is limited to \"Notepad\"") }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
@@ -325,7 +362,7 @@ case "printtest":
     // host sent an ENUM and a *PDF* printer/driver name over CTXCPM (PrintTestGate). Never saves the document.
     let name = args.first ?? "Notepad"
     guard name == "Notepad" else { fail("printtest is limited to \"Notepad\"") }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
@@ -355,7 +392,7 @@ case "audiotest":
     if !soundApps.contains(name), ProcessInfo.processInfo.environment["ICA_AUDIOTEST_KEYS"] != nil {
         fail("ICA_AUDIOTEST_KEYS applies only to the Sound apps")
     }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         // Validate the sequence before anything is launched (layout-independent check; the real parse uses the
         // session's layout below).
@@ -382,7 +419,7 @@ case "camtest":
     if let v = ProcessInfo.processInfo.environment["ICA_WEBCAM_SOURCE"], v.lowercased() != "synthetic" {
         fail("icactl has no camera path: ICA_WEBCAM_SOURCE may only be \"synthetic\"")
     }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
@@ -400,7 +437,7 @@ case "sharetest":
     // never connected (its tickets just expire). Logs the handshake, the request bytes, the status and the new app's
     // window. No input. Logs off only its own fresh session; a reconnect is only disconnected and nothing is launched.
     guard args.isEmpty else { fail("sharetest takes no arguments (Notepad, then Calculator)") }
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let first = resources.first(where: { $0.name == "Notepad" }) else { fail("no resource named Notepad") }
@@ -423,7 +460,7 @@ case "sessions":
 case "resources":
     // icactl resources [filter] — read-only store resource list (names, optionally filtered, case-insensitive).
     let filter = args.first?.lowercased()
-    let store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+    let store = storeClient()
     do {
         let resources = try await store.resources()
         let names = resources.map(\.name).filter { filter == nil || $0.lowercased().contains(filter!) }.sorted()
@@ -520,7 +557,9 @@ case "native":
 default:
     print("""
     usage:
-      icactl login                       nFactor logon at the gateway, saves cookies in .session/
+      icactl login                       nFactor logon at the gateway, saves cookies in .session/; with
+                                         CITRIX_STOREFRONT_URL (no gateway, docs/16): explicit logon at the store
+                                         (CITRIX_USERNAME, CITRIX_PASSWORD, CITRIX_DOMAIN); http:// allowed for a lab
       icactl req GET|POST <path> [k=v]   request with saved cookies (bodies redacted)
       icactl cookies                     list saved cookie names
       icactl session [resource]          launch, logon, capture to .session/last/ (ICA_CAPTURE_REPLAY=1: .session/replay/), log off
@@ -1899,6 +1938,11 @@ func nativeStoreClient() -> NativeStoreClient {
         deviceId: NativeDeviceId.loadOrCreate(path: sessionDir.appendingPathComponent("native-device-id").path),
         storePath: environment["ICA_NATIVE_STORE"].flatMap { $0.isEmpty ? nil : $0 } ?? env["CITRIX_STORE_PATH"])
     store.launcher = environment["ICA_NATIVE_LAUNCHER"].flatMap { $0.isEmpty ? nil : $0 }
+    if storeFront != nil {
+        // Direct (docs/16 §2.4): ExplicitForms with the .env credentials instead of the gateway session.
+        store.direct = true
+        store.explicitCredentials = envCredentials()
+    }
     // ICA_NATIVE_TRACE=1: token-flow trace on stderr (paths, realms, reasons; never tokens).
     if environment["ICA_NATIVE_TRACE"] == "1" {
         store.trace = { FileHandle.standardError.write(Data(("native: " + $0 + "\n").utf8)) }
@@ -1912,7 +1956,26 @@ func saveICA(_ text: String, as name: String) {
     FileManager.default.createFile(atPath: path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
 }
 
-func storeClient() -> StoreClient { StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL) }
+/// The web store: behind the gateway under /welcome/, or the direct store (docs/16), which logs on again with the
+/// `.env` credentials when its session has expired.
+func storeClient() -> StoreClient {
+    guard let storeFront else { return StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL) }
+    return StoreClient(http: http, directBase: storeFront) {
+        try await StoreFrontLogon(http: http, base: storeFront).logon(envCredentials())
+        try? http.saveCookies(to: cookiePath)
+    }
+}
+
+/// CITRIX_USERNAME, CITRIX_PASSWORD and CITRIX_DOMAIN for an explicit store logon (docs/16 §2.3): the user name as
+/// `DOMAIN\user` unless it already has a domain or is a UPN; a separate domain field gets CITRIX_DOMAIN.
+func envCredentials() -> GatewayLogon.Credentials {
+    guard let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
+        fail("CITRIX_USERNAME and CITRIX_PASSWORD must be set in .env")
+    }
+    let domain = env["CITRIX_DOMAIN"]
+    let qualified = user.contains("\\") || user.contains("@") ? user : domain.map { "\($0)\\\(user)" } ?? user
+    return GatewayLogon.Credentials(username: qualified, password: password, domain: domain)
+}
 
 /// Client names our sessions report to the VDA: the WD default, and the last saved ICA file's.
 func ourClientNames() -> Set<String> {

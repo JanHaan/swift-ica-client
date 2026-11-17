@@ -1,7 +1,9 @@
 import Foundation
 
 /// The StoreFront Store Services API ("native" store, as used by the Workspace app), reached through the
-/// NetScaler Gateway session (docs/15-native-store-launch.md). The web `StoreClient` stays unchanged.
+/// NetScaler Gateway session (docs/15-native-store-launch.md), or directly with explicit authentication (`direct`,
+/// docs/16-direct-mode.md §2.4: the `ExplicitForms` protocol choice, a Common Forms conversation). The web
+/// `StoreClient` stays unchanged.
 ///
 /// Every request goes to the gateway origin with the path of the StoreFront URL (docs/15 §0, §2), carries
 /// the gateway session cookie (from the jar), `X-Citrix-Gateway` and a `Citrix-TransactionId`, and a
@@ -29,6 +31,8 @@ public final class NativeStoreClient: @unchecked Sendable {
         case http(String, Int, String?)
         case unexpected(String)
         case noGatewayProtocol([String])
+        case noExplicitProtocol([String])
+        case logon(String)
         case launch(String)
 
         public var description: String {
@@ -38,6 +42,9 @@ public final class NativeStoreClient: @unchecked Sendable {
             case .unexpected(let text): "unexpected store response: \(text)"
             case .noGatewayProtocol(let offered):
                 "the store offers no gateway pass-through protocol (offered: \(offered.joined(separator: ", ")))"
+            case .noExplicitProtocol(let offered):
+                "the store offers no ExplicitForms protocol (offered: \(offered.joined(separator: ", ")))"
+            case .logon(let text): "store logon failed: \(text)"
             case .launch(let text): "launch failed: \(text)"
             }
         }
@@ -78,6 +85,11 @@ public final class NativeStoreClient: @unchecked Sendable {
     public var storeFrontOrigin: URL?
     /// Non-secret token-flow trace (paths, realms, reasons, statuses); never tokens or bodies.
     public var trace: ((String) -> Void)?
+    /// Direct to StoreFront (docs/16 §2.4): `gateway` is the StoreFront origin, no `X-Citrix-Gateway` header, and the
+    /// primary token comes from the `ExplicitForms` protocol with `explicitCredentials`.
+    public var direct = false
+    /// User name (`DOMAIN\user` or UPN), password, optional domain for the `ExplicitForms` conversation. Memory only.
+    public var explicitCredentials: GatewayLogon.Credentials?
 
     var transport: Transport
     /// Tokens by realm (service id). Never logged.
@@ -147,7 +159,9 @@ public final class NativeStoreClient: @unchecked Sendable {
     // MARK: Requests
 
     var baseHeaders: [String: String] {
-        ["X-Citrix-Gateway": gateway.host ?? "", "Citrix-TransactionId": UUID().uuidString.lowercased()]
+        var h = ["Citrix-TransactionId": UUID().uuidString.lowercased()]
+        if !direct { h["X-Citrix-Gateway"] = gateway.host ?? "" }
+        return h
     }
 
     /// One request; on a CitrixAuth challenge obtains a token (§1.2) and resends, at most twice.
@@ -223,12 +237,16 @@ public final class NativeStoreClient: @unchecked Sendable {
         if response.status == 300 {
             let choices = Self.parseChoices(response.body)
             offeredProtocols = choices.map(\.protocol)
-            guard let choice = Self.gatewayProtocols.lazy.compactMap({ name in choices.first { $0.protocol == name } }).first,
+            let wanted = direct ? ["ExplicitForms"] : Self.gatewayProtocols
+            guard let choice = wanted.lazy.compactMap({ name in choices.first { $0.protocol == name } }).first,
                   let choiceURL = URL(string: choice.location) else {
-                throw Failure.noGatewayProtocol(offeredProtocols)
+                throw direct ? Failure.noExplicitProtocol(offeredProtocols) : Failure.noGatewayProtocol(offeredProtocols)
             }
             lastProtocol = choice.protocol
             response = try await postToken(throughGateway(choiceURL), body: body, accept: Self.protocolAccept)
+            if choice.protocol == "ExplicitForms" {
+                response = try await explicitForms(response, start: throughGateway(choiceURL))
+            }
             trace?("\(choice.protocol) → \(response.status)")
         }
         guard response.status == 200, let token = Self.parseTokenResponse(response.body) else {
@@ -238,6 +256,37 @@ public final class NativeStoreClient: @unchecked Sendable {
         }
         tokens[challenge.realm] = token
         trace?("token for realm \(challenge.realm) (depth \(depth))")
+    }
+
+    /// The Common Forms conversation that the `ExplicitForms` start answered with (AUTH `common-forms-authentication-api`
+    /// [P]): fill each form from `explicitCredentials` and post it to its `PostBack` until the server answers with the
+    /// `requesttokenresponse` (the primary token). Never re-posts a rejected password.
+    func explicitForms(_ first: HTTPClient.Response, start: URL) async throws -> HTTPClient.Response {
+        var response = first
+        var posted: Set<String> = []
+        for _ in 0..<6 {
+            if response.status == 200, Self.parseTokenResponse(response.body) != nil { return response }
+            guard response.status == 200 else { return response }
+            guard let credentials = explicitCredentials else { throw Failure.logon("no credentials for ExplicitForms") }
+            let document: FormResponse
+            do { document = try FormResponse(response) } catch { throw Failure.unexpected("ExplicitForms answer is not a form") }
+            let form = LogonForm(document, strings: LogonStrings(language: "en"), postedIDs: posted)
+            trace?("ExplicitForms result=\(document.result) fields=\(form.summary)")
+            guard ["more-info", "update-credentials"].contains(document.result), !form.postBack.isEmpty else {
+                throw Failure.logon(form.errors.isEmpty ? "result \(document.result)" : form.errors.joined(separator: " "))
+            }
+            if form.isRePrompt { throw Failure.logon(form.errors.isEmpty ? "credentials rejected" : form.errors.joined(separator: " ")) }
+            let values: [String: String]
+            do { values = try GatewayLogon.values(for: form, credentials) } catch { throw Failure.logon("\(error)") }
+            let fields = GatewayLogon.encode(form, values: values, button: nil)
+            posted.formUnion(form.fields.filter(\.isCredential).map(\.id))
+            guard let target = URL(string: form.postBack, relativeTo: start)?.absoluteURL else { throw Failure.unexpected("bad PostBack") }
+            var headers = baseHeaders
+            headers["Accept"] = Self.protocolAccept
+            response = try await transport("POST", throughGateway(target), headers, Data(HTTPClient.formEncode(fields).utf8),
+                                           "application/x-www-form-urlencoded")
+        }
+        throw Failure.logon("too many ExplicitForms forms")
     }
 
     func postToken(_ url: URL, body: Data, accept: String) async throws -> HTTPClient.Response {

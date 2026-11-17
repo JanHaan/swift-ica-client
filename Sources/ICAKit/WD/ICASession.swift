@@ -1,9 +1,10 @@
 import Foundation
 
-/// One ICA session through the gateway: TLS → CGP bind (STA ticket) → TcpProxy channel →
-/// ICA detect → Winstation Driver, with the Thinwire (`CTXTW`, ch 9) and seamless (`CTXTWI`, ch 12)
-/// engines registered. The CGP transport resumes the session after a dead link (docs/20 §3.12);
-/// nothing above CGP notices except that user input is dropped while suspended.
+/// One ICA session: through the gateway TLS → CGP bind (STA ticket) → TcpProxy channel → ICA detect →
+/// Winstation Driver; or direct to the VDA (docs/16 §4): TCP or TLS, then CGP without a ticket or raw ICA
+/// (`ICAConnectPlan`). The Thinwire (`CTXTW`, ch 9) and seamless (`CTXTWI`, ch 12) engines are
+/// registered. The CGP transport resumes the session after a dead link (docs/20 §3.12); nothing above
+/// CGP notices except that user input is dropped while suspended. Raw ICA has no resume.
 ///
 /// Threading: everything (transport, WD, both engines) runs on one serial queue, the session queue.
 /// All engine callbacks (`thinwire.onUpdate/onPointer/onInit`, `seamless.onEvent`) and `onEvent` are
@@ -11,8 +12,11 @@ import Foundation
 /// engines from elsewhere must go through `perform`.
 public final class ICASession: @unchecked Sendable {
     public enum Failure: Error, CustomStringConvertible {
-        case notGatewayFile
-        public var description: String { "ICA file lacks SSLProxyHost/Address/CGPSecurityTicket" }
+        /// The ICA file cannot be connected (no `Address`, or a server requirement we do not support).
+        case unusableFile(String)
+        public var description: String {
+            switch self { case .unusableFile(let why): "cannot connect this ICA file: \(why)" }
+        }
     }
 
     public enum Event {
@@ -64,6 +68,8 @@ public final class ICASession: @unchecked Sendable {
     public let extraEngines: [VirtualChannelEngine]
     public let host: String
     public let port: UInt16
+    /// Route, socket and framing chosen from the ICA file (docs/16 §4).
+    public let plan: ICAConnectPlan
     public var onEvent: (Event) -> Void = { _ in }
     /// Thinwire INIT (session queue), after the session's own handling. Use this instead of
     /// `thinwire.onInit`, which the session owns.
@@ -97,12 +103,9 @@ public final class ICASession: @unchecked Sendable {
                 cdm: CDMEngine.Config? = nil, printing: PrinterEngine.Config? = nil, audio: AudioEngine.Config? = nil,
                 webcam: WebcamEngine.Config? = nil, control: ControlEngine.Config? = nil, gdt: GDTEngine.Config? = nil,
                 extraEngines: [VirtualChannelEngine] = [], acr: ACRReconnect? = nil) throws {
-        guard let proxy = ica["SSLProxyHost"], let ticket = ica["Address"], ica.bool("CGPSecurityTicket") else {
-            throw Failure.notGatewayFile
-        }
-        let colon = proxy.lastIndex(of: ":")
-        host = colon.map { String(proxy[..<$0]) } ?? proxy
-        port = colon.flatMap { UInt16(proxy[proxy.index(after: $0)...]) } ?? 443
+        do { plan = try ICAConnectPlan(ica: ica) } catch { throw Failure.unusableFile("\(error)") }
+        host = plan.host
+        port = plan.port
         var config = configuration
         config.tdPort = port
         if let acr {
@@ -148,7 +151,7 @@ public final class ICASession: @unchecked Sendable {
         for engine in extraEngines { driver.register(engine) }
         queue = DispatchQueue(label: "ica.session")
         queue.setSpecific(key: Self.queueKey, value: true)
-        transport = CGPTransport(host: host, port: port, ticket: ticket, queue: queue)
+        transport = CGPTransport(host: host, port: port, tls: plan.tls, framing: plan.framing, queue: queue)
         transport.reconnectTicket = acr?.ticket
         // T_sr without a server cap 9: the ICA file's SessionReliabilityTTL (§3.12.4).
         transport.srTimeoutFallback = ica["SessionReliabilityTTL"].flatMap(TimeInterval.init)
@@ -584,7 +587,15 @@ public final class CGPTransport: @unchecked Sendable {
     public var reconnectTicket: CGPReconnectTicket?
 
     private let tls: Bool
-    private let ticket: String
+    /// CGP with the STA ticket (gateway), CGP without ticket (direct), or raw ICA (docs/16 §4).
+    public let framing: ICAConnectPlan.Framing
+    private var ticket: String? { if case .cgp(let t) = framing { t } else { nil } }
+    private var isRaw: Bool { if case .raw = framing { true } else { false } }
+    /// Raw ICA: SOCKS5 and detect handshake state (docs/20 §2.6, §7.3).
+    private var raw: RawICAHandshake?
+    private var rawOpen = false
+    /// Raw ICA: WD output before the handshake finished (normally none: the server speaks first).
+    private var rawPending: [Data] = []
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Bool>()
     let cgp = CGPSession()
@@ -630,12 +641,18 @@ public final class CGPTransport: @unchecked Sendable {
     private var attempt = 0
     private var firstReadTimer: CGPTimer?
 
-    public init(host: String, port: UInt16, tls: Bool = true, ticket: String, queue: DispatchQueue,
+    /// The gateway form: CGP with the STA ticket.
+    public convenience init(host: String, port: UInt16, tls: Bool = true, ticket: String, queue: DispatchQueue,
+                            clock: CGPClock = SystemCGPClock()) {
+        self.init(host: host, port: port, tls: tls, framing: .cgp(ticket: ticket), queue: queue, clock: clock)
+    }
+
+    public init(host: String, port: UInt16, tls: Bool, framing: ICAConnectPlan.Framing, queue: DispatchQueue,
                 clock: CGPClock = SystemCGPClock()) {
         self.host = host
         self.port = port
         self.tls = tls
-        self.ticket = ticket
+        self.framing = framing
         self.queue = queue
         self.clock = clock
         let now = clock.now()
@@ -691,7 +708,7 @@ public final class CGPTransport: @unchecked Sendable {
     public var status: Status {
         onQueue {
             var s = counters
-            s.state = cgp.state
+            s.state = isRaw ? (closed ? .closed : rawOpen ? .connected : .binding) : cgp.state
             s.receivedSequenced = cgp.receivedSequenced
             s.sent = cgp.txSent
             s.acknowledged = cgp.txAcked
@@ -714,12 +731,25 @@ public final class CGPTransport: @unchecked Sendable {
             guard !closed else { return stream.close() }
             log("\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
             install(stream)
+            if case .raw(let socks) = framing {
+                // Raw ICA (docs/16 §4): no CGP, no session reliability.
+                var handshake = RawICAHandshake(socks: socks)
+                let out = handshake.start()
+                raw = handshake
+                apply(out)
+                log("raw ICA\(socks == nil ? "" : " after SOCKS5"): waiting for the ICA detect string")
+                scheduleTestHooks()
+                return
+            }
             if let reconnectTicket {
                 write(cgp.bindRequest(reconnect: reconnectTicket))
                 log("→ CGP bind request for ACR (\(reconnectTicket), not a resume)")
-            } else {
+            } else if let ticket {
                 write(cgp.bindRequest(ticket: ticket))
                 log("→ CGP bind request (ticket \(ticket.count) chars)")
+            } else {
+                write(cgp.bindRequestWithoutTicket())
+                log("→ CGP bind request, direct (no ticket)")
             }
             scheduleTestHooks()
         }
@@ -755,10 +785,14 @@ public final class CGPTransport: @unchecked Sendable {
         lastSent = clock.now()
     }
 
-    /// ICA bytes from the WD. Queued for retransmit; written while connected (§3.12.7).
+    /// ICA bytes from the WD. Queued for retransmit; written while connected (§3.12.7). Raw ICA: written at once.
     public func send(_ ica: Data, piggybackAck: Bool) {
         perform { [self] in
             guard !closed else { return }
+            if isRaw {
+                if rawOpen { write(ica) } else { rawPending.append(ica) }
+                return
+            }
             checkQueue(cgp.sendData(ica, piggybackAck: piggybackAck))
         }
     }
@@ -779,11 +813,33 @@ public final class CGPTransport: @unchecked Sendable {
 
     // MARK: Incoming
 
+    /// Raw ICA: writes, logs and WD bytes from the handshake.
+    private func apply(_ out: RawICAHandshake.Output) {
+        out.write.forEach(write)
+        out.log.forEach(log)
+        if out.detected { onEvent(.detect) }
+        if let failure = out.failure { return finish(failure) }
+        if !rawOpen, raw?.phase == .open {
+            rawOpen = true
+            let pending = rawPending
+            rawPending = []
+            pending.forEach(write)
+        }
+        if !out.ica.isEmpty { onEvent(.data(out.ica)) }
+    }
+
     private func handle(_ chunk: Data) {
         firstReadTimer?.cancel()
         firstReadTimer = nil
-        // Packets parsed before a failure in the same chunk are already counted: deliver them first.
         counters.bytesReceived += chunk.count
+        if isRaw {
+            lastReceived = clock.now()
+            guard var handshake = raw else { return }
+            let out = handshake.feed(chunk)
+            raw = handshake
+            return apply(out)
+        }
+        // Packets parsed before a failure in the same chunk are already counted: deliver them first.
         let (events, failure) = cgp.consume(chunk)
         if failure == nil || !events.isEmpty { lastReceived = clock.now() }
         for event in events {
@@ -935,6 +991,8 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func linkFailed(_ reason: String, generation: Int) {
         guard generation == self.generation, !closed else { return }
+        // Raw ICA has no session reliability: a dead link ends the session (ACR may reconnect it, docs/30 §15.6).
+        if isRaw { return finish(endExpected.map { "ended by server: connection closed after \($0) (\(reason))" } ?? reason) }
         switch cgp.state {
         case .connected: suspend(reason)
         case .resuming: attemptFailed(reason)

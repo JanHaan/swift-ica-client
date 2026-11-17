@@ -150,6 +150,9 @@ public final class CGPSession {
     var serverTicket: (type: UInt8, ticket: Data)?
     private var staTicket = Data()
     private var staTicketType: UInt8 = 0
+    /// False for a direct bind to the VDA (docs/20 §7.2, docs/16 §4.3): the first bind carried no caps 6 and 2, so
+    /// neither does a resume bind (same caps in the same order, §3.12.5).
+    public private(set) var bindCarriesTicket = true
     public private(set) var serverReliability: ServerReliability?
     public private(set) var reliabilityParams: ReliabilityParams?
     /// Server cap 7 intervals in ms ([I] C2H, then H2C).
@@ -236,13 +239,18 @@ public final class CGPSession {
     /// Signature plus BIND_REQUEST carrying the STA ticket (`Address` from the ICA file). State → 2.
     public func bindRequest(ticket: String) -> Data { bindRequest(ticketType: 0, ticket: Data(ticket.utf8)) }
 
+    /// Signature plus BIND_REQUEST without a security ticket: the direct bind to the VDA on 2598 (docs/20 §7.2,
+    /// docs/16 §4.3): caps 5, 9, 7, 1 only, 106 bytes. The VDA authenticates the user by the ICA logon data (the
+    /// file's `LogonTicket`), not by CGP [I]. State → 2.
+    public func bindRequestWithoutTicket() -> Data { bindRequest(ticketType: 0, ticket: nil) }
+
     /// A fresh (non-resume) bind with the server's CGP reconnect ticket instead of the STA ticket: the ACR connect
     /// (docs/30 §15.6 point 4, docs/20 §3.12.11). Same caps as any first bind.
     public func bindRequest(reconnect ticket: CGPReconnectTicket) -> Data {
         bindRequest(ticketType: ticket.type, ticket: ticket.bytes)
     }
 
-    private func bindRequest(ticketType: UInt8, ticket: Data) -> Data {
+    private func bindRequest(ticketType: UInt8, ticket: Data?) -> Data {
         var params = ByteWriter()  // cap 9 Reliability parameters
         params.u8(1); params.u16(180); params.u16(1); params.u16(25); params.u16(10)
 
@@ -263,9 +271,13 @@ public final class CGPSession {
         let kept = (params: Self.capability(9, params.data), keepalive: Self.capability(7, keepalive.data),
                     services: Self.capability(1, services.data), cap2: Self.capability(2, cap2.data))
         keptCaps = kept
-        staTicket = ticket
+        staTicket = ticket ?? Data()
         staTicketType = ticketType
+        bindCarriesTicket = ticket != nil
         state = .binding
+        guard bindCarriesTicket else {
+            return bindPacket([reliabilityCap(resume: false), kept.params, kept.keepalive, kept.services])
+        }
         return bindPacket([reliabilityCap(resume: false), kept.params, kept.keepalive, kept.services,
                            ticketCap(type: ticketType, staTicket), kept.cap2])
     }
@@ -276,8 +288,11 @@ public final class CGPSession {
     public func resumeBindRequest() -> Data {
         guard let kept = keptCaps else { preconditionFailure("resume before the first bind") }
         let ticket = serverTicket ?? (type: staTicketType, ticket: staTicket)
-        let data = bindPacket([reliabilityCap(resume: true), kept.params, kept.keepalive, kept.services,
-                               ticketCap(type: ticket.type, ticket.ticket), kept.cap2])
+        // Direct bind (no ticket at the first bind): the same four caps again, cookie only [I] (docs/16 §4.3).
+        let data = bindCarriesTicket
+            ? bindPacket([reliabilityCap(resume: true), kept.params, kept.keepalive, kept.services,
+                          ticketCap(type: ticket.type, ticket.ticket), kept.cap2])
+            : bindPacket([reliabilityCap(resume: true), kept.params, kept.keepalive, kept.services])
         lastAcked = rxCount
         state = .resuming
         return data

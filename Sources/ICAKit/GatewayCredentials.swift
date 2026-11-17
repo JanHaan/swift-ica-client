@@ -13,7 +13,11 @@ public struct LoginSettings: Equatable {
         case totp
     }
 
+    /// The account address: a NetScaler Gateway, or a StoreFront store reached directly (`accountKind`, docs/16 §3).
     public var gatewayURL = ""
+    /// What `gatewayURL` points at; nil until probed. The app treats a saved address without a kind as a gateway (the
+    /// only kind before docs/16), so the gateway path stays as it was.
+    public var accountKind: AccountKind?
     public var username = ""
     public var passcodeMode = PasscodeMode.prompt
     public var totpDigits = 6
@@ -24,9 +28,22 @@ public struct LoginSettings: Equatable {
 
     public init() {}
 
-    /// The gateway root URL (`https://host/`), accepting a bare host name.
-    public var gateway: URL? { Self.gatewayURL(from: gatewayURL) }
-    public var gatewayHost: String? { gateway?.host }
+    /// The gateway root URL (`https://host/`), accepting a bare host name; for a StoreFront account the store URL.
+    public var gateway: URL? { account }
+    /// Keychain items are keyed by this host (gateway or StoreFront server).
+    public var gatewayHost: String? { account?.host }
+
+    /// The account URL by kind: a gateway root, or a StoreFront store URL with its path (http allowed).
+    public var account: URL? {
+        accountKind == .storeFront ? Self.storeFrontURL(from: gatewayURL) : Self.gatewayURL(from: gatewayURL)
+    }
+
+    /// A typed address before probing: a gateway root, unless it names a store path or plain HTTP (docs/16 §3).
+    public static func accountURL(from text: String) -> URL? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.lowercased().hasPrefix("http://") || t.lowercased().contains("/citrix/") { return storeFrontURL(from: t) }
+        return gatewayURL(from: t)
+    }
 
     public static func gatewayURL(from text: String) -> URL? {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -37,6 +54,23 @@ public struct LoginSettings: Equatable {
         components.path = "/"
         components.query = nil
         components.fragment = nil
+        return components.url
+    }
+
+    /// A StoreFront address as typed (docs/16 §3): `http` or `https` (a bare host gets `https`), the path kept with
+    /// a trailing slash, no query or fragment. Plain HTTP only when typed explicitly (lab stores without TLS).
+    public static func storeFrontURL(from text: String) -> URL? {
+        var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if !text.contains("://") { text = "https://" + text }
+        guard var components = URLComponents(string: text), let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http", let host = components.host, !host.isEmpty else { return nil }
+        components.scheme = scheme
+        if !components.path.hasSuffix("/") { components.path += "/" }
+        components.query = nil
+        components.fragment = nil
+        components.user = nil
+        components.password = nil
         return components.url
     }
 
@@ -73,6 +107,7 @@ public final class UserDefaultsSettingsStore: SettingsStore {
     public func load() -> LoginSettings {
         var s = LoginSettings()
         s.gatewayURL = defaults.string(forKey: "login.gatewayURL") ?? ""
+        s.accountKind = defaults.string(forKey: "login.accountKind").flatMap(AccountKind.init(rawValue:))
         s.username = defaults.string(forKey: "login.username") ?? ""
         s.passcodeMode = defaults.string(forKey: "login.passcodeMode").flatMap(LoginSettings.PasscodeMode.init) ?? .prompt
         if defaults.object(forKey: "login.totpDigits") != nil { s.totpDigits = defaults.integer(forKey: "login.totpDigits") }
@@ -84,6 +119,7 @@ public final class UserDefaultsSettingsStore: SettingsStore {
 
     public func save(_ s: LoginSettings) {
         defaults.set(s.gatewayURL, forKey: "login.gatewayURL")
+        defaults.set(s.accountKind?.rawValue, forKey: "login.accountKind")
         defaults.set(s.username, forKey: "login.username")
         defaults.set(s.passcodeMode.rawValue, forKey: "login.passcodeMode")
         defaults.set(s.totpDigits, forKey: "login.totpDigits")
@@ -243,7 +279,13 @@ public final class LoginCredentials {
     /// which reads it first (one prompt if it is protected now).
     public func apply(_ update: Update, reason: String) async throws {
         var s = settings.load()
-        s.gatewayURL = update.gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = update.gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if typed != s.gatewayURL {
+            // A new address: its kind is probed at the next sign-in (docs/16 §3); a store path or http:// is a store.
+            s.accountKind = LoginSettings.accountURL(from: typed).map { $0.path.count > 1 || $0.scheme == "http" } == true
+                ? .storeFront : nil
+        }
+        s.gatewayURL = typed
         s.username = update.username.trimmingCharacters(in: .whitespacesAndNewlines)
         s.totpDigits = update.totpDigits
         s.totpPeriod = update.totpPeriod

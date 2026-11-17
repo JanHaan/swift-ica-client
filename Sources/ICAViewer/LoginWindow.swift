@@ -10,7 +10,8 @@ struct LoginCancelled: Error, CustomStringConvertible {
     var description: String { "sign-in cancelled" }
 }
 
-/// Native login window generated from the gateway's nFactor form (`LogonForm`), one factor at a time.
+/// Native login window generated from the gateway's nFactor form (`LogonForm`), one factor at a time; for a
+/// StoreFront store without a gateway from the store's explicit-authentication form (docs/16 §2, §3).
 ///
 /// Test mode ICAVIEWER_LOGIN_AUTOFILL=1 fills empty fields from `.env` by setting the controls'
 /// values (as typing does), then presses the default button. It never fills a re-prompt.
@@ -23,7 +24,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
     private var waiting: [CheckedContinuation<Void, Error>] = []
 
     // Logon state
-    private var logon: GatewayLogon?
+    private var logon: FormLogonFlow?
     private var form: LogonForm?
     private var message: String?
     private var busy = false
@@ -71,7 +72,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         spinner.isDisplayedWhenStopped = false
         gatewayField.controlSize = .small
         gatewayField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        gatewayField.placeholderString = "gateway.example.com"
+        gatewayField.placeholderString = loc("gateway or store address", "Gateway- oder Store-Adresse")
         gatewayField.target = self
         gatewayField.action = #selector(gatewayEdited)
         gatewayField.delegate = self
@@ -115,23 +116,30 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         postedSecret = nil
         draft = [:]
         let host = service.gateway?.host
-        gatewayField.stringValue = host ?? ""
+        gatewayField.stringValue = Self.shown(service.gateway, kind: service.accountKind)
         remember = host.map { credentials.saved(host: $0).hasPassword } ?? false
         askSecret = false
         showWindow(nil)
         window?.center()
         NSApp.activate()
-        guard let gateway = service.gateway else {
+        guard service.gateway != nil else {
             render()
             window?.makeFirstResponder(gatewayField)
             return
         }
-        let logon = GatewayLogon(http: service.http, base: gateway)
-        self.logon = logon
+        logon = nil
         busy = true
         render()
+        let service = self.service
         task = Task { [weak self] in
             do {
+                // A new address is probed first: gateway logon page or StoreFront store (docs/16 §3).
+                try await service.resolveAccount()
+                guard let logon = service.formLogon() else { return }
+                await MainActor.run {
+                    self?.logon = logon
+                    self?.gatewayField.stringValue = Self.shown(service.gateway, kind: service.accountKind)
+                }
                 let form = try await logon.begin()
                 guard let self, !Task.isCancelled else { return }
                 await self.show(form)
@@ -139,7 +147,10 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
                 guard let self, !Task.isCancelled else { return }
                 vlog("login: cannot start: \(error)")
                 self.busy = false
-                self.message = loc("Cannot reach the gateway: ", "Gateway nicht erreichbar: ") + error.localizedDescription
+                let what = service.accountKind == .storeFront ? loc("Cannot reach the store: ", "Store nicht erreichbar: ")
+                    : service.accountKind == .gateway ? loc("Cannot reach the gateway: ", "Gateway nicht erreichbar: ")
+                    : loc("Cannot sign in here: ", "Anmeldung hier nicht möglich: ")
+                self.message = what + (error is URLError ? error.localizedDescription : "\(error)")
                 self.render()
             }
         }
@@ -323,19 +334,26 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         return false
     }
 
+    /// The address as shown in the field: a gateway by host, a store with its path (and scheme if plain HTTP).
+    static func shown(_ url: URL?, kind: AccountKind?) -> String {
+        guard let url else { return "" }
+        guard kind == .storeFront || url.path.count > 1 || url.scheme == "http" else { return url.host ?? "" }
+        return url.scheme == "https" ? (url.host ?? "") + (url.port.map { ":\($0)" } ?? "") + url.path : url.absoluteString
+    }
+
     @objc private func gatewayEdited() {
         gatewayField.stringValue = FieldText.clean(gatewayField.stringValue, password: false, final: true)
         let text = gatewayField.stringValue
-        guard let url = LoginSettings.gatewayURL(from: text) else {
+        guard let url = LoginSettings.accountURL(from: text) else {
             if !text.isEmpty {
-                message = loc("Enter the gateway address, e.g. gateway.example.com.",
-                              "Bitte die Gateway-Adresse eingeben, z. B. gateway.example.com.")
+                message = loc("Enter the gateway or store address, e.g. gateway.example.com or storefront.example.com/Citrix/StoreWeb.",
+                              "Bitte die Gateway- oder Store-Adresse eingeben, z. B. gateway.example.com oder storefront.example.com/Citrix/StoreWeb.")
                 render()
             }
             return
         }
-        guard url.host != service.gateway?.host || form == nil else { return }
-        vlog("login: gateway set to \(url.host ?? "?")")
+        guard url.absoluteString != service.gateway?.absoluteString || form == nil else { return }
+        vlog("login: address set to \(url.host ?? "?")")
         service.setGateway(url)
         start()
     }
@@ -370,7 +388,9 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
 
     private func captureDraft() {
         for (id, control) in controls {
-            if let button = control as? NSButton {
+            if let popup = control as? NSPopUpButton {
+                draft[id] = popup.selectedItem?.representedObject as? String
+            } else if let button = control as? NSButton {
                 draft[id] = button.state == .on ? "true" : "false"
             } else if let field = control as? NSTextField {
                 draft[id] = FieldText.clean(field.stringValue, password: isPasswordField(field), final: true)
@@ -480,6 +500,21 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
                     box.isEnabled = !f.readOnly && !busy
                     controls[f.id] = box
                     gridRow("", box)
+                case _ where !f.choices.isEmpty:
+                    // A list (domain selection, Common Forms ComboBox [P], docs/16 §2.3).
+                    let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+                    for choice in f.choices {
+                        popup.addItem(withTitle: choice.display)
+                        popup.lastItem?.representedObject = choice.value
+                    }
+                    let selected = draft[f.id] ?? f.initialValue
+                    if let index = f.choices.firstIndex(where: { $0.value == selected }) { popup.selectItem(at: index) }
+                    draft[f.id] = popup.selectedItem?.representedObject as? String
+                    popup.isEnabled = !f.readOnly && !busy
+                    popup.target = self
+                    popup.action = #selector(checkboxChanged)
+                    controls[f.id] = popup
+                    gridRow(f.label, popup)
                 case .passcode where askSecret && !f.readOnly:
                     let field = textField(id: Self.secretFieldID, secure: true, content: nil, field: nil)
                     field.placeholderString = loc("Base32 secret", "Base32-Geheimnis")
@@ -514,8 +549,9 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
             }
             endGrid()
         } else if service.gateway == nil {
-            rows.append(wrapping(loc("Enter the address of your Citrix Gateway.",
-                                     "Bitte die Adresse Ihres Citrix Gateways eingeben."), style: .plain))
+            rows.append(wrapping(loc("Enter the address of your Citrix Gateway, or of your StoreFront store if you sign in without a gateway.",
+                                     "Bitte die Adresse Ihres Citrix Gateways eingeben, oder die Ihres StoreFront-Stores bei Anmeldung ohne Gateway."),
+                                 style: .plain))
         }
 
         // Buttons: forget (left), spinner, cancel, submit (default)
@@ -565,7 +601,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         bar[bar.firstIndex { type(of: $0) == NSView.self }!].setContentHuggingPriority(.init(1), for: .horizontal)
 
         // Gateway address: small and editable.
-        let gatewayLabel = NSTextField(labelWithString: "Gateway:")
+        let gatewayLabel = NSTextField(labelWithString: service.accountKind == .storeFront ? "Store:" : "Gateway:")
         gatewayLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         gatewayLabel.textColor = .secondaryLabelColor
         gatewayField.isEnabled = !busy
@@ -673,6 +709,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
             switch f.kind {
             case .username: field.stringValue = env["CITRIX_USERNAME"].map { StoreService.envUsername(env, $0) } ?? ""
             case .password: field.stringValue = env["CITRIX_PASSWORD"] ?? ""
+            case .domain: field.stringValue = env["CITRIX_DOMAIN"] ?? ""
             case .passcode:
                 guard let totp = StoreService.envTOTP(env) else { continue }
                 field.stringValue = await Task.detached { totp.freshCode(statePath: Paths.totpState) }.value

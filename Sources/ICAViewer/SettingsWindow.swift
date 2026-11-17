@@ -71,7 +71,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                     de: "Eine andere App nutzt diesen Kurzbefehl bereits; bitte einen anderen wählen.")
     /// Row labels (column 0), in grid order.
     static let rowLabels: [String: Text] = [
-        "gateway": Text(en: "Gateway:", de: "Gateway:"), "user": Text(en: "User name:", de: "Benutzername:"),
+        "gateway": Text(en: "Gateway or store:", de: "Gateway oder Store:"), "user": Text(en: "User name:", de: "Benutzername:"),
         "password": Text(en: "Password:", de: "Kennwort:"), "passcode": Text(en: "Passcode:", de: "Passcode:"),
         "secret": Text(en: "TOTP secret:", de: "TOTP-Geheimnis:"), "code": Text(en: "Code:", de: "Code:"),
         "windows": Text(en: "Windows scaling:", de: "Windows-Skalierung:"), "client": Text(en: "Client scaling:", de: "Client-Skalierung:"),
@@ -180,7 +180,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             f.delegate = self
             f.widthAnchor.constraint(equalToConstant: 260).isActive = true
         }
-        gatewayField.placeholderString = "gateway.example.com"
+        gatewayField.placeholderString = "gateway.example.com or storefront.example.com/Citrix/StoreWeb"
         usernameField.contentType = .username
         passwordField.contentType = .password
         secretField.placeholderString = loc("Base32 secret", "Base32-Geheimnis")
@@ -702,7 +702,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
 
     private func load() {
         let s = credentials.settings.load()
-        gatewayField.stringValue = s.gateway?.host ?? (service.gateway?.host ?? "")
+        gatewayField.stringValue = s.account != nil ? LoginWindowController.shown(s.account, kind: s.accountKind)
+            : LoginWindowController.shown(service.gateway, kind: service.accountKind)
         usernameField.stringValue = s.username
         clearSecrets()
         let host = s.gatewayHost ?? service.gateway?.host
@@ -805,14 +806,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         if let totp {
             preview.stringValue = loc("Current code: ", "Aktueller Code: ") + "\(totp.code()) (\(totp.secondsRemaining()) s)"
         }
-        let host = LoginSettings.gatewayURL(from: gatewayField.stringValue)?.host
+        let host = LoginSettings.accountURL(from: gatewayField.stringValue)?.host
         showCodeButton.isHidden = !typed.isEmpty || totp != nil
             || !(host.map { credentials.secrets.contains(.totpSecret, host: $0) } ?? false)
     }
 
     /// Reads the stored secret (Touch ID / password) to show its current code for comparison.
     @objc private func showStoredCode() {
-        guard let host = LoginSettings.gatewayURL(from: gatewayField.stringValue)?.host else { return }
+        guard let host = LoginSettings.accountURL(from: gatewayField.stringValue)?.host else { return }
         Task {
             do {
                 var values = try await credentials.secrets.read(
@@ -829,7 +830,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
 
     @objc private func forgetAll() {
         guard !demo else { return }
-        guard let host = LoginSettings.gatewayURL(from: gatewayField.stringValue)?.host ?? service.gateway?.host else { return }
+        guard let host = LoginSettings.accountURL(from: gatewayField.stringValue)?.host ?? service.gateway?.host else { return }
         credentials.forgetAll(host: host)
         load()
         status.stringValue = loc("Saved credentials for \(host) were deleted.", "Gespeicherte Anmeldedaten für \(host) wurden gelöscht.")
@@ -852,8 +853,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             do {
                 try await credentials.apply(update, reason: loc("change the protection of the saved password",
                                                                 "den Schutz des gespeicherten Kennworts zu ändern"))
-                if let url = LoginSettings.gatewayURL(from: update.gatewayURL), url.host != service.gateway?.host {
-                    service.setGateway(url)
+                let saved = credentials.settings.load()
+                if let url = saved.account, url.absoluteString != service.gateway?.absoluteString {
+                    // A new address keeps the kind `apply` derived (a store path), else it is probed at sign-in.
+                    service.setGateway(url, kind: saved.accountKind)
                 }
                 close()
                 saveDriveMapping()
@@ -866,7 +869,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                 status.stringValue = loc("Enter a valid TOTP secret (base32), or choose to enter the passcode at each sign-in.",
                                          "Bitte ein gültiges TOTP-Geheimnis (Base32) eingeben oder „Passcode bei jeder Anmeldung eingeben“ wählen.")
             } catch CredentialError.noGateway {
-                status.stringValue = loc("Enter the gateway address first.", "Bitte zuerst die Gateway-Adresse eingeben.")
+                status.stringValue = loc("Enter the gateway or store address first.", "Bitte zuerst die Gateway- oder Store-Adresse eingeben.")
             } catch {
                 status.stringValue = "\(error)"
             }

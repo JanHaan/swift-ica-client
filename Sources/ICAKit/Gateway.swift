@@ -7,6 +7,19 @@ public struct LogonForm: Sendable {
     public struct Field: Sendable, Identifiable {
         public enum Kind: String, Sendable {
             case username, password, passcode, newPassword, checkbox, text, label, heading, error, button
+            /// Credential type `domain` or `realm` (Common Forms language [P], docs/16 §2.3): a text field, or a list
+            /// when `choices` is not empty.
+            case domain
+        }
+
+        /// One entry of a `ComboBox` (Common Forms language [P]): shown text and posted value.
+        public struct Choice: Sendable, Equatable {
+            public var display: String
+            public var value: String
+            public init(display: String, value: String) {
+                self.display = display
+                self.value = value
+            }
         }
 
         /// Credential ID (the post field name), or `#<index>` for a label without one.
@@ -25,6 +38,8 @@ public struct LogonForm: Sendable {
         public var readOnly: Bool
         /// For buttons: the value posted with the button's ID (e.g. `dualauth_submit`).
         public var buttonValue: String?
+        /// For a `ComboBox` input: the entries; `initialValue` is the initial selection. Empty for text inputs.
+        public var choices: [Choice] = []
 
         /// True for the gateway's "remember my credentials" checkbox; we always post `false` for it
         /// (the app offers its own Keychain option instead).
@@ -32,7 +47,7 @@ public struct LogonForm: Sendable {
         /// True if the field's value is posted.
         public var isInput: Bool {
             switch kind {
-            case .username, .password, .passcode, .newPassword, .checkbox, .text: true
+            case .username, .password, .passcode, .newPassword, .checkbox, .text, .domain: true
             default: false
             }
         }
@@ -41,6 +56,7 @@ public struct LogonForm: Sendable {
 
         /// True if `value` satisfies the field's constraint (no constraint: anything).
         public func accepts(_ value: String) -> Bool {
+            if !choices.isEmpty { return choices.contains { $0.value == value } }
             guard let constraint, !constraint.isEmpty,
                   let regex = try? NSRegularExpression(pattern: "^(?:" + constraint + ")$", options: [.dotMatchesLineSeparators])
             else { return true }
@@ -75,18 +91,30 @@ public enum LogonStep: Sendable {
 
 // MARK: - Logon
 
+/// A forms logon conversation (Common Forms protocol): NetScaler nFactor at the gateway (`GatewayLogon`) or explicit
+/// authentication at a StoreFront store (`StoreFrontLogon`, docs/16 §2). The login window drives either.
+public protocol FormLogonFlow {
+    func begin() async throws -> LogonForm
+    func submit(_ form: LogonForm, values: [String: String], button: String?) async throws -> LogonStep
+    func cancel(_ form: LogonForm) async
+}
+
 /// Logon at a NetScaler Gateway with nFactor ("ExplicitForms" / Common Forms protocol).
 /// Interactive use: `begin()`, then `submit` each form until `.success`. Non-interactive use: `logon(_:)`.
-public struct GatewayLogon {
+public struct GatewayLogon: FormLogonFlow {
     public struct Credentials {
         public var username: String
         public var password: String
         /// Called once per factor that asks for a passcode, so a TOTP is fresh when posted.
         public var passcode: () -> String?
+        /// For a form with a separate domain field (StoreFront, docs/16 §2.3). Without one the domain belongs in
+        /// `username` (`DOMAIN\user` or a UPN).
+        public var domain: String?
 
-        public init(username: String, password: String, passcode: @escaping () -> String?) {
+        public init(username: String, password: String, domain: String? = nil, passcode: @escaping () -> String? = { nil }) {
             self.username = username
             self.password = password
+            self.domain = domain
             self.passcode = passcode
         }
     }
@@ -200,17 +228,39 @@ public struct GatewayLogon {
     /// Values for the non-interactive logon. Calls `passcode()` once per passcode field.
     static func values(for form: LogonForm, _ credentials: Credentials) throws -> [String: String] {
         var values: [String: String] = [:]
+        // `DOMAIN\user` goes into two fields when the form has its own domain field.
+        let hasDomain = form.fields.contains { $0.kind == .domain && !$0.readOnly }
+        var username = credentials.username
+        var domain = credentials.domain
+        if hasDomain, let slash = username.firstIndex(of: "\\") {
+            if domain == nil { domain = String(username[..<slash]) }
+            username = String(username[username.index(after: slash)...])
+        }
         for field in form.fields where field.isInput && !field.readOnly {
             switch field.kind {
-            case .username: values[field.id] = credentials.username
+            case .username: values[field.id] = username
+            case .domain:
+                let wanted = domain ?? field.initialValue ?? ""
+                if field.choices.isEmpty {
+                    guard field.accepts(wanted) else { throw Failure.needsInput("domain") }
+                    values[field.id] = wanted
+                } else {
+                    // Match the value or the shown name, case-insensitively.
+                    guard let choice = field.choices.first(where: { $0.value.caseInsensitiveCompare(wanted) == .orderedSame })
+                        ?? field.choices.first(where: { $0.display.caseInsensitiveCompare(wanted) == .orderedSame }) else {
+                        throw Failure.needsInput("domain (not in the list)")
+                    }
+                    values[field.id] = choice.value
+                }
             case .password: values[field.id] = credentials.password
             case .passcode:
                 guard let code = credentials.passcode(), !code.isEmpty else { throw Failure.needsInput("passcode") }
                 values[field.id] = code
             case .newPassword: throw Failure.needsInput("new password")
             case .text:
-                let value = field.initialValue ?? ""
+                let value = field.initialValue ?? field.choices.first?.value ?? ""
                 if !field.accepts(value) { throw Failure.needsInput(field.labelKey.isEmpty ? field.id : field.labelKey) }
+                if !field.choices.isEmpty { values[field.id] = value }
             default: break
             }
         }
@@ -274,6 +324,10 @@ extension LogonForm {
                 kind = .button
             } else if r.checkBox != nil || type == "savecredentials" {
                 kind = .checkbox
+            } else if r.id != nil, type == "domain" || type == "realm", r.hasTextInput || r.comboBox != nil {
+                kind = .domain
+            } else if r.id != nil, r.comboBox != nil {
+                kind = .text
             } else if r.id != nil, r.hasTextInput || ["username", "password", "passcode", "newpassword"].contains(type) {
                 switch type {
                 case "username": kind = .username
@@ -299,8 +353,9 @@ extension LogonForm {
             fields.append(Field(
                 id: r.id ?? "#\(index)", kind: kind, label: strings.text(for: labelKey), labelKey: labelKey,
                 credentialType: type, secret: r.secret, constraint: r.constraint,
-                initialValue: kind == .checkbox ? r.checkBox ?? r.initialValue : r.initialValue,
-                readOnly: r.readOnly, buttonValue: r.button))
+                initialValue: kind == .checkbox ? r.checkBox ?? r.initialValue : r.comboBox?.initial ?? r.initialValue,
+                readOnly: r.readOnly, buttonValue: r.button,
+                choices: (r.comboBox?.choices ?? []).map { Field.Choice(display: $0.display, value: $0.value) }))
         }
         self.fields = fields
         postBack = document.postBack ?? ""
@@ -553,6 +608,8 @@ struct FormResponse {
         var constraint: String?
         /// Initial value of a checkbox input (`nil` if the requirement has no checkbox).
         var checkBox: String?
+        /// A `ComboBox` input: entries and initial selection (Common Forms language [P]).
+        var comboBox: (choices: [(display: String, value: String)], initial: String?)?
     }
 
     var result: String
@@ -585,6 +642,12 @@ struct FormResponse {
         requirements = list.map { node in
             let text = nodes("Input/Text", in: node).first
             let check = nodes("Input/CheckBox", in: node).first
+            let combo = nodes("Input/ComboBox", in: node).first.map { box in
+                (choices: nodes("DisplayValues/DisplayValue", in: box).map { entry in
+                    let value = string("Value", in: entry) ?? ""
+                    return (display: string("Display", in: entry) ?? value, value: value)
+                }, initial: string("InitialSelection", in: box).flatMap { $0.isEmpty ? nil : $0 })
+            }
             return Requirement(
                 id: string("Credential/ID", in: node).flatMap { $0.isEmpty ? nil : $0 },
                 type: string("Credential/Type", in: node) ?? "",
@@ -596,7 +659,8 @@ struct FormResponse {
                 readOnly: text.flatMap { string("ReadOnly", in: $0) } == "true",
                 initialValue: text.flatMap { string("InitialValue", in: $0) }.flatMap { $0.isEmpty ? nil : $0 },
                 constraint: text.flatMap { string("Constraint", in: $0) }.flatMap { $0.isEmpty ? nil : $0 },
-                checkBox: check.map { string("InitialValue", in: $0) ?? "false" })
+                checkBox: check.map { string("InitialValue", in: $0) ?? "false" },
+                comboBox: combo)
         }
     }
 }

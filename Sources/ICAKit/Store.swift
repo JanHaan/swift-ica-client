@@ -1,6 +1,7 @@
 import Foundation
 
-/// StoreFront "Receiver for Web" API behind the gateway (docs/10-launch.md B.3, D.2–D.3).
+/// StoreFront "Receiver for Web" API behind the gateway (docs/10-launch.md B.3, D.2–D.3), or reached directly with
+/// explicit authentication (`direct`, docs/16-direct-mode.md §2).
 public struct StoreClient {
     public struct Resource: Decodable {
         public let id: String
@@ -32,11 +33,14 @@ public struct StoreClient {
     public enum Failure: Error, CustomStringConvertible {
         case http(String, Int)
         case launch(String)
+        /// Direct store: the store wants a logon and no logon handler is set.
+        case needsLogon
 
         public var description: String {
             switch self {
             case .http(let what, let status): "\(what) failed with HTTP \(status)"
             case .launch(let text): "launch failed: \(text)"
+            case .needsLogon: "the store asks for a logon"
             }
         }
     }
@@ -45,10 +49,27 @@ public struct StoreClient {
     /// Store web base URL, e.g. https://gateway.example.com/welcome/
     public let base: URL
 
+    /// Direct store (no gateway, docs/16 §2): the store session comes from an explicit logon, not CitrixAGBasic.
+    public var direct = false
+    /// Direct store: runs the explicit logon again when the store asks (e.g. `StoreFrontLogon.logon` with the
+    /// remembered credentials, or the login window). nil: `signIn` throws `needsLogon`.
+    public var explicitLogon: (() async throws -> Void)?
+
     public init(http: HTTPClient, base: URL) {
         self.http = http
         self.base = base
     }
+
+    /// A direct store at its Receiver for Web base URL (docs/16 §2).
+    public init(http: HTTPClient, directBase: URL, explicitLogon: (() async throws -> Void)? = nil) {
+        self.http = http
+        base = StoreFrontLogon.normalisedBase(directBase)
+        direct = true
+        self.explicitLogon = explicitLogon
+    }
+
+    /// `Yes` unless the store is reached over plain HTTP (docs/16 §2.1).
+    var usingHTTPS: String { StoreFrontLogon.usingHTTPS(base) }
 
     /// Where the store's device id cookie persists between runs (docs/90 §8.6); set once at start by
     /// the app (its settings) or icactl (`.session/`). nil: not persisted.
@@ -62,7 +83,7 @@ public struct StoreClient {
     }
 
     func post(_ path: String, form: [(String, String)]? = nil) async throws -> HTTPClient.Response {
-        var headers = ["X-Citrix-IsUsingHTTPS": "Yes", "X-Requested-With": "XMLHttpRequest", "Accept": "*/*"]
+        var headers = ["X-Citrix-IsUsingHTTPS": usingHTTPS, "X-Requested-With": "XMLHttpRequest", "Accept": "*/*"]
         if let csrf = http.cookie("CsrfToken") { headers["Csrf-Token"] = csrf }
         syncDeviceId()
         defer { syncDeviceId() }
@@ -75,8 +96,13 @@ public struct StoreClient {
                       reauthenticate: { try await signIn() }, around: { syncDeviceId() })
     }
 
-    /// Gets a CSRF token and signs in to the store with the gateway session (CitrixAGBasic).
+    /// Gets a CSRF token and signs in to the store with the gateway session (CitrixAGBasic). Direct store: the
+    /// explicit logon handler instead.
     public func signIn() async throws {
+        if direct {
+            guard let explicitLogon else { throw Failure.needsLogon }
+            return try await explicitLogon()
+        }
         let config = try await post("Home/Configuration")
         guard config.status == 200 else { throw Failure.http("Home/Configuration", config.status) }
         SessionEndpoints.remember(SessionEndpoints(configuration: config.text), for: base)
@@ -122,7 +148,7 @@ public struct StoreClient {
                                                resolvingAgainstBaseURL: true)!
                 components.queryItems = [
                     URLQueryItem(name: "CsrfToken", value: http.cookie("CsrfToken") ?? ""),
-                    URLQueryItem(name: "IsUsingHttps", value: "Yes"),
+                    URLQueryItem(name: "IsUsingHttps", value: usingHTTPS),
                 ]
                 let ica = try await http.send("GET", components.url!)
                 if ica.status == 200, ica.text.hasPrefix("[") { return ica.text }

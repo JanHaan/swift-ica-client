@@ -27,7 +27,8 @@ public struct SessionShareKey: Equatable, Sendable {
     public init(ica: ICAFile) {
         sslEnabled = ica["SSLEnable"]?.lowercased() == "on"
         let proxy = ica["ProxyHost"].flatMap { $0.isEmpty ? nil : $0 }
-        let endpoint = sslEnabled ? ica["SSLProxyHost"] ?? "" : proxy ?? ica["Address"] ?? ""
+        // Direct HDX TLS without `SSLProxyHost` connects to `Address` (docs/16 §4.2).
+        let endpoint = sslEnabled ? ica["SSLProxyHost"] ?? ica["Address"] ?? "" : proxy ?? ica["Address"] ?? ""
         (connectHost, connectPort) = Self.split(endpoint, defaultPort: sslEnabled ? 443 : 1494)
         twiMode = ica["TWIMode"] ?? ""
         sharingKey = (ica["SessionsharingKey"] ?? ica["SessionSharingKey"]).flatMap { $0.isEmpty ? nil : $0 }
