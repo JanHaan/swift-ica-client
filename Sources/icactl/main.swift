@@ -7,7 +7,6 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingL
     .deletingLastPathComponent()
 let envPath = ProcessInfo.processInfo.environment["ICA_ENV"] ?? root.appendingPathComponent(".env").path
 let sessionDir = root.appendingPathComponent(".session")
-let cookiePath = sessionDir.appendingPathComponent("cookies.plist").path
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("error: \(message)\n".utf8))
@@ -74,11 +73,15 @@ if let storeFront {
     }
     gateway = url
 }
+/// A direct store keeps its own cookie jar and device id next to the gateway's (D107): `cookies-<host>.plist`,
+/// `device-id-<host>.plist`. The gateway files keep their names.
+let hostSuffix = storeFront?.host.map { "-" + $0 } ?? ""
+let cookiePath = sessionDir.appendingPathComponent("cookies\(hostSuffix).plist").path
 try? http.loadCookies(from: cookiePath)
 // The store's device id cookie survives the empty-jar gateway logon (docs/90 §8.6); ICA_NO_DEVICE_ID=1
 // turns that off (§11 item 7: is the id new after an empty-jar logon?).
 if ProcessInfo.processInfo.environment["ICA_NO_DEVICE_ID"] != "1" {
-    StoreClient.deviceIdentity = FileDeviceIdentity(path: sessionDir.appendingPathComponent("device-id.plist").path)
+    StoreClient.deviceIdentity = FileDeviceIdentity(path: sessionDir.appendingPathComponent("device-id\(hostSuffix).plist").path)
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -149,7 +152,7 @@ case "req":
     }
     guard let url = URL(string: target, relativeTo: gateway) else { fail("bad path") }
     var headers = ["X-Citrix-IsUsingHTTPS": "Yes", "X-Requested-With": "XMLHttpRequest", "Accept": "*/*"]
-    if let csrf = http.cookie("CsrfToken") { headers["Csrf-Token"] = csrf }
+    if let csrf = http.cookie("CsrfToken", for: url) { headers["Csrf-Token"] = csrf }
     do {
         let response = try await http.send(method, url, headers: headers, form: form.isEmpty ? nil : form)
         try http.saveCookies(to: cookiePath)
@@ -185,7 +188,7 @@ case "launch":
         }
         let text = try await store.launchICA(resource)
         try http.saveCookies(to: cookiePath)
-        let path = sessionDir.appendingPathComponent("last.ica").path
+        let path = sessionDir.appendingPathComponent("last\(hostSuffix).ica").path
         FileManager.default.createFile(atPath: path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
         print("saved \(path) for \(resource.name)")
         print(ICAFile(text: text)?.redactedDescription ?? "(not an ICA file)")
@@ -232,7 +235,9 @@ case "droptest":
     // logs the resume details, and logs off ICA_DUMP_SECONDS (default 60) after the start.
     // ICA_TEST_BLACKHOLE_AFTER=<s>[:<d>] instead stalls the socket to exercise the liveness path.
     let name = args.first ?? env["CITRIX_RESOURCE"] ?? "Calculator"
-    guard name == "Calculator" || name == "Notepad" else { fail("drop tests are limited to \"Calculator\" and \"Notepad\"") }
+    guard name == "Calculator" || name == "Notepad" || ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else {
+        fail("drop tests are limited to \"Calculator\" and \"Notepad\" (ICA_ALLOW_ANY_RESOURCE=1: any, e.g. a lab app)")
+    }
     let seconds = Double(ProcessInfo.processInfo.environment["ICA_DUMP_SECONDS"] ?? "") ?? 60
     let blackhole = ProcessInfo.processInfo.environment["ICA_TEST_BLACKHOLE_AFTER"] != nil
     let dropEnv = ProcessInfo.processInfo.environment["ICA_TEST_DROP_AFTER"] ?? ProcessInfo.processInfo.environment["ICA_DROP_AFTER"]
@@ -315,7 +320,7 @@ case "cliptest-files":
             let resources = try await store.resources()
             guard let resource = resources.first(where: { $0.title == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
             text = try await store.launchICA(resource)
-            saveICA(text, as: "last-native.ica")
+            saveICA(text, as: "last-native\(hostSuffix).ica")
             say("store mode native (protocol \(store.lastProtocol ?? "cached"), launcher \(store.launcher ?? "not sent"))")
         } else {
             let resources = try await storeClient().resources()
@@ -533,7 +538,7 @@ case "native":
             guard let resource = resources.first(where: { $0.title == name })
                 ?? resources.first(where: { $0.title.localizedCaseInsensitiveContains(name) }) else { fail("no resource named \(name)") }
             let text = try await store.launchICA(resource)
-            saveICA(text, as: "last-native.ica")
+            saveICA(text, as: "last-native\(hostSuffix).ica")
             print("saved .session/last-native.ica for \(resource.title)")
             print(ICAFile(text: text)?.redactedDescription ?? "(not an ICA file)")
         case "keys":
@@ -545,7 +550,7 @@ case "native":
                 }
                 return ica
             }
-            ICAKeyDiff.lines(web: load("last.ica"), native: load("last-native.ica")).forEach { print($0) }
+            ICAKeyDiff.lines(web: load("last\(hostSuffix).ica"), native: load("last-native\(hostSuffix).ica")).forEach { print($0) }
         default:
             fail("usage: icactl native discover|list|launch <name>|keys")
         }
@@ -1980,7 +1985,7 @@ func envCredentials() -> GatewayLogon.Credentials {
 /// Client names our sessions report to the VDA: the WD default, and the last saved ICA file's.
 func ourClientNames() -> Set<String> {
     var names: Set<String> = [SessionDirectory.defaultClientName]
-    let last = sessionDir.appendingPathComponent("last.ica").path
+    let last = sessionDir.appendingPathComponent("last\(hostSuffix).ica").path
     if let text = try? String(contentsOfFile: last, encoding: .utf8), let ica = ICAFile(text: text) {
         names.insert(WDLogon(ica: ica).clientName)
     }
@@ -2127,7 +2132,7 @@ func probe(store: StoreClient, api: StoreSessions) async throws {
     try await store.signIn()
     let config = try await http.send("POST", URL(string: "Home/Configuration", relativeTo: store.base)!,
                                      headers: ["X-Citrix-IsUsingHTTPS": "Yes", "X-Requested-With": "XMLHttpRequest",
-                                               "Accept": "*/*", "Csrf-Token": http.cookie("CsrfToken") ?? ""], form: nil)
+                                               "Accept": "*/*", "Csrf-Token": http.cookie("CsrfToken", for: store.base) ?? ""], form: nil)
     print("1. Home/Configuration \(config.status)")
     for element in ["sessionsProxy", "sessionControlProxy", "workspaceControl", "machinesProxy"] {
         if let range = config.text.range(of: "<\(element)[\\s/>][^>]*>", options: .regularExpression) {

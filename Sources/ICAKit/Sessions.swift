@@ -16,6 +16,12 @@ public protocol StoreTransport: AnyObject {
     func send(_ method: String, _ url: URL, headers: [String: String], body: Data?, contentType: String?) async throws
         -> HTTPClient.Response
     func cookie(_ name: String) -> String?
+    /// The cookie a request to `url` carries (scoped to the store's host, D107).
+    func cookie(_ name: String, for url: URL) -> String?
+}
+
+extension StoreTransport {
+    public func cookie(_ name: String, for url: URL) -> String? { cookie(name) }
 }
 
 extension HTTPClient: StoreTransport {}
@@ -435,7 +441,7 @@ public final class StoreSessions: @unchecked Sendable {
     func headers(_ form: HeaderForm) -> [String: String] {
         let https = base.scheme?.lowercased() == "https" ? "Yes" : "No"
         var h = ["X-Citrix-IsUsingHTTPS": https, "X-Requested-With": "XMLHttpRequest", "Accept": "*/*"]
-        let csrf = transport.cookie("CsrfToken")
+        let csrf = transport.cookie("CsrfToken", for: base)
         if let csrf { h["Csrf-Token"] = csrf }
         if form == .apiReference {
             if let csrf { h["CsrfToken"] = csrf }
@@ -839,8 +845,10 @@ public enum DeviceIdentity {
 
     /// Puts the saved cookie back if the jar has none.
     public static func restore(into http: HTTPClient, from store: DeviceIdentityStore, base: URL) {
-        guard http.cookieRecord(cookieName) == nil, let record = store.load(), let value = record["value"], !value.isEmpty,
-              let host = base.host else { return }
+        guard let host = base.host, !http.cookieRecords(cookieName).contains(where: { domain($0.domain, matches: host) }),
+              let record = store.load(), let value = record["value"], !value.isEmpty else { return }
+        // A device id saved for another host stays with that host (D107).
+        if let domain = record["domain"], !Self.domain(domain, matches: host) { return }
         var properties: [HTTPCookiePropertyKey: Any] = [
             .name: cookieName, .value: value,
             .domain: record["domain"] ?? host, .path: record["path"] ?? "/",
@@ -850,9 +858,18 @@ public enum DeviceIdentity {
         if let cookie = HTTPCookie(properties: properties) { http.setCookie(cookie) }
     }
 
-    /// Saves the jar's cookie when it is new or changed.
-    public static func remember(from http: HTTPClient, into store: DeviceIdentityStore) {
-        guard let cookie = http.cookieRecord(cookieName), !cookie.value.isEmpty else { return }
+    /// `.example.com` matches `a.example.com` and `example.com`; a bare domain matches itself only.
+    static func domain(_ domain: String, matches host: String) -> Bool {
+        let d = domain.lowercased(), h = host.lowercased()
+        if d.hasPrefix(".") { return h == d.dropFirst() || h.hasSuffix(d) }
+        return h == d
+    }
+
+    /// Saves the jar's cookie when it is new or changed; with `base`, only the cookie for that store.
+    public static func remember(from http: HTTPClient, into store: DeviceIdentityStore, base: URL? = nil) {
+        let cookie = base?.host.map { host in http.cookieRecords(cookieName).first { domain($0.domain, matches: host) } }
+            ?? http.cookieRecord(cookieName)
+        guard let cookie, !cookie.value.isEmpty else { return }
         let record = ["value": cookie.value, "domain": cookie.domain, "path": cookie.path]
         if store.load() != record { store.save(record) }
     }

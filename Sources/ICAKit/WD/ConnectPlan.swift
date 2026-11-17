@@ -80,7 +80,7 @@ public struct ICAConnectPlan: Equatable, Sendable, CustomStringConvertible {
     public static let cgpPort: UInt16 = 2598
     public static let sslPort: UInt16 = 443
 
-    /// `environment`: `ICA_DIRECT_TLS_SOCKS=0` sends raw ICA right after the TLS handshake to a VDA instead of a SOCKS5
+    /// `environment`: `ICA_DIRECT_CGP=0` connects a direct file without CGP (raw ICA). `ICA_DIRECT_TLS_SOCKS=0` sends raw ICA right after the TLS handshake to a VDA instead of a SOCKS5
     /// CONNECT first (docs/16 §4.2, an assumption for the lab to settle). `ICA_IGNORE_ENCRYPTION_LEVEL=1` connects even
     /// when the file asks for RC5 (the server then decides).
     public init(ica: ICAFile, environment: [String: String] = ProcessInfo.processInfo.environment) throws {
@@ -122,7 +122,9 @@ public struct ICAConnectPlan: Equatable, Sendable, CustomStringConvertible {
         route = .direct
         let (addressHost, addressPort) = Self.endpoint(address, defaultPort: Self.icaPort)
         guard !addressHost.isEmpty else { throw Failure.badAddress }
-        let cgp = cgpTicket || cgpAddress != nil
+        // `ICA_DIRECT_CGP=0` (lab diagnosis, docs/16 §6 L10): ignore session reliability on a direct route and connect
+        // raw ICA to `Address` (the VDA's ICA listener on 1494 answers either way).
+        let cgp = (cgpTicket || cgpAddress != nil) && environment["ICA_DIRECT_CGP"] != "0"
 
         // 3. HDX TLS straight to the VDA [I]: the TLS peer is `SSLProxyHost` (the VDA's certificate name) when present,
         //    else the `Address` host; port from `SSLProxyHost`, else 443 (docs/16 §4.2).

@@ -38,8 +38,22 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
 
+    /// The first cookie of this name in the whole jar, whatever its domain. Prefer `cookie(_:for:)`: a jar loaded from
+    /// disk may hold cookies of several hosts (a gateway and a lab store, D107).
     public func cookie(_ name: String) -> String? {
         jar.cookies?.first { $0.name == name }?.value
+    }
+
+    /// The cookie of this name that a request to `url` would carry (domain, path and Secure rules of the jar).
+    public func cookie(_ name: String, for url: URL) -> String? {
+        cookieRecord(name, for: url)?.value
+    }
+
+    /// Every cookie of this name in the jar (all hosts).
+    public func cookieRecords(_ name: String) -> [HTTPCookie] { (jar.cookies ?? []).filter { $0.name == name } }
+
+    public func cookieRecord(_ name: String, for url: URL) -> HTTPCookie? {
+        jar.cookies(for: url.absoluteURL)?.first { $0.name == name }
     }
 
     public var cookieNames: [String] { (jar.cookies ?? []).map(\.name).sorted() }

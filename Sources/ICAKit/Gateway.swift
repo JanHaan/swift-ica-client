@@ -76,6 +76,9 @@ public struct LogonForm: Sendable {
     public var summary: String { fields.map { "\($0.id):\($0.kind.rawValue)" }.joined(separator: ",") }
 
     var stateContext: String?
+    /// The document had a `StateContext` element (perhaps empty). StoreFront wants it posted back even when empty
+    /// (`StateContext=`, Common Forms wire example [P]; live: the lab store, D107). The gateway post is unchanged.
+    var hasStateContext = false
     /// Credential IDs posted so far in this logon (all factors).
     var postedIDs: Set<String>
     let strings: LogonStrings
@@ -128,7 +131,7 @@ public struct GatewayLogon: FormLogonFlow {
         public var description: String {
             switch self {
             case .unexpectedResponse(let text): "unexpected gateway response: \(text)"
-            case .rejected(let labels): "gateway rejected the logon: \(labels.joined(separator: " / "))"
+            case .rejected(let labels): "logon rejected: \(labels.joined(separator: " / "))"
             case .needsInput(let what): "the gateway asks for input that cannot be filled automatically: \(what)"
             }
         }
@@ -235,6 +238,10 @@ public struct GatewayLogon: FormLogonFlow {
         if hasDomain, let slash = username.firstIndex(of: "\\") {
             if domain == nil { domain = String(username[..<slash]) }
             username = String(username[username.index(after: slash)...])
+        } else if !hasDomain, let d = domain, !d.isEmpty, !username.contains("\\"), !username.contains("@") {
+            // No domain field (e.g. a StoreFront form with only username/password): the domain goes in as a
+            // `DOMAIN\user` prefix, which is what the `.env` key CITRIX_DOMAIN means (live: the lab store, D107).
+            username = d + "\\" + username
         }
         for field in form.fields where field.isInput && !field.readOnly {
             switch field.kind {
@@ -361,6 +368,7 @@ extension LogonForm {
         postBack = document.postBack ?? ""
         cancelPostBack = document.cancelPostBack
         stateContext = document.stateContext
+        hasStateContext = document.hasStateContext
         self.postedIDs = postedIDs
         self.strings = strings
         isRePrompt = fields.contains { $0.isCredential && postedIDs.contains($0.id) }
@@ -614,6 +622,7 @@ struct FormResponse {
 
     var result: String
     var stateContext: String?
+    var hasStateContext = false
     var postBack: String?
     var cancelPostBack: String?
     var requirements: [Requirement]
@@ -636,6 +645,7 @@ struct FormResponse {
         }
         result = any("Result") ?? ""
         stateContext = any("StateContext").flatMap { $0.isEmpty ? nil : $0 }
+        hasStateContext = any("StateContext") != nil
         postBack = any("PostBack")
         cancelPostBack = any("CancelPostBack").flatMap { $0.isEmpty ? nil : $0 }
         let list = (try? document.nodes(forXPath: "//*[local-name()='Requirement']")) ?? []

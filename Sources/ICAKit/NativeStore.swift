@@ -278,7 +278,7 @@ public final class NativeStoreClient: @unchecked Sendable {
             if form.isRePrompt { throw Failure.logon(form.errors.isEmpty ? "credentials rejected" : form.errors.joined(separator: " ")) }
             let values: [String: String]
             do { values = try GatewayLogon.values(for: form, credentials) } catch { throw Failure.logon("\(error)") }
-            let fields = GatewayLogon.encode(form, values: values, button: nil)
+            let fields = StoreFrontLogon.encode(form, values: values, button: nil)
             posted.formUnion(form.fields.filter(\.isCredential).map(\.id))
             guard let target = URL(string: form.postBack, relativeTo: start)?.absoluteURL else { throw Failure.unexpected("bad PostBack") }
             var headers = baseHeaders

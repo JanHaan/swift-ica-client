@@ -79,12 +79,13 @@ public struct StoreClient {
     func syncDeviceId() {
         guard let store = Self.deviceIdentity else { return }
         DeviceIdentity.restore(into: http, from: store, base: base)
-        DeviceIdentity.remember(from: http, into: store)
+        DeviceIdentity.remember(from: http, into: store, base: base)
     }
 
     func post(_ path: String, form: [(String, String)]? = nil) async throws -> HTTPClient.Response {
         var headers = ["X-Citrix-IsUsingHTTPS": usingHTTPS, "X-Requested-With": "XMLHttpRequest", "Accept": "*/*"]
-        if let csrf = http.cookie("CsrfToken") { headers["Csrf-Token"] = csrf }
+        // The store's own token: a jar may hold another host's CsrfToken too (D107).
+        if let csrf = http.cookie("CsrfToken", for: base) { headers["Csrf-Token"] = csrf }
         syncDeviceId()
         defer { syncDeviceId() }
         return try await http.send("POST", URL(string: path, relativeTo: base)!, headers: headers, form: form)
@@ -147,7 +148,7 @@ public struct StoreClient {
                 var components = URLComponents(url: URL(string: launchURL, relativeTo: base)!,
                                                resolvingAgainstBaseURL: true)!
                 components.queryItems = [
-                    URLQueryItem(name: "CsrfToken", value: http.cookie("CsrfToken") ?? ""),
+                    URLQueryItem(name: "CsrfToken", value: http.cookie("CsrfToken", for: base) ?? ""),
                     URLQueryItem(name: "IsUsingHttps", value: usingHTTPS),
                 ]
                 let ica = try await http.send("GET", components.url!)

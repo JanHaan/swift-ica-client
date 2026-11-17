@@ -62,7 +62,7 @@ public struct StoreFrontLogon: FormLogonFlow {
     func headers(conversation: Bool) -> [String: String] {
         var h = ["X-Citrix-IsUsingHTTPS": Self.usingHTTPS(base), "X-Requested-With": "XMLHttpRequest",
                  "Accept": "application/xml, text/xml, application/vnd.citrix.authenticateresponse-1+xml, */*"]
-        if let csrf = http.cookie("CsrfToken") { h["Csrf-Token"] = csrf }
+        if let csrf = http.cookie("CsrfToken", for: base) { h["Csrf-Token"] = csrf }
         if conversation {
             h["X-Citrix-AM-CredentialTypes"] = "none, username, domain, password, newpassword, passcode, savecredentials, textcredential"
             h["X-Citrix-AM-LabelTypes"] = "none, plain, heading, information, warning, error, confirmation"
@@ -83,23 +83,25 @@ public struct StoreFrontLogon: FormLogonFlow {
 
     // MARK: Conversation
 
-    /// `Home/Configuration` (CSRF token, session cookie), the auth methods, then the first form.
+    /// The site page, `Home/Configuration` (CSRF token, session cookie), an unauthenticated `Resources/List` (the
+    /// challenge, as the web UI does [P WEBAPI "Getting started"]), the auth methods, then the first form. This is
+    /// the sequence of the lab's working logon (D107).
     public func begin() async throws -> LogonForm {
+        let store = StoreClient(http: http, base: base)
+        store.syncDeviceId()
+        _ = try? await transport("GET", base, ["X-Citrix-IsUsingHTTPS": Self.usingHTTPS(base)], nil)
         let config = try await send("Home/Configuration")
         guard config.status == 200, config.text.contains("clientSettings") else { throw Failure.notAStore(config.status) }
         SessionEndpoints.remember(SessionEndpoints(configuration: config.text), for: base)
+        let list = try await send("Resources/List", form: [("format", "json"), ("resourceDetails", "Default")])
+        http.trace("  store Resources/List before logon: \(list.status)"
+                   + (list.header("CitrixWebReceiver-Authenticate") != nil ? ", challenge" : ""))
         let response = try await send("Authentication/GetAuthMethods")
         guard response.status == 200 else { throw Failure.http("Authentication/GetAuthMethods", response.status) }
         let methods = Self.parseAuthMethods(response.body)
         http.trace("  store auth methods: \(methods.map(\.name).joined(separator: ","))")
         guard let explicit = methods.first(where: { $0.name == "ExplicitForms" }) else {
             throw Failure.noExplicitForms(methods.map(\.name))
-        }
-        // The web UI keeps the chosen method in this cookie; the public example requests carry it [P], whether the
-        // server needs it is [I].
-        if let cookie = HTTPCookie(properties: [.name: "CtxsAuthMethod", .value: "ExplicitForms", .path: base.path,
-                                                .domain: base.host ?? "", .originURL: base]) {
-            http.setCookie(cookie)
         }
         let first = try await send(explicit.url, conversation: true)
         switch try step(first, postedIDs: []) {
@@ -110,7 +112,7 @@ public struct StoreFrontLogon: FormLogonFlow {
     }
 
     public func submit(_ form: LogonForm, values: [String: String], button: String? = nil) async throws -> LogonStep {
-        let body = GatewayLogon.encode(form, values: values, button: button)
+        let body = Self.encode(form, values: values, button: button)
         http.trace("  store form post fields=\(body.map(\.0).joined(separator: ","))")
         let response = try await send(form.postBack, conversation: true, form: body)
         let posted = form.postedIDs.union(form.fields.filter(\.isCredential).map(\.id))
@@ -135,6 +137,14 @@ public struct StoreFrontLogon: FormLogonFlow {
             }
         }
         throw GatewayLogon.Failure.unexpectedResponse("too many logon forms")
+    }
+
+    /// The gateway's form post, plus `StateContext=` when the form had an empty `StateContext` element (StoreFront
+    /// expects the field; D107).
+    static func encode(_ form: LogonForm, values: [String: String], button: String?) -> [(String, String)] {
+        var body = GatewayLogon.encode(form, values: values, button: button)
+        if form.stateContext == nil, form.hasStateContext { body.append(("StateContext", "")) }
+        return body
     }
 
     func step(_ response: HTTPClient.Response, postedIDs: Set<String>) throws -> LogonStep {

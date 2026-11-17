@@ -39,7 +39,7 @@ private func textInput(secret: Bool = false, initial: String = "") -> String {
     "<Text><Secret>\(secret)</Secret><ReadOnly>false</ReadOnly><InitialValue>\(initial)</InitialValue><Constraint>.+</Constraint></Text>"
 }
 
-private func loginForm(domainList: Bool = false, error: String? = nil, username: String = "") -> String {
+private func loginForm(domainList: Bool = false, error: String? = nil, username: String = "", state: String = "ctx-1") -> String {
     var reqs = ""
     if let error {
         reqs += "<Requirement><Credential><Type>none</Type></Credential><Label><Text>\(error)</Text><Type>error</Type></Label></Requirement>"
@@ -61,7 +61,7 @@ private func loginForm(domainList: Bool = false, error: String? = nil, username:
     return """
     <?xml version="1.0" encoding="UTF-8"?>
     <AuthenticateResponse xmlns="http://citrix.com/authentication/response/1">
-      <Status>success</Status><Result>more-info</Result><StateContext>ctx-1</StateContext>
+      <Status>success</Status><Result>more-info</Result>\(state.isEmpty ? "<StateContext />" : "<StateContext>\(state)</StateContext>")
       <AuthenticationRequirements><PostBack>ExplicitAuth/LoginAttempt</PostBack>
       <CancelPostBack>ExplicitAuth/CancelForm</CancelPostBack><CancelButtonText>Cancel</CancelButtonText>
       <Requirements>\(reqs)</Requirements></AuthenticationRequirements>
@@ -82,6 +82,7 @@ private final class FakeWebStore: @unchecked Sendable {
     var requests: [Request] = []
     var domainList = false
     var methods = authMethods
+    var state = "ctx-1"
     let password = "pw-1"
 
     var attempts: [[(String, String)]] { requests.filter { $0.path.hasSuffix("/ExplicitAuth/LoginAttempt") }.map { $0.form ?? [] } }
@@ -94,7 +95,10 @@ private final class FakeWebStore: @unchecked Sendable {
             switch url.path {
             case "/Citrix/StoreWeb/Home/Configuration": return reply(200, clientSettings, url: url)
             case "/Citrix/StoreWeb/Authentication/GetAuthMethods": return reply(200, methods, url: url)
-            case "/Citrix/StoreWeb/ExplicitAuth/Login": return reply(200, loginForm(domainList: domainList), url: url)
+            case "/Citrix/StoreWeb/Resources/List":
+                return reply(200, #"{"unauthorized": true}"#,
+                             headers: ["CitrixWebReceiver-Authenticate": #"reason="TokenRequired", location="Authentication/GetAuthMethods""#], url: url)
+            case "/Citrix/StoreWeb/ExplicitAuth/Login": return reply(200, loginForm(domainList: domainList, state: state), url: url)
             case "/Citrix/StoreWeb/ExplicitAuth/LoginAttempt":
                 let fields = Dictionary(form ?? [], uniquingKeysWith: { a, _ in a })
                 if fields["password"] == password { return reply(200, loginSuccess, url: url) }
@@ -111,9 +115,12 @@ private final class FakeWebStore: @unchecked Sendable {
     @Test func explicitLogonFollowsTheWebAPIFlow() async throws {
         let store = FakeWebStore()
         try await store.logon().logon(.init(username: "CORP\\user1", password: "pw-1"))
-        #expect(store.requests.map(\.path) == ["/Citrix/StoreWeb/Home/Configuration", "/Citrix/StoreWeb/Authentication/GetAuthMethods",
+        // The sequence of the lab's working logon (D107): site page, configuration, the unauthenticated list, methods.
+        #expect(store.requests.map(\.path) == ["/Citrix/StoreWeb", "/Citrix/StoreWeb/Home/Configuration", "/Citrix/StoreWeb/Resources/List",
+                                               "/Citrix/StoreWeb/Authentication/GetAuthMethods",
                                                "/Citrix/StoreWeb/ExplicitAuth/Login", "/Citrix/StoreWeb/ExplicitAuth/LoginAttempt"])
-        #expect(store.requests.allSatisfy { $0.method == "POST" })
+        #expect(store.requests.map(\.method) == ["GET", "POST", "POST", "POST", "POST", "POST"])
+        #expect(store.requests[2].form?.map(\.0) == ["format", "resourceDetails"])
         // Plain HTTP store: the HTTPS indicator is No, so the store's cookies are not marked Secure.
         #expect(store.requests.allSatisfy { $0.headers["X-Citrix-IsUsingHTTPS"] == "No" })
         let login = try #require(store.requests.first { $0.path.hasSuffix("/ExplicitAuth/Login") })
@@ -124,6 +131,48 @@ private final class FakeWebStore: @unchecked Sendable {
         let values = Dictionary(store.attempts[0], uniquingKeysWith: { a, _ in a })
         #expect(values["username"] == "CORP\\user1" && values["saveCredentials"] == "false")
         #expect(values["loginBtn"] == "Log On" && values["StateContext"] == "ctx-1")
+    }
+
+    @Test func emptyStateContextIsPostedBack() async throws {
+        // Live (D107): the lab store answers `<StateContext />` and wants `StateContext=` back; without it: Result fail.
+        let store = FakeWebStore()
+        store.state = ""
+        try await store.logon().logon(.init(username: "user1", password: "pw-1", domain: "CORP"))
+        let fields = try #require(store.attempts.first)
+        #expect(fields.map(\.0) == ["username", "password", "saveCredentials", "loginBtn", "StateContext"])
+        #expect(fields.last?.1 == "")
+        // No domain field: the domain becomes the `DOMAIN\user` prefix.
+        #expect(fields.first?.1 == "CORP\\user1")
+    }
+
+    @Test func deviceIdOfAnotherHostIsNeitherRestoredNorOverwritten() {
+        let http = HTTPClient()
+        final class Memory: DeviceIdentityStore {
+            var record: [String: String]? = ["value": "gw-dev", "domain": "gateway.example", "path": "/welcome/"]
+            func load() -> [String: String]? { record }
+            func save(_ r: [String: String]) { record = r }
+        }
+        let store = Memory()
+        DeviceIdentity.restore(into: http, from: store, base: storeBase)
+        #expect(http.cookieRecords(DeviceIdentity.cookieName).isEmpty)
+        http.setCookie(HTTPCookie(properties: [.name: "CtxsDeviceId", .value: "gw-dev", .domain: "gateway.example", .path: "/welcome/"])!)
+        DeviceIdentity.restore(into: http, from: store, base: storeBase)
+        DeviceIdentity.remember(from: http, into: store, base: storeBase)
+        #expect(store.record?["value"] == "gw-dev")   // nothing for this store's host yet: the record stays
+    }
+
+    @Test func csrfTokenComesFromTheStoresOwnCookie() async throws {
+        // A jar loaded from disk may also hold a gateway's CsrfToken (D107: 403 on GetAuthMethods).
+        let store = FakeWebStore()
+        let logon = store.logon()
+        for (host, value) in [("gateway.example", "GATEWAY-TOKEN"), ("storefront.example", "STORE-TOKEN")] {
+            let path = host == "gateway.example" ? "/" : "/Citrix/StoreWeb/"
+            logon.http.setCookie(HTTPCookie(properties: [.name: "CsrfToken", .value: value, .domain: host, .path: path])!)
+        }
+        #expect(logon.http.cookie("CsrfToken", for: storeBase) == "STORE-TOKEN")
+        #expect(logon.http.cookie("CsrfToken", for: URL(string: "https://gateway.example/welcome/")!) == "GATEWAY-TOKEN")
+        _ = try await logon.begin()
+        #expect(store.requests.filter { $0.method == "POST" }.allSatisfy { $0.headers["Csrf-Token"] == "STORE-TOKEN" })
     }
 
     @Test func formParsesIntoTypedFields() async throws {
