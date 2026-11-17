@@ -465,7 +465,9 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
     /// The remote app's name and where it comes from (the version is the helper template's).
     @objc private func about(_ sender: Any?) {
         let credits = NSAttributedString(string: HelperMenu.aboutCredits(german: german), attributes: [
-            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            // 58 % black in light mode: secondaryLabelColor is 3.06:1 there (docs/ux/audit.md §4.1)
+            .foregroundColor: NSColor(name: nil) { $0.bestMatch(from: [.aqua, .darkAqua]) == .aqua ? NSColor(white: 0, alpha: 0.58) : .secondaryLabelColor },
         ])
         NSApp.activate()
         // The icon shown in the Dock (the remote app's, set at runtime), not the template bundle's generic one.

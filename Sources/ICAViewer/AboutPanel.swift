@@ -13,7 +13,7 @@ enum AboutPanel {
         let small = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         let credits = NSMutableAttributedString()
         func line(_ text: String, link: String? = nil) {
-            var attributes: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: NSColor.secondaryLabelColor]
+            var attributes: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: NSColor.secondaryText]
             if let link { attributes[.link] = URL(string: link); attributes[.foregroundColor] = NSColor.linkColor }
             if credits.length > 0 { credits.append(NSAttributedString(string: "\n", attributes: [.font: small])) }
             credits.append(NSAttributedString(string: text, attributes: attributes))

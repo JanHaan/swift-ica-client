@@ -50,7 +50,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         search.delegate = self
         search.sendsWholeSearchString = true
         search.sendsSearchStringImmediately = false
-        status.textColor = .secondaryLabelColor
+        status.textColor = .secondaryText
         status.lineBreakMode = .byTruncatingTail
 
         // Opens a window and asks nothing: no ellipsis (HIG, Menus).

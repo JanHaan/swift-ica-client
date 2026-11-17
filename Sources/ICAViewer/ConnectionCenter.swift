@@ -129,6 +129,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         build()
         window.center()
         NotificationCenter.default.addObserver(self, selector: #selector(refusedChanged), name: .refusedFeaturesChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refusedChanged), name: .storeIconsChanged, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -157,7 +158,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         refresh.keyEquivalent = "r"
         refresh.keyEquivalentModifierMask = .command
         for b in [reconnectAllButton, refresh] { b.bezelStyle = .rounded }
-        status.textColor = .secondaryLabelColor
+        status.textColor = .secondaryText
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let bar = NSStackView(views: [refresh, status, NSView(), reconnectAllButton])
@@ -332,7 +333,14 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         return parts.joined(separator: " · ")
     }
 
-    private static let genericIcon = NSWorkspace.shared.icon(for: .applicationBundle)
+    /// The row's app icon from the store (as in the launcher), or none: a generic icon on every row tells nothing.
+    private func rowIcon(_ row: Row) -> NSImage? {
+        let first = row.local?.apps.first ?? row.store?.appNames.first
+        guard let name = first, let r = resources().first(where: { $0.name == name || displayName($0.name) == displayName(name) }),
+              let url = r.iconurl, !url.isEmpty, let image = StoreIconCache.shared.image(forIconURL: url),
+              let canvas = IconCanvas.render(image, side: 96, inset: 0) else { return nil }
+        return NSImage(cgImage: canvas, size: NSSize(width: 24, height: 24))
+    }
 
     private func render(_ rows: [Row]) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -366,21 +374,21 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             header.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
             stack.addArrangedSubview(header)
             for row in members {
-                let icon = NSImageView(image: Self.genericIcon)
+                let icon = NSImageView(image: rowIcon(row) ?? NSImage())
                 icon.translatesAutoresizingMaskIntoConstraints = false
                 icon.widthAnchor.constraint(equalToConstant: 24).isActive = true
                 icon.heightAnchor.constraint(equalToConstant: 24).isActive = true
                 let name = NSTextField(labelWithString: row.title)
                 name.lineBreakMode = .byTruncatingTail
                 let info = NSTextField(labelWithString: row.detail)
-                info.textColor = .secondaryLabelColor
+                info.textColor = .secondaryText
                 info.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
                 info.lineBreakMode = .byTruncatingTail
                 for t in [name, info] { t.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
                 var labelViews: [NSView] = [name, info]
                 if !row.refused.isEmpty {
                     let blocked = NSTextField(labelWithString: row.refused.joined(separator: "\n"))
-                    blocked.textColor = .tertiaryLabelColor
+                    blocked.textColor = .secondaryText
                     blocked.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
                     blocked.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
                     labelViews.append(blocked)

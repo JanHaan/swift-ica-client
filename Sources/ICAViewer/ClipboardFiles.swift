@@ -735,7 +735,7 @@ final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
         panel.delegate = self
         label.preferredMaxLayoutWidth = 388
         detail.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        detail.textColor = .secondaryLabelColor
+        detail.textColor = .secondaryText
         bar.style = .bar
         bar.isIndeterminate = false
         bar.minValue = 0

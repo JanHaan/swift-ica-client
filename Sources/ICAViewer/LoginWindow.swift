@@ -73,13 +73,10 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        gatewayField.controlSize = .small
-        gatewayField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         gatewayField.placeholderString = loc("gateway or store address", "Gateway- oder Store-Adresse")
         gatewayField.target = self
         gatewayField.action = #selector(gatewayEdited)
         gatewayField.delegate = self
-        gatewayField.widthAnchor.constraint(equalToConstant: 220).isActive = true
         gatewayField.setAccessibilityLabel(loc("Gateway or store address", "Gateway- oder Store-Adresse"))
         spinner.setAccessibilityLabel(loc("Signing in", "Anmeldung läuft"))
     }
@@ -484,6 +481,8 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         }
 
         if let form {
+            // The address is the form's first row (docs/ux/audit.md U8), aligned with the other fields.
+            gridRow(service.accountKind == .storeFront ? "Store:" : "Gateway:", gatewayField)
             var rememberShown = false
             for f in form.fields {
                 switch f.kind {
@@ -607,23 +606,25 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         buttonRow.spacing = 8
         bar[bar.firstIndex { type(of: $0) == NSView.self }!].setContentHuggingPriority(.init(1), for: .horizontal)
 
-        // Gateway address: small and editable.
-        let gatewayLabel = NSTextField(labelWithString: service.accountKind == .storeFront ? "Store:" : "Gateway:")
-        gatewayLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        gatewayLabel.textColor = .secondaryLabelColor
+        // Without a form (no address yet, probing, an error): the address on its own row.
         gatewayField.isEnabled = !busy
-        let gatewayRow = NSStackView(views: [gatewayLabel, gatewayField])
+        let gatewayLabel = NSTextField(labelWithString: service.accountKind == .storeFront ? "Store:" : "Gateway:")
+        let gatewayRow = NSStackView(views: form == nil ? [gatewayLabel, gatewayField] : [])
         gatewayRow.orientation = .horizontal
-        gatewayRow.spacing = 4
+        gatewayRow.spacing = 8
+        gatewayRow.alignment = .firstBaseline
+        gatewayLabel.setContentHuggingPriority(.required, for: .horizontal)
 
+        // The address comes first in the reading order (it is what a new user types first): after the message and,
+        // with no address yet, after the sentence that asks for it (docs/ux/audit.md U8).
+        if form == nil { rows.insert(gatewayRow, at: service.gateway == nil ? rows.count : (message == nil ? 0 : 1)) }
         rows.append(buttonRow)
-        rows.append(gatewayRow)
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
-        for view in rows where view !== gatewayRow {
+        for view in rows {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         }
@@ -699,7 +700,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         case .error: label.textColor = .systemRed
         case .small:
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            label.textColor = .secondaryLabelColor
+            label.textColor = .secondaryText
         }
         return label
     }

@@ -176,7 +176,7 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate, NSTe
                                "Es wird nichts automatisch gesendet. „GitHub-Issue anlegen…“ sichert den vollständigen Bericht (mit Protokoll) "
                                + "als Datei, zeigt sie im Finder und öffnet GitHub im Browser mit Titel, Beschreibung und Umgebung. "
                                + "Ziehen Sie die Datei in das Issue, prüfen Sie es und senden Sie es dort ab."),
-                           font: .systemFont(ofSize: 11), color: .secondaryLabelColor))
+                           font: .systemFont(ofSize: 11), color: .secondaryText))
         statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
         statusLabel.textColor = .systemGreen
         statusLabel.isSelectable = true

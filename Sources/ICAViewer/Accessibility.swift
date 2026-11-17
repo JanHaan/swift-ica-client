@@ -43,3 +43,15 @@ enum Access {
         }
     }
 }
+
+extension NSColor {
+    /// Secondary text that keeps WCAG AA (4.5:1) and ASR A6 (4:1): on macOS 26 `secondaryLabelColor` measures 3.06:1
+    /// on the light window background (docs/ux/audit.md §4.1), so light mode uses 58 % black (about 5.2:1). Dark mode
+    /// (4.86:1) and Increase Contrast keep the system colour. Not for text on the dark HUD material.
+    static let secondaryText = NSColor(name: "ICAViewerSecondaryText") { appearance in
+        switch appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua]) {
+        case .aqua?: NSColor(white: 0, alpha: 0.58)
+        default: .secondaryLabelColor
+        }
+    }
+}

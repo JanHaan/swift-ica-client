@@ -56,15 +56,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     static let clipFilesTitle = Text(en: "Copy files through the clipboard", de: "Dateien über die Zwischenablage kopieren")
     static let clipFilesHint = Text(en: "Copy in Finder and paste in the session, or the other way round. Applies at the next connect.",
                                     de: "Im Finder kopieren und in der Sitzung einsetzen, oder umgekehrt. Gilt ab der nächsten Verbindung.")
-    static let clipLimitHint = Text(en: "Larger copies from the session are fetched in the background with a progress window; above this size ICA Viewer asks first. Copies from the Mac to the session stop at this size.",
-                                    de: "Größere Kopien aus der Sitzung werden im Hintergrund mit Fortschrittsfenster geholt; ab dieser Größe fragt ICA Viewer vorher. Kopien vom Mac in die Sitzung enden bei dieser Größe.")
+    static let clipLimitHint = Text(en: "Above this size ICA Viewer asks before copying from the session, and copies to the session stop.",
+                                    de: "Ab dieser Größe fragt ICA Viewer vor Kopien aus der Sitzung, und Kopien in die Sitzung enden.")
     static let dropAutomatic = Text(en: "Reconnect automatically", de: "Automatisch erneut verbinden")
     static let dropAsk = Text(en: "Ask", de: "Fragen")
-    static let dropHint = Text(en: "After a longer network drop, ICA Viewer reconnects your session through the store, waiting up to 10 minutes for the network. Short drops always resume by themselves.",
-                               de: "Nach einem längeren Netzwerkausfall verbindet ICA Viewer die Sitzung über den Store neu und wartet bis zu 10 Minuten auf das Netzwerk. Kurze Ausfälle werden immer von selbst überbrückt.")
+    static let dropHint = Text(en: "For drops longer than a few seconds; short ones always resume by themselves.",
+                               de: "Für Ausfälle über einige Sekunden; kurze werden immer von selbst überbrückt.")
     static let dockTitle = Text(en: "One Dock entry per app", de: "Ein Dock-Eintrag pro App")
-    static let dockHint = Text(en: "Each remote app gets its own Dock icon and Cmd-Tab entry; ICA Viewer then waits in the menu bar. Applies the next time ICA Viewer starts.",
-                               de: "Jede Remote-App erhält ein eigenes Dock-Symbol und einen eigenen Cmd-Tab-Eintrag; ICA Viewer wartet dann in der Menüleiste. Gilt ab dem nächsten Start von ICA Viewer.")
+    static let dockHint = Text(en: "Each remote app gets its own Dock icon and ⌘-Tab entry. Applies when ICA Viewer starts next.",
+                               de: "Jede Remote-App erhält ein eigenes Dock-Symbol und einen eigenen ⌘-Tab-Eintrag. Gilt ab dem nächsten Start von ICA Viewer.")
     static let dockOverride = Text(en: "ICA_HELPER_APPS overrides this setting in this run.",
                                    de: "ICA_HELPER_APPS hat in diesem Lauf Vorrang vor dieser Einstellung.")
     static let shortcutOff = Text(en: "Off", de: "Aus")
@@ -253,7 +253,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             popup.target = self
             popup.action = #selector(scalingChanged)
         }
-        scalingNote.textColor = .secondaryLabelColor
+        scalingNote.textColor = .secondaryText
         scalingNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         scalingNote.maximumNumberOfLines = 4
         scalingNote.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -286,7 +286,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         for choice in LauncherHotKey.choices { shortcutPopup.addItem(withTitle: choice.shortcut == nil ? T.shortcutOff.shown : choice.title) }
         folderPath.lineBreakMode = .byTruncatingMiddle
         folderPath.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
-        status.textColor = .secondaryLabelColor
+        status.textColor = .secondaryText
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
         func label(_ key: String) -> NSTextField {
@@ -297,16 +297,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup, shortcutPopup, dropPopup, clipLimitPopup])
         func hint(_ text: Text) -> NSTextField {
             let l = NSTextField(wrappingLabelWithString: text.shown)
-            l.textColor = .secondaryLabelColor
+            l.textColor = .secondaryText
             l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             l.preferredMaxLayoutWidth = widths.column1
             return l
         }
-        cameraAccessNote.textColor = .secondaryLabelColor
+        cameraAccessNote.textColor = .secondaryText
         cameraAccessNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         cameraAccessNote.preferredMaxLayoutWidth = widths.column1
         for note in [dockHint, shortcutHint] {
-            note.textColor = .secondaryLabelColor
+            note.textColor = .secondaryText
             note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             note.preferredMaxLayoutWidth = widths.column1
             note.maximumNumberOfLines = 0
@@ -323,7 +323,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         let folderRow = NSStackView(views: [folderPath, chooseFolderButton, revealFolderButton])
         folderRow.spacing = 6
         quitPopup.addItems(withTitles: QuitAction.allCases.map(\.title))
-        staleNote.textColor = .secondaryLabelColor
+        staleNote.textColor = .secondaryText
         staleNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         staleNote.preferredMaxLayoutWidth = widths.column1
         reconnectNowButton.target = self
@@ -794,7 +794,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         let text = NSMutableAttributedString()
         for (i, (line, fallback)) in lines.enumerated() {
             text.append(NSAttributedString(string: (i > 0 ? "\n" : "") + (fallback ? "ⓘ " : "") + line,
-                                           attributes: [.font: font, .foregroundColor: fallback ? NSColor.labelColor : NSColor.secondaryLabelColor]))
+                                           attributes: [.font: font, .foregroundColor: fallback ? NSColor.labelColor : NSColor.secondaryText]))
         }
         scalingNote.attributedStringValue = text
         scalingNote.toolTip = text.string

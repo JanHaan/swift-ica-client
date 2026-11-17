@@ -123,8 +123,8 @@ final class PrintJobsController: NSObject, NSWindowDelegate {
         panel.delegate = self
         titleLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         titleLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.textColor = .secondaryLabelColor
-        queueLabel.textColor = .secondaryLabelColor
+        detailLabel.textColor = .secondaryText
+        queueLabel.textColor = .secondaryText
         queueLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         thumbnail.imageScaling = .scaleProportionallyUpOrDown
         thumbnail.wantsLayer = true
