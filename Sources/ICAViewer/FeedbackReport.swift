@@ -91,6 +91,7 @@ enum FeedbackSources {
         lines.append("Gateway: " + (login.gateway != nil ? "set in Settings" : envGateway ? "set in .env" : "not set")
                      + (login.gateway != nil && envGateway ? " and in .env" : "") + " (host not shown)")
         let envLogon = env?["CITRIX_USERNAME"] != nil && env?["CITRIX_PASSWORD"] != nil && !StoreService.autofill
+            && !TestSwitches.isDeveloperIDBuild
         lines.append("Sign-in: " + (envLogon ? ".env (non-interactive)" : "login window"))
         switch login.passcodeMode {
         case .prompt: lines.append("Passcode: typed at each sign-in")

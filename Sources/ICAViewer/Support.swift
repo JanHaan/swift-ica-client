@@ -327,7 +327,9 @@ final class StoreService: @unchecked Sendable {
     }
 
     init() {
-        env = Demo.enabled ? nil : try? Env(path: Paths.envFile)
+        // `.env` credentials (password and TOTP secret in plain text) are for automated development runs; a Developer ID
+        // build never signs in from them (security review L-08).
+        env = Demo.enabled || TestSwitches.isDeveloperIDBuild ? nil : try? Env(path: Paths.envFile)
         let keychain = KeychainSecretStore()
         keychain.log = { vlog($0) }
         credentials = LoginCredentials(settings: UserDefaultsSettingsStore(), secrets: keychain)
