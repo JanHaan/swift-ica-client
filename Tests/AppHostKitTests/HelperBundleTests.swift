@@ -92,7 +92,10 @@ import Testing
         #expect(HelperLaunch.parse(["exe", "--broker", "b", "--token", "argv", "--host-pid", "7"],
                                    environment: [HelperLaunch.tokenVariable: "env"])?.token == "env")
         #expect(launch.token.count == 32)
-        #expect(launch.broker == "local.alttab.ICAViewer.broker.42")
+        #expect(launch.broker.hasPrefix("local.alttab.ICAViewer.broker.42."))
+        // Security review L-14: 64 random bits after the pid, a new name each time.
+        #expect(launch.broker.split(separator: ".").last?.count == 16)
+        #expect(HelperLaunch.brokerName(hostPid: 42) != HelperLaunch.brokerName(hostPid: 42))
     }
 
     @Test func ignoresForeignArgumentsAndRejectsIncomplete() {

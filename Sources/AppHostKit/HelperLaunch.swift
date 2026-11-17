@@ -14,7 +14,13 @@ public struct HelperLaunch: Equatable, Sendable {
         self.broker = broker; self.token = token; self.hostPid = hostPid; self.headless = headless
     }
 
-    public static func brokerName(hostPid: Int32) -> String { "local.alttab.ICAViewer.broker.\(hostPid)" }
+    /// `local.alttab.ICAViewer.broker.<pid>.<64 random bits>`: unguessable, so another process of the user cannot
+    /// register the name ahead of a future host and take its helpers' check-ins (security review L-14). Call once per
+    /// host and keep the result; the helper gets it in its arguments.
+    public static func brokerName(hostPid: Int32) -> String {
+        var rng = SystemRandomNumberGenerator()
+        return "local.alttab.ICAViewer.broker.\(hostPid)." + String(format: "%016llx", rng.next() as UInt64)
+    }
 
     /// Environment variable that carries the token.
     public static let tokenVariable = "ICA_HELPER_TOKEN"
