@@ -163,7 +163,9 @@ final class SessionController: NSObject {
                                  printing: Self.printingConfig(), audio: Self.audioConfig(),
                                  webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless),
                                  gdt: Self.gdtConfig())
+        refused = RefusedFeatureMonitor(app: name, requested: RefusedFeatureMonitor.requested(session))
         super.init()
+        refused.register(self)
         keyboard.controller = self
         setUpClipboard()
         setUpDriveMapping()
@@ -290,6 +292,7 @@ final class SessionController: NSObject {
             case .resumed: DispatchQueue.main.async { self?.linkResumed() }
             case .gaveUp(let info): DispatchQueue.main.async { self?.gaveUp = info }
             case .wd(let e):
+                if case .packet(let p) = e, let ch = p.channel { self?.refused.hostPacket(channel: ch) }
                 switch e {
                 case .connected:
                     DispatchQueue.main.async { self?.connected = true }
@@ -313,6 +316,19 @@ final class SessionController: NSObject {
                 }
             default: break
             }
+        }
+    }
+
+    /// Redirections the server refused (D118): Connection Center lines and the one-time notice.
+    let refused: RefusedFeatureMonitor
+
+    /// Cmd/Ctrl-C, -X or -P into a remote window (Keyboard): the first blocked one per session gets the notice.
+    func shortcutAttempt(_ key: String) {
+        guard !ended else { return }
+        switch key {
+        case "c", "x": refused.attempt(.clipboard, near: NSApp.keyWindow)
+        case "p": refused.attempt(.printing, near: NSApp.keyWindow)
+        default: break
         }
     }
 
@@ -710,6 +726,7 @@ final class SessionController: NSObject {
         remote.show(activate: w.kind == .appWindow && (foreground == w.id || appWindowCount == 1))
         if w.kind == .appWindow {
             sawAppWindow = true
+            refused.appWindowShown()
             if let pid = w.processId { appWindowProcesses?.insert(pid) }
             onAppWindowShown?(self)
             onAppWindowAppeared?(self, w.appKey)
@@ -990,6 +1007,7 @@ final class SessionController: NSObject {
         guard !ended else { return }
         ended = true
         endReason = reason
+        refused.unregister()
         pendingLogoff?.cancel()
         statsTimer?.cancel()
         fpsTimer?.invalidate()
@@ -1461,6 +1479,7 @@ final class SessionController: NSObject {
     /// Right before Cmd-V/Ctrl-V goes to the host. If a new announce was just queued, all input (keys,
     /// mouse, wheel) is held briefly so the host has the list before the paste (§5.4).
     func clipboardBeforePaste() {
+        if !ended { refused.pasteAttempt(near: NSApp.keyWindow) }
         guard !ended, let sync = clipboardSync, sync.check("paste key") else { return }
         holdInput(for: pasteDelay)
     }

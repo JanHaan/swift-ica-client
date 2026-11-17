@@ -27,9 +27,10 @@ func runPolicyProbe(ica: ICAFile, app: TestApp) async throws {
     var audioConfig = AudioEngine.Config()
     audioConfig.capabilities = AudioWire.Caps.playback
     audioConfig.microphone = false   // never a capture device
-    let session = try ICASession(ica: ica, configuration: config, clipboard: clipTestConfig(),
+    // File copy (CTXGDT) is announced as ICA Viewer does with clipboard files on (D90), so its refusal shows too.
+    let session = try ICASession(ica: ica, configuration: config, clipboard: clipTestConfig(files: true),
                                  cdm: CDMEngine.Config(fileSystem: try CDMPOSIXFileSystem(root: folder, readOnly: true), letter: "M", label: "probe"),
-                                 printing: PrinterEngine.Config(), audio: audioConfig)
+                                 printing: PrinterEngine.Config(), audio: audioConfig, gdt: GDTEngine.Config())
     let seamless = session.seamless
 
     // Session-queue state.
@@ -42,6 +43,10 @@ func runPolicyProbe(ica: ICAFile, app: TestApp) async throws {
     var printCommands = 0
     var audioCommands = 0
     var hostBytes: [UInt8: Int] = [:]
+    // The app's refusal rule (ICAKit RedirectionStatus, D118) on the same traffic, and when each channel spoke first.
+    var redirections = RedirectionStatus(requested: Set(RedirectionFeature.allCases))
+    let started = Date()
+    var firstHostData: [RedirectionFeature: Double] = [:]
     var failures: [String] = []
     var terminateReason: UInt8?
 
@@ -77,7 +82,10 @@ func runPolicyProbe(ica: ICAFile, app: TestApp) async throws {
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
-            if w.kind == .appWindow { appWindows.append(w.id) }
+            if w.kind == .appWindow {
+                appWindows.append(w.id)
+                redirections.appWindowShown(at: Date().timeIntervalSince(started))
+            }
             say("TWI window \(w.id) \(w.kind) \"\(w.title)\" app \(w.appKey)")
         case .windowChanged(let w, _): windowsSeen.note(w)
         case .windowRemoved(let w): appWindows.removeAll { $0 == w.id }
@@ -92,7 +100,11 @@ func runPolicyProbe(ica: ICAFile, app: TestApp) async throws {
         case .log(let text): say(text)
         case .closed(let reason): say("session closed: \(reason)")
         case .wd(.initResponseSent(let modules, _)): say("→ INIT_RESPONSE modules \(modules.joined(separator: ", "))")
-        case .wd(.packet(let p)): if let ch = p.channel { hostBytes[ch, default: 0] += p.payload.count }
+        case .wd(.packet(let p)):
+            if let ch = p.channel {
+                hostBytes[ch, default: 0] += p.payload.count
+                if let f = redirections.hostData(channel: ch) { firstHostData[f] = Date().timeIntervalSince(started) }
+            }
         case .wd(.terminate(let reason)):
             terminateReason = reason
             say("← TERMINATE reason \(reason)")
@@ -140,6 +152,7 @@ func runPolicyProbe(ica: ICAFile, app: TestApp) async throws {
     let (clip, cdm, cpm, cam, bytes, errors, cdmError) = await onSession(session) {
         (clipReady, cdmConnect, printCommands, audioCommands, hostBytes, failures, cdmProtocolError)
     }
+    let (tracker, firsts) = await onSession(session) { (redirections, firstHostData) }
     let used: [(String, Bool, String)] = [
         ("clipboard", clip, "CLIP_INIT \(clip ? "yes" : "no"), ch \(ClipboardWire.channelNumber) \(bytes[ClipboardWire.channelNumber] ?? 0) B"),
         ("drives", cdm, "CDM CONNECT \(cdm ? "yes" : "no"), ch \(CDMWire.channelNumber) \(bytes[CDMWire.channelNumber] ?? 0) B"),
@@ -150,6 +163,13 @@ func runPolicyProbe(ica: ICAFile, app: TestApp) async throws {
     say("\n=== policyprobe summary (\(app.resource)) ===")
     say("fresh logon: \(fresh), app window: \(found), errors: \(errors.isEmpty && cdmError == nil ? "none" : (errors + [cdmError].compactMap { $0 }).joined(separator: "; "))")
     for (name, on, detail) in used { say("  \(name): \(on ? "ON" : "off") (\(detail))") }
+    let now = Date().timeIntervalSince(started)
+    let window = tracker.appWindowAt
+    say("  app rule (RedirectionStatus, settle \(Int(tracker.settleSeconds)) s): refused ["
+        + tracker.refused(at: now).map(\.rawValue).joined(separator: ", ") + "]; first host data after the app window: "
+        + RedirectionFeature.allCases.map { f in
+            "\(f.rawValue) " + (firsts[f].map { t in window.map { String(format: "%+.1f s", t - $0) } ?? String(format: "%.1f s", t) } ?? "none")
+        }.joined(separator: ", "))
     say("  host bytes by channel: " + bytes.sorted { $0.key < $1.key }.map { "ch \($0.key) \($0.value) B" }.joined(separator: ", "))
     say("end: \(ending)")
     let healthy = fresh && found && errors.isEmpty && cdmError == nil && ending.hasPrefix("logged off")

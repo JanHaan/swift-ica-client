@@ -50,6 +50,8 @@ final class KeyboardTranslator {
     private func syncClipboardIfPaste(_ event: KeyInput, _ flags: NSEvent.ModifierFlags) {
         guard flags.contains(.command) || flags.contains(.control) else { return }
         let key = event.charactersIgnoringModifiers?.lowercased()
+        // Copy, cut and print shortcuts: a refused redirection gets its one-time notice (D118).
+        if let key, ["c", "x", "p"].contains(key) { controller?.shortcutAttempt(key) }
         guard key == "v" || (key == nil && event.keyCode == UInt16(kVK_ANSI_V)) else { return }
         controller?.clipboardBeforePaste()
     }

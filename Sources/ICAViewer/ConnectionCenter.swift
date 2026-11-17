@@ -91,6 +91,8 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         var detail: String
         var store: StoreSession?
         var local: LocalConnection?
+        /// Redirections the server refused in this open session (D118), one line each, shown small under the detail.
+        var refused: [String] = []
     }
 
     private let service: StoreService?
@@ -127,6 +129,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         build()
         window.center()
+        NotificationCenter.default.addObserver(self, selector: #selector(refusedChanged), name: .refusedFeaturesChanged, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -220,6 +223,8 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
 
     @objc private func refreshClicked() { refresh() }
 
+    @objc private func refusedChanged() { localChanged() }
+
     func refresh(keepAlive: Bool = false) {
         guard demoRows == nil, let store = service?.store, !busy else { return }
         busy = true
@@ -276,6 +281,9 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         }
         var result: [Row] = []
         recentlyDisconnected.removeAll { Date().timeIntervalSince($0.at) > 30 }
+        defer {
+            for i in result.indices { if let key = result[i].local?.key { result[i].refused = RefusedFeatureMonitor.lines(for: key) } }
+        }
         for s in storeRows {
             switch s.state {
             case .connectedHere:
@@ -370,7 +378,15 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 info.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
                 info.lineBreakMode = .byTruncatingTail
                 for t in [name, info] { t.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
-                let labels = NSStackView(views: [name, info])
+                var labelViews: [NSView] = [name, info]
+                if !row.refused.isEmpty {
+                    let blocked = NSTextField(labelWithString: row.refused.joined(separator: "\n"))
+                    blocked.textColor = .tertiaryLabelColor
+                    blocked.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                    blocked.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                    labelViews.append(blocked)
+                }
+                let labels = NSStackView(views: labelViews)
                 labels.orientation = .vertical
                 labels.alignment = .leading
                 labels.spacing = 1
@@ -636,7 +652,8 @@ extension ConnectionCenterController {
         return [
             Row(group: .here, title: "Calculator", detail: "Connected · \(started(12)) · VDA-01", store: s(.connectedHere, ["Calculator"], 12), local: local),
             Row(group: .here, title: "Notepad", detail: "Connected – no visible windows · \(started(40)) · VDA-01",
-                store: s(.connectedHere, ["Notepad"], 40), local: parked),
+                store: s(.connectedHere, ["Notepad"], 40), local: parked,
+                refused: [RedirectionFeature.clipboard.blockedLine, RedirectionFeature.printing.blockedLine]),
             Row(group: .disconnected, title: "Word, Excel", detail: "Disconnected · \(started(180)) · VDA-02",
                 store: s(.disconnected, ["Word", "Excel"], 180, reconnect: true)),
             Row(group: .elsewhere, title: "Outlook", detail: "Connected on another device (Windows) · \(started(300)) · VDA-02",
