@@ -49,7 +49,7 @@ func fetchFileCommand(_ args: [String], store: StoreClient) async {
             fail("refused: ABC session(s) exist (\(abc.map(\.shortId).joined(separator: ", "))); fetch-file needs a fresh logon")
         }
         guard let resource = resources.first(where: { $0.name == resourceName }) else { fail("no resource named \(resourceName)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         let ok = try await runFetchFile(ica: ica, folder: folder, name: name, destDir: destDir, cap: maxMB << 20, stall: stall, selectAll: selectAll)
         // The session must be gone from the store's list.
@@ -104,7 +104,7 @@ func runFetchFile(ica: ICAFile, folder: String, name: String, destDir: URL, cap:
     }
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var ready = false
@@ -128,7 +128,7 @@ func runFetchFile(ica: ICAFile, folder: String, name: String, destDir: URL, cap:
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -139,7 +139,7 @@ func runFetchFile(ica: ICAFile, folder: String, name: String, destDir: URL, cap:
         }
     }
     session.onThinwireInit = { _ in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {

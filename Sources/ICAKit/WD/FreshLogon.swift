@@ -5,15 +5,34 @@ import Foundation
 /// post-logon Thinwire INIT or TWI host init came at least `threshold` after it (live fresh logons:
 /// 10–16 s; a reconnect after the logon UI: 1.7 s; a plain reconnect shows no logon UI at all,
 /// D18/D20). Anything else counts as a reconnect: only a fresh logon may be logged off.
+///
+/// Store attestation (D110): the timing alone misreads fast logons (the lab's post-logon INIT came 1.3–4.4 s
+/// after the logon UI, the company farm's reconnects 1.7–2.3 s). When the store's Sessions/List showed no
+/// session at all for this user right before the launch, the broker had nothing to reconnect to, so the logon
+/// UI followed by the post-logon INIT is a fresh logon whatever the gap. Without that attestation (a session was
+/// listed, or the list could not be read) only the timing rule decides, as before.
 public struct FreshLogonDetector: Sendable {
     public static let threshold: TimeInterval = 5
 
+    /// What decided a fresh logon.
+    public enum Basis: String, Sendable {
+        /// The post-logon INIT came `threshold` or more after the logon UI.
+        case timing
+        /// The store listed no session before the launch (`noPriorSession`), and the logon UI appeared.
+        case store
+    }
+
     public private(set) var logonUIAt: Date?
     public private(set) var isFresh = false
+    public private(set) var basis: Basis?
+    /// The store's Sessions/List was read right before the launch and listed no session for this user.
+    public let noPriorSession: Bool
     private var thinwireInits = 0
     private var hostInits = 0
 
-    public init() {}
+    public init(noPriorSession: Bool = false) {
+        self.noPriorSession = noPriorSession
+    }
 
     public var sawLogonUI: Bool { logonUIAt != nil }
 
@@ -37,7 +56,13 @@ public struct FreshLogonDetector: Sendable {
     private mutating func judge(count: Int, _ now: Date) -> TimeInterval? {
         guard count >= 2, !isFresh, let t = logonUIAt else { return nil }
         let gap = now.timeIntervalSince(t)
-        isFresh = gap >= Self.threshold
+        if gap >= Self.threshold {
+            isFresh = true
+            basis = .timing
+        } else if noPriorSession {
+            isFresh = true
+            basis = .store
+        }
         return gap
     }
 }

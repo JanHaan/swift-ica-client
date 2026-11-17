@@ -10,9 +10,11 @@ import ImageIO
 enum RichClipKind: String {
     case html, rtf, image
 
-    /// The only app each kind may use (approved test apps, D55).
-    var resource: String { self == .image ? "Paint ABC" : "Word 2016 - TEST" }
-    var executable: String { self == .image ? "mspaint.exe" : "winword.exe" }
+    /// The company farm app each kind uses (approved test apps, D55); lab apps come from lab/apps.conf (D110).
+    var builtIn: TestApp {
+        self == .image ? TestApp(resource: "Paint ABC", executables: ["mspaint.exe"], titleWord: "paint")
+                       : TestApp(resource: "Word 2016 - TEST", executables: ["winword.exe"])
+    }
 }
 
 /// Test image for Mac → session: four quadrants (red, green, a blue/red ramp, a two-axis ramp) inside a 1-px black
@@ -102,7 +104,7 @@ enum RichClipImage {
 /// - image ("Paint ABC"): announce a 64×48 test image (PNG → RGBA → CF_BITMAP DIB), Ctrl+V into the canvas, screenshot;
 ///   then Ctrl+C of the still selected pasted image, and compare size and pixels.
 /// Nothing is saved: the session is logged off with the document or canvas unsaved (the logoff discards it).
-func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
+func runClipRichTest(ica: ICAFile, kind: RichClipKind, app: TestApp) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
     let runID = String(format: "%06x", UInt32.random(in: 0...0xFF_FFFF))
@@ -111,7 +113,7 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
     clipConfig.traceWire = env["ICA_CLIP_TRACE"] != "0"
     let trace = ClipTrace(enabled: clipConfig.traceWire, name: "cliptest-rich-\(kind.rawValue)", runID: runID)
     let outDir = sessionDir.appendingPathComponent("clipfiles")
-    say("run \(runID): cliptest-rich \(kind.rawValue) in \"\(kind.resource)\", marker \(marker)")
+    say("run \(runID): cliptest-rich \(kind.rawValue) in \"\(app.resource)\", marker \(marker)")
 
     var config = WinstationDriver.Configuration()
     config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: env)
@@ -151,7 +153,7 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
     }
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var lastWindowChange = Date()
@@ -190,7 +192,7 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -212,7 +214,7 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
     }
     session.onThinwireInit = { info in
         say("Thinwire INIT \(info.width)x\(info.height)")
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {
@@ -230,11 +232,9 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
     let start = Date()
     let gotReady = await waitFor(session, 90) { ready }
     say(gotReady ? "clipboard channel ready" : "clipboard channel NOT ready after 90 s")
-    let isApp: (UInt32) -> Bool = { id in
-        if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == kind.executable }
-        let key = windowsSeen.appKey(id)?.lowercased() ?? ""
-        return key.contains(kind.executable.replacingOccurrences(of: ".exe", with: "")) || key == "app:" + kind.resource.lowercased()
-    }
+    let isApp: (UInt32) -> Bool = { app.matches(executable: windowsSeen.single($0, seamless.model), appKey: windowsSeen.appKey($0)) }
+    // Word (the company farm's) has its own document title and start screen; other apps use the app's title word.
+    let isWord = app.executables.contains("winword.exe")
     let mainWindow: () -> UInt32? = { appWindows.first { isApp($0) && !(seamless.model.windows[$0]?.title.isEmpty ?? true) } }
     _ = await waitFor(session, max(5, 180 - Date().timeIntervalSince(start))) { logon.isFresh && mainWindow() != nil }
     // Word shows a splash first: wait until windows and titles have been quiet for 6 s (at most 60 s more).
@@ -287,25 +287,35 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
         return true
     }
     func isDocumentTitle(_ t: String) -> Bool {
-        switch kind {
-        case .image: return t.lowercased().contains("paint")
-        case .html, .rtf:
-            let l = t.lowercased()
-            return l.hasSuffix(" - word") && (l.contains("dokument") || l.contains("document"))
-        }
+        guard isWord else { return app.isDocumentTitle(t) }
+        let l = t.lowercased()
+        return l.hasSuffix(" - word") && (l.contains("dokument") || l.contains("document"))
     }
 
     var pasteOK = false, copyOK = false
     if !fresh {
         note("not a fresh logon by this run: no input is sent (this may be an existing session)")
     } else if !gotReady || target == nil {
-        note("no \(kind.resource) window or no clipboard channel: no input is sent")
+        note("no \(app.resource) window or no clipboard channel: no input is sent")
     } else if let main = target {
         session.send { _, twi in twi.activate(windowId: main) }
         try await Task.sleep(nanoseconds: 2_000_000_000)
         let first = await title()
         await screenshot("start, title \"\(first)\"")
         var atDocument = false
+        // Known first-run dialogs of the app (lab/apps.conf, e.g. "Welcome to LibreOffice!"): Esc on each, then recheck.
+        for _ in 0..<3 {
+            let extra = await captioned().filter { $0.key != main }
+            guard app.onlyFirstRunDialogs(Array(extra.values)) else { break }
+            for (id, t) in extra.sorted(by: { $0.key < $1.key }) {
+                note("first-run dialog \(id) \"\(t)\" (listed for \(app.resource)): Esc")
+                session.send { _, twi in twi.activate(windowId: id) }
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                try await keys("esc", wait: 2)
+            }
+            session.send { _, twi in twi.activate(windowId: main) }
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         if await onlyMainWindow("start") {
             // Optional keys chosen after looking at an earlier run's screenshot (e.g. a known first-run screen).
             if let extra = env["ICA_CLIPRICH_START_KEYS"], !extra.isEmpty {
@@ -313,13 +323,13 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
                 try await keys(extra, wait: 3)
             }
             var t = await title()
-            if !isDocumentTitle(t), kind != .image, t.lowercased() == "word" {
+            if !isDocumentTitle(t), isWord, t.lowercased() == "word" {
                 note("title \"Word\" (start screen): Esc for a blank document")
                 try await keys("esc", wait: 4)
                 t = await title()
             }
             if !isDocumentTitle(t) {
-                note("STOP: title \"\(t)\" is not a blank \(kind == .image ? "Paint canvas" : "Word document"); no further input")
+                note("STOP: title \"\(t)\" is not a blank \(app.resource) document; no further input")
             } else if await onlyMainWindow("document") {
                 atDocument = true
                 note("document window \(main) \"\(t)\"")

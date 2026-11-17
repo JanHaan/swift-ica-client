@@ -209,7 +209,7 @@ case "connect", "session":
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         let replay = ProcessInfo.processInfo.environment["ICA_CAPTURE_REPLAY"] == "1"
         let dir = sessionDir.appendingPathComponent(replay ? "replay" : "last")
@@ -246,7 +246,7 @@ case "droptest":
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         // Captures go to .session/droptest/, so the replay set (.session/ch9-*) stays as it is.
         let dir = sessionDir.appendingPathComponent("droptest")
@@ -260,15 +260,16 @@ case "cliptest":
     // icactl cliptest [resource] — clipboard channel test, Notepad only (docs/70 §8): handshake and the
     // host's format names; Mac → host (announce a test string, Ctrl+V into Notepad) and host → Mac
     // (Ctrl+A, Ctrl+C, compare). Input only in a session this run logged on itself; never saves.
+    // ICA_ALLOW_ANY_RESOURCE=1: a Notepad of lab/apps.conf instead ("Notepad", D110).
     let name = args.first ?? "Notepad"
-    guard name == "Notepad" else { fail("cliptest is limited to \"Notepad\"") }
+    let notepadApp = testApp(name, builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "cliptest")
     let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runClipTest(ica: ica)
+        try await runClipTest(ica: ica, app: notepadApp)
     } catch {
         fail("\(error)")
     }
@@ -276,13 +277,16 @@ case "cliptest":
 case "cliptest-rich":
     // icactl cliptest-rich html|rtf|image — HTML/RTF in "Word 2016 - TEST", images in "Paint ABC" (docs/70 §10), both
     // directions; fresh logon only, nothing saved (the logoff discards the document).
-    guard let kind = args.first.flatMap(RichClipKind.init(rawValue:)) else { fail("usage: icactl cliptest-rich html|rtf|image") }
+    // `icactl cliptest-rich <kind> <resource>` with ICA_ALLOW_ANY_RESOURCE=1: an app of lab/apps.conf (D110).
+    guard let kind = args.first.flatMap(RichClipKind.init(rawValue:)) else { fail("usage: icactl cliptest-rich html|rtf|image [resource]") }
+    let richApp = testApp(args.dropFirst().first ?? kind.builtIn.resource, builtIn: kind.builtIn, command: "cliptest-rich \(kind.rawValue)")
     do {
-        let resources = try await storeClient().resources()
-        guard let resource = resources.first(where: { $0.name == kind.resource }) else { fail("no resource named \(kind.resource)") }
-        guard let ica = ICAFile(text: try await storeClient().launchICA(resource)) else { fail("not an ICA file") }
+        let store = storeClient()
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == richApp.resource }) else { fail("no resource named \(richApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runClipRichTest(ica: ica, kind: kind)
+        try await runClipRichTest(ica: ica, kind: kind, app: richApp)
     } catch {
         fail("\(error)")
     }
@@ -296,9 +300,10 @@ case "cliptest-word":
         fail("usage: icactl cliptest-word [\(WordClipCase.allCases.map(\.rawValue).joined(separator: ","))]")
     }
     do {
-        let resources = try await storeClient().resources()
+        let store = storeClient()
+        let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == WordClipCase.resource }) else { fail("no resource named \(WordClipCase.resource)") }
-        guard let ica = ICAFile(text: try await storeClient().launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         try await runClipWordTest(ica: ica, cases: cases)
     } catch {
@@ -311,26 +316,29 @@ case "cliptest-files":
     // session → Mac: Ctrl+A, Ctrl+C there and SHA-256 compare; then that folder (only) is deleted and the session
     // logged off. ICA_CLIP_VERSION=4 answers 4; every CTXCLIP byte is traced to .session/clipfiles/. ICA_GDT=1 also
     // announces CTXGDT (ch 29, docs/76 §6) and hex-logs every host GDT write to .session/gdt/<run>.log.
-    guard (args.first ?? "Explorer Citrix ABC") == "Explorer Citrix ABC" else { fail("cliptest-files is limited to \"Explorer Citrix ABC\"") }
+    // ICA_ALLOW_ANY_RESOURCE=1: an Explorer of lab/apps.conf instead ("File Explorer", D110; web store only).
+    let explorerApp = testApp(args.first ?? "Explorer Citrix ABC", builtIn: TestApp(resource: "Explorer Citrix ABC", executables: ["explorer.exe"]),
+                              command: "cliptest-files")
     do {
         let text: String
         if ProcessInfo.processInfo.environment["ICA_STORE_MODE"] == "native" {
             // Native store launch (docs/15 §7.4 T3); the ICA file is also kept as .session/last-native.ica.
             let store = nativeStoreClient()
             let resources = try await store.resources()
-            guard let resource = resources.first(where: { $0.title == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
+            guard let resource = resources.first(where: { $0.title == explorerApp.resource }) else { fail("no resource named \(explorerApp.resource)") }
             text = try await store.launchICA(resource)
             saveICA(text, as: "last-native\(hostSuffix).ica")
             say("store mode native (protocol \(store.lastProtocol ?? "cached"), launcher \(store.launcher ?? "not sent"))")
         } else {
-            let resources = try await storeClient().resources()
-            guard let resource = resources.first(where: { $0.name == "Explorer Citrix ABC" }) else { fail("no resource named Explorer Citrix ABC") }
-            text = try await storeClient().launchICA(resource)
+            let store = storeClient()
+            let resources = try await store.resources()
+            guard let resource = resources.first(where: { $0.name == explorerApp.resource }) else { fail("no resource named \(explorerApp.resource)") }
+            text = try await testLaunchICA(store, resource)
         }
         say("User-Agent \(http.userAgent == nil ? "system default" : "set"); Launcher key \(ICAFile(text: text)?["Launcher"] ?? "absent")")
         guard let ica = ICAFile(text: text) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runClipFilesTest(ica: ica)
+        try await runClipFilesTest(ica: ica, app: explorerApp)
     } catch {
         fail("\(error)")
     }
@@ -351,7 +359,7 @@ case "cdmtest":
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         try await runCDMTest(ica: ica, save: ProcessInfo.processInfo.environment["ICA_CDMTEST_SAVE"] == "1")
     } catch {
@@ -371,7 +379,7 @@ case "printtest":
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         try await runPrintTest(ica: ica, confirm: ProcessInfo.processInfo.environment["ICA_PRINTTEST_CONFIRM"] == "1")
     } catch {
@@ -404,7 +412,7 @@ case "audiotest":
         if let keysText { _ = try AudioTestKeys.parse(keysText, keyboardLayout: 0x0409) }
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         let keys = try keysText.map { try AudioTestKeys.parse($0, keyboardLayout: WDLogon(ica: ica).keyboardLayout) }
         try await runAudioTest(ica: ica, play: ProcessInfo.processInfo.environment["ICA_AUDIOTEST_PLAY"] == "1",
@@ -428,7 +436,7 @@ case "camtest":
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
-        guard let ica = ICAFile(text: try await store.launchICA(resource)) else { fail("not an ICA file") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
         try await runCamTest(ica: ica, resource: name)
     } catch {
@@ -569,11 +577,11 @@ default:
       icactl cookies                     list saved cookie names
       icactl session [resource]          launch, logon, capture to .session/last/ (ICA_CAPTURE_REPLAY=1: .session/replay/), log off
       icactl droptest [resource]         session with one link drop after ICA_TEST_DROP_AFTER s and a CGP resume
-      icactl cliptest                    clipboard test in "Notepad" (Notepad): paste in, copy out, never saves
+      icactl cliptest [resource]         clipboard test in "Notepad" (Notepad): paste in, copy out, never saves
                                          (ICA_CLIP_VERSION=4: answer v4 and trace CTXCLIP to .session/clipfiles/;
                                          ICA_CLIPTEST_MIXED=1: offer text + HTML + RTF in one list)
-      icactl cliptest-rich html|rtf|image  HTML/RTF in "Word 2016 - TEST", an image in "Paint ABC": paste in, copy
-                                         out, compare; fresh logon only, never saves (ICA_CLIPRICH_START_KEYS=…)
+      icactl cliptest-rich html|rtf|image [resource]  HTML/RTF in "Word 2016 - TEST", an image in "Paint ABC": paste
+                                         in, copy out, compare; fresh logon only, never saves (ICA_CLIPRICH_START_KEYS=…)
       icactl cliptest-word [cases]       "Microsoft Word ABC", one blank document: text, rtf, image (RTFD → RTF \\pict and
                                          back as RTFD), html-image (data URI, informational); Ctrl+A/V/C only, logoff
       icactl fetch-file "Explorer Citrix ABC" 'H:\\dir\\file' [destDir] [--max-mb N] [--stall S]
@@ -582,7 +590,7 @@ default:
                                          over CTXGDT: fresh logon only (refused while an ABC session exists), input
                                          Ctrl+L, folder, Enter, file name, Ctrl+C only; exactly that one file or
                                          nothing; size + SHA-256; logoff (ICA_GDT_READSIZE=N)
-      icactl cliptest-files              clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
+      icactl cliptest-files [resource]   clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
                                          copy them back (SHA-256), delete only that folder, log off (fresh logon only)
                                          (ICA_GDT=1: also announce CTXGDT, log host GDT writes to .session/gdt/;
                                          ICA_GDT_ECHO_INIT=1|inc|inc@N|hex:…, ICA_GDT_HELLO=<hex>, ICA_GDT_VERSION=N|L-H,
@@ -633,6 +641,10 @@ default:
 
     ICA_TEST_RESOURCES=<name>[,<name>]   apps the sessions commands may act on: "Calculator,Notepad"; another
                                          list only together with ICA_ALLOW_ANY_RESOURCE=1
+    ICA_ALLOW_ANY_RESOURCE=1             also: cliptest, cliptest-rich and cliptest-files take a lab app of
+                                         lab/apps.conf (ICA_LAB_APPS=<file>) as [resource] (D110)
+    ICA_NO_STORE_ATTEST=1                test launches: skip the Sessions/List check before the launch, so only the
+                                         timing rule tells a fresh logon from a reconnect (D110)
     ICA_SESSION_END=disconnect           session/droptest/reconnect: end with CGP FINISH (disconnect), never log off
     ICA_TEST_EARLY_LED=1                 session: SET_LED right behind INIT_CONNECT_RESPONSE (early-drop A/B test)
 
@@ -718,11 +730,10 @@ func runSession(ica: ICAFile, seconds: Double, dropAfter: Double? = nil, capture
     var lastHostInit: Date?
     // Log off only a session this run logged on itself; a reconnect (maybe the user's own session,
     // shared by the store) is only disconnected (same rule as ICAViewer, D18/D20).
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     func logonVerdict(_ gap: TimeInterval?, _ what: String) {
         guard let gap else { return }
-        say(logon.isFresh ? "fresh logon (logon UI, then \(what) after \(Int(gap)) s)"
-                          : String(format: "reconnect pattern (\(what) %.1f s after the logon UI)", gap))
+        say(freshVerdict(logon, gap, what))
     }
     seamless.onEvent = { event in
         switch event {
@@ -960,7 +971,7 @@ func waitFor(_ session: ICASession, _ seconds: Double, _ condition: @escaping ()
     return await onSession(session, condition)
 }
 
-func runClipTest(ica: ICAFile) async throws {
+func runClipTest(ica: ICAFile, app: TestApp) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     // Umlauts, a non-BMP character and a line break: exercises UTF-16, surrogates and CRLF ↔ LF.
     let testText = "CTXCLIP-Test äöü ß € 😀\nZeile 2"
@@ -976,7 +987,7 @@ func runClipTest(ica: ICAFile) async throws {
     let seamless = session.seamless
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var ready = false
@@ -1005,7 +1016,7 @@ func runClipTest(ica: ICAFile) async throws {
         switch event {
         case .channelReady:
             say("TWI host init")
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -1020,7 +1031,7 @@ func runClipTest(ica: ICAFile) async throws {
     }
     session.onThinwireInit = { info in
         say("Thinwire INIT \(info.width)x\(info.height)")
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {
@@ -1060,11 +1071,7 @@ func runClipTest(ica: ICAFile) async throws {
     // The Notepad window, in a session this run logged on itself.
     let notepad: () -> UInt32? = {
         // Notepad by executable, else by the published app's key ("app:Notepad").
-        appWindows.first { id in
-            if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == "notepad.exe" }
-            let key = windowsSeen.appKey(id)?.lowercased() ?? ""
-            return key.contains("notepad") || key == "app:editor abc"
-        }
+        appWindows.first { app.matches(executable: windowsSeen.single($0, seamless.model), appKey: windowsSeen.appKey($0)) }
     }
     let found = await waitFor(session, max(5, 120 - Date().timeIntervalSince(start))) { logon.isFresh && notepad() != nil }
     let fresh = await onSession(session) { logon.isFresh }
@@ -1207,7 +1214,7 @@ final class ClipTrace: @unchecked Sendable {
 
 func sha256(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
-func runClipFilesTest(ica: ICAFile) async throws {
+func runClipFilesTest(ica: ICAFile, app: TestApp) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
     let runID = String(format: "%06x", UInt32.random(in: 0...0xFF_FFFF))
@@ -1517,7 +1524,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     }
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var ready = false
@@ -1564,7 +1571,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -1580,7 +1587,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
         }
     }
     session.onThinwireInit = { _ in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {
@@ -1620,10 +1627,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     say(gotReady ? "clipboard channel ready" : "clipboard channel NOT ready after 90 s")
     if let gdt = session.gdt, let gdtHello { await onSession(session) { gdt.send(gdtHello, reason: "ICA_GDT_HELLO") } }
     let explorer: () -> UInt32? = {
-        appWindows.first { id in
-            if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == "explorer.exe" }
-            return windowsSeen.appKey(id)?.lowercased() == "app:explorer citrix abc"
-        }
+        appWindows.first { app.matches(executable: windowsSeen.single($0, seamless.model), appKey: windowsSeen.appKey($0)) }
     }
     _ = await waitFor(session, max(5, 120 - Date().timeIntervalSince(start))) { logon.isFresh && explorer() != nil }
     let fresh = await onSession(session) { logon.isFresh }
@@ -1961,6 +1965,56 @@ func saveICA(_ text: String, as name: String) {
     FileManager.default.createFile(atPath: path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
 }
 
+/// D110 store attestation: whether the store's Sessions/List showed no session at all for this user right before
+/// this run's launch (set by `testLaunchICA`; false when not checked or unreadable). With it, the fresh-logon
+/// detector takes the logon UI plus the post-logon INIT as a fresh logon whatever the gap (the lab logs on in
+/// 1–4 s, which the timing rule took for a reconnect, D107). ICA_NO_STORE_ATTEST=1 turns the check off.
+nonisolated(unsafe) var noPriorSession = false
+
+/// Launches `resource` for a live test, after the Sessions/List check of `noPriorSession`.
+func testLaunchICA(_ store: StoreClient, _ resource: StoreClient.Resource) async throws -> String {
+    noPriorSession = false
+    if ProcessInfo.processInfo.environment["ICA_NO_STORE_ATTEST"] == "1" {
+        say("store check off (ICA_NO_STORE_ATTEST=1): the timing rule decides fresh logon vs reconnect")
+    } else {
+        do {
+            let list = try await store.sessions.list()
+            noPriorSession = list.sessions.isEmpty
+            say("store check: Sessions/List has \(list.sessions.count) session(s) before the launch"
+                + (noPriorSession ? ": nothing to reconnect to, a logon UI means a fresh logon" : ": the timing rule decides"))
+        } catch {
+            say("store check: Sessions/List failed (\(error)): the timing rule decides")
+        }
+    }
+    return try await store.launchICA(resource)
+}
+
+/// A fresh-logon detector with this run's store attestation.
+func newLogonDetector() -> FreshLogonDetector { FreshLogonDetector(noPriorSession: noPriorSession) }
+
+/// The log line for a decided fresh-logon verdict.
+func freshVerdict(_ logon: FreshLogonDetector, _ gap: TimeInterval, _ what: String) -> String {
+    switch logon.basis {
+    case .timing?: return "fresh logon (logon UI, then \(what) after \(Int(gap)) s)"
+    case .store?: return String(format: "fresh logon (logon UI, then \(what) %.1f s later; the store listed no session before the launch)", gap)
+    case nil: return String(format: "reconnect pattern (\(what) %.1f s after the logon UI)", gap)
+    }
+}
+
+/// The app a live test drives: the built-in company app, or with ICA_ALLOW_ANY_RESOURCE=1 an app of
+/// lab/apps.conf (D110).
+func testApp(_ name: String, builtIn: TestApp, command: String) -> TestApp {
+    if name == builtIn.resource { return builtIn }
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else {
+        fail("\(command) is limited to \"\(builtIn.resource)\" (ICA_ALLOW_ANY_RESOURCE=1: an app of lab/apps.conf)")
+    }
+    let path = LabConfig.defaultPath(root: root)
+    let config: LabConfig
+    do { config = try LabConfig.load(path: path) } catch { fail("cannot read \(path): \(error)") }
+    guard let app = config.app(name), !app.executables.isEmpty else { fail("no app with executables named \"\(name)\" in \(path)") }
+    return app
+}
+
 /// The web store: behind the gateway under /welcome/, or the direct store (docs/16), which logs on again with the
 /// `.env` credentials when its session has expired.
 func storeClient() -> StoreClient {
@@ -2209,7 +2263,7 @@ func runCDMTest(ica: ICAFile, save: Bool) async throws {
     let seamless = session.seamless
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var operations: [String] = []
@@ -2228,7 +2282,7 @@ func runCDMTest(ica: ICAFile, save: Bool) async throws {
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -2242,7 +2296,7 @@ func runCDMTest(ica: ICAFile, save: Bool) async throws {
         }
     }
     session.onThinwireInit = { info in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {
@@ -2397,7 +2451,7 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
     let seamless = session.seamless
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var windowsAdded: [(id: UInt32, kind: TWIWindowKind, title: String)] = []
@@ -2423,7 +2477,7 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -2438,7 +2492,7 @@ func runPrintTest(ica: ICAFile, confirm: Bool) async throws {
         }
     }
     session.onThinwireInit = { info in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     let started = Date()
     session.onEvent = { event in
@@ -2671,7 +2725,7 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
     let seamless = session.seamless
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var windowsAdded: [(id: UInt32, kind: TWIWindowKind, title: String)] = []
@@ -2690,7 +2744,7 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -2705,7 +2759,7 @@ func runAudioTest(ica: ICAFile, play: Bool, soundApp: String? = nil, keys: [Audi
         }
     }
     session.onThinwireInit = { _ in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     let started = Date()
     session.onEvent = { event in
@@ -2971,7 +3025,7 @@ func runCamTest(ica: ICAFile, resource: String) async throws {
     webcam.sampleTap = { stream.write($0.data) }
     let seamless = session.seamless
 
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var commandLines: [String] = []
@@ -2988,7 +3042,7 @@ func runCamTest(ica: ICAFile, resource: String) async throws {
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -3002,7 +3056,7 @@ func runCamTest(ica: ICAFile, resource: String) async throws {
         }
     }
     session.onThinwireInit = { _ in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {
@@ -3131,7 +3185,7 @@ func runShareTest(ica: ICAFile, secondICA: () async throws -> ICAFile?) async th
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             // Only the test apps' titles are printed; others by length.
@@ -3151,7 +3205,7 @@ func runShareTest(ica: ICAFile, secondICA: () async throws -> ICAFile?) async th
         }
     }
     session.onThinwireInit = { _ in
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {

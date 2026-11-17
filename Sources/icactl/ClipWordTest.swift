@@ -73,7 +73,7 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
     let seamless = session.seamless
 
     // Session-queue state.
-    var logon = FreshLogonDetector()
+    var logon = newLogonDetector()
     var windowsSeen = SeenWindows()
     var appWindows: [UInt32] = []
     var lastWindowChange = Date()
@@ -111,7 +111,7 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
     seamless.onEvent = { event in
         switch event {
         case .channelReady:
-            if let gap = logon.hostInit() { say(logon.isFresh ? "fresh logon (host init after \(Int(gap)) s)" : "reconnect pattern (host init)") }
+            if let gap = logon.hostInit() { say(freshVerdict(logon, gap, "host init")) }
         case .windowAdded(let w):
             logon.windowAdded(appKey: w.appKey)
             windowsSeen.note(w)
@@ -133,7 +133,7 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
     }
     session.onThinwireInit = { info in
         say("Thinwire INIT \(info.width)x\(info.height)")
-        if let gap = logon.thinwireInit() { say(logon.isFresh ? "fresh logon (Thinwire INIT after \(Int(gap)) s)" : "reconnect pattern (Thinwire INIT)") }
+        if let gap = logon.thinwireInit() { say(freshVerdict(logon, gap, "Thinwire INIT")) }
     }
     session.onEvent = { event in
         switch event {
