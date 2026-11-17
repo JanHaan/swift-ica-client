@@ -435,9 +435,17 @@ struct RTFScanner {
             }
         }
         picture.data = Data(data)
-        picture.widthTwips = goalW.map { $0 * scaleX / 100 }
-        picture.heightTwips = goalH.map { $0 * scaleY / 100 }
+        picture.widthTwips = goalW.map { Self.scaled($0, percent: scaleX) }
+        picture.heightTwips = goalH.map { Self.scaled($0, percent: scaleY) }
         return (picture, end)
+    }
+
+    /// `goal × percent / 100`, clamped: both words come from the host with up to 10 digits each, whose product
+    /// overflows Int (it used to trap and end the viewer).
+    static func scaled(_ goal: Int, percent: Int) -> Int {
+        let (product, overflow) = goal.multipliedReportingOverflow(by: percent)
+        if overflow { return (goal < 0) != (percent < 0) ? .min : .max }
+        return product / 100
     }
 
     /// The first `{\pict …}` group inside `range`.
