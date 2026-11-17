@@ -438,6 +438,39 @@ case "policyprobe":
         fail("\(error)")
     }
 
+case "audioprobe":
+    // icactl audioprobe [resource] — audio playback (and with ICA_AUDIOPROBE_MIC=1 the microphone) end to end in the lab's
+    // "Command Prompt" (backlog 1.6, AudioProbe.swift): PowerShell plays a 1 kHz WAV (and records our 440 Hz capture
+    // tone and plays it back); the decoded audio is checked for the tones. Lab only.
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("audioprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let audioApp = testApp(args.first ?? "Command Prompt", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "audioprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == audioApp.resource }) else { fail("no resource named \(audioApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runAudioProbe(ica: ica, app: audioApp)
+    } catch {
+        fail("\(error)")
+    }
+
+case "renderprobe":
+    // icactl renderprobe [resource] — H.264 vs Thinwire rendering in a lab Paint (backlog 1.4, RenderProbe.swift): the
+    // test pattern pasted, found in the framebuffer and compared; bytes and CPU per full redraw; logoff. Lab only.
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("renderprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let renderApp = testApp(args.first ?? "Paint", builtIn: TestApp(resource: "Paint ABC", executables: ["mspaint.exe"]), command: "renderprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == renderApp.resource }) else { fail("no resource named \(renderApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runRenderProbe(ica: ica, app: renderApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "typeprobe":
     // icactl typeprobe [resource] — typing latency in a lab Notepad (backlog 1.7, TypeProbe.swift): key → first
     // non-caret screen update; median/p90/max; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1, default "Notepad").
@@ -717,6 +750,9 @@ default:
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl cdmtest-explorer [resource] drive mapping in a lab Explorer ("File Explorer"): temp folder as M:, list, copy
                                          a file inside it, mkdir, delete both, links leading outside; Mac-side checks
+      icactl audioprobe [resource]       lab: PowerShell plays a 1 kHz WAV (ICA_AUDIOPROBE_MIC=1: records our 440 Hz capture
+                                         tone and plays it back); the decoded audio is checked for the tones
+      icactl renderprobe [resource]      lab: test pattern pasted into Paint, compared in the framebuffer; bytes/CPU per redraw
       icactl typeprobe [resource]        lab: typing latency in Notepad (key → first non-caret update), median/p90/max
       icactl policyprobe [resource]      lab: which redirections the host opens (clipboard, drives, printers, audio), no
                                          input, logoff; ICA_POLICYPROBE_EXPECT=on|off for pass/fail
