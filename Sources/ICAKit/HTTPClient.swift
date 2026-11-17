@@ -27,6 +27,21 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
     private var session: URLSession!
     private let jar: HTTPCookieStorage
+    /// Hosts this client has reached over HTTPS. They are never contacted over plain HTTP afterwards, neither by a
+    /// request nor by a redirect (HSTS-like): their cookies without the Secure attribute (and a URL's query) would
+    /// cross the network in clear (security review F-04).
+    private var secureHosts: Set<String> = []
+    private let secureLock = NSLock()
+
+    public enum Failure: Error, CustomStringConvertible, Equatable {
+        /// A plain HTTP request to a host this client reached over HTTPS before.
+        case downgrade(String)
+        public var description: String {
+            switch self {
+            case .downgrade(let host): "refused plain HTTP to \(host), which this client reached over HTTPS"
+            }
+        }
+    }
 
     public override init() {
         let config = URLSessionConfiguration.ephemeral
@@ -89,9 +104,15 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         request.httpBody = body
+        if let host = downgradedHost(url) {
+            trace("✗ \(method) \(Self.display(url)): plain HTTP to a host reached over HTTPS before; refused")
+            throw Failure.downgrade(host)
+        }
         trace("→ \(method) \(Self.display(url))")
         let (data, response) = try await session.data(for: request)
         let http = response as! HTTPURLResponse
+        noteSecure(url)
+        if let final = http.url { noteSecure(final) }
         var headers: [String: String] = [:]
         for (key, value) in http.allHeaderFields { headers["\(key)"] = "\(value)" }
         let setCookies = HTTPCookie.cookies(withResponseHeaderFields: headers, for: http.url ?? url).map(\.name)
@@ -104,8 +125,49 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
     ) async -> URLRequest? {
+        guard Self.redirectAllowed(from: response.url ?? task.currentRequest?.url, to: request.url),
+              request.url.flatMap(downgradedHost) == nil else {
+            // nil: the task completes with this 3xx response, which every caller treats as unexpected.
+            trace("↪ \(response.statusCode) → \(request.url.map(Self.display) ?? "?"): HTTPS to plain HTTP; refused")
+            return nil
+        }
         trace("↪ \(response.statusCode) → \(request.url.map(Self.display) ?? "?")")
         return request
+    }
+
+    // MARK: Transport security (security review F-04)
+
+    /// A redirect may not leave HTTPS for plain HTTP (any host).
+    public static func redirectAllowed(from: URL?, to: URL?) -> Bool {
+        guard let to else { return false }
+        if from?.scheme?.lowercased() == "https" { return to.scheme?.lowercased() == "https" }
+        return true
+    }
+
+    /// Same scheme, host and port (the default port of the scheme when absent).
+    public static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+        func origin(_ u: URL) -> (String, String, Int)? {
+            let u = u.absoluteURL
+            guard let scheme = u.scheme?.lowercased(), let host = u.host?.lowercased() else { return nil }
+            return (scheme, host, u.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : -1))
+        }
+        guard let x = origin(a), let y = origin(b) else { return false }
+        return x == y
+    }
+
+    func noteSecure(_ url: URL) {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else { return }
+        secureLock.lock()
+        secureHosts.insert(host)
+        secureLock.unlock()
+    }
+
+    /// The host if `url` is plain HTTP to a host reached over HTTPS before.
+    func downgradedHost(_ url: URL) -> String? {
+        guard url.scheme?.lowercased() == "http", let host = url.host?.lowercased() else { return nil }
+        secureLock.lock()
+        defer { secureLock.unlock() }
+        return secureHosts.contains(host) ? host : nil
     }
 
     // MARK: Cookie persistence

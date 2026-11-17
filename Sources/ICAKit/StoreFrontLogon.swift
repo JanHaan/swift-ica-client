@@ -78,7 +78,11 @@ public struct StoreFrontLogon: FormLogonFlow {
         let store = StoreClient(http: http, base: base)
         store.syncDeviceId()
         defer { store.syncDeviceId() }
-        return try await transport("POST", URL(string: path, relativeTo: base)!.absoluteURL, headers(conversation: conversation), form)
+        // Paths include the server's PostBack: credentials go to the store's own origin only (security review F-04).
+        guard let url = URL(string: path, relativeTo: base)?.absoluteURL, HTTPClient.sameOrigin(url, base) else {
+            throw GatewayLogon.Failure.unexpectedResponse("a form target outside the store's origin")
+        }
+        return try await transport("POST", url, headers(conversation: conversation), form)
     }
 
     // MARK: Conversation

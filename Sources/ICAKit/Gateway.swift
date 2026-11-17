@@ -172,7 +172,11 @@ public struct GatewayLogon: FormLogonFlow {
 
     func send(_ method: String, _ path: String, headers: [String: String] = [:], form: [(String, String)]? = nil)
         async throws -> HTTPClient.Response {
-        try await transport(method, URL(string: path, relativeTo: base)!, headers, form)
+        // Paths include the server's PostBack: credentials go to the gateway's own origin only (security review F-04).
+        guard let url = URL(string: path, relativeTo: base), HTTPClient.sameOrigin(url, base) else {
+            throw Failure.unexpectedResponse("a form target outside the gateway's origin")
+        }
+        return try await transport(method, url, headers, form)
     }
 
     /// Starts a logon: fresh cookie jar, logon page, label strings, first form.
