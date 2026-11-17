@@ -39,6 +39,12 @@ developer-id)
     if [ -n "${ICA_RELEASE_PROFILE:-}" ]; then
         [ -f "$ICA_RELEASE_PROFILE" ] || die "ICA_RELEASE_PROFILE not found: $ICA_RELEASE_PROFILE
   Create a 'Developer ID' provisioning profile for local.alttab.ICAViewer at developer.apple.com."
+    else
+        # Security review F-06: without the profile there is no keychain-access-groups entitlement, so the app
+        # falls back to the login keychain: Touch ID is checked by the app, not by the Keychain, and the items are
+        # not bound to this Mac (they travel with backups and Migration Assistant).
+        echo "warning: ICA_RELEASE_PROFILE not set: saved passwords and TOTP secrets go to the login keychain" >&2
+        echo "         (Touch ID enforced by the app only, items not device-bound). Use a Developer ID profile." >&2
     fi
     if [ -n "${ICA_NOTARY_PROFILE:-}" ]; then
         xcrun --find notarytool >/dev/null 2>&1 || die "xcrun notarytool not found (install Xcode 13+)"
@@ -103,7 +109,8 @@ if [ -n "${ICA_RELEASE_PROFILE:-}" ] && [ "$mode" = developer-id ]; then
 else
     keychain_note="Saved secrets: this build has no Keychain entitlements, so Touch ID protection of
 Keychain-stored secrets uses the app-enforced mode (the app asks for Touch ID itself before
-reading the secret) rather than Keychain-enforced access control."
+reading the secret) rather than Keychain-enforced access control, and the items live in the login
+keychain, which backups and Migration Assistant carry to other Macs."
 fi
 if [ -n "$notarize" ]; then
     gatekeeper_note="Signed with a Developer ID and notarized by Apple; it opens like any other app."
@@ -169,7 +176,10 @@ elif [ "$mode" = developer-id ]; then
 fi
 (cd "$dist" && shasum -a 256 "$(basename "$dmg")" >"$(basename "$dmg").sha256")
 
+keychain="login keychain (app-enforced Touch ID, not device-bound)"
+[ "$mode" = developer-id ] && [ -n "${ICA_RELEASE_PROFILE:-}" ] && keychain="data protection keychain (Keychain-enforced Touch ID, this device only)"
 echo "status: $status"
+echo "keychain: $keychain"
 echo "app:    $app"
 echo "dmg:    $dmg ($(du -h "$dmg" | awk '{print $1}'))"
 echo "sha256: $dmg.sha256 ($(cut -d' ' -f1 "$dmg.sha256"))"

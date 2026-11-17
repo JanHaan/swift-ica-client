@@ -34,8 +34,11 @@ The calculator above is a live session; the other images use the app's demo mode
 
 - Gateway logon (nFactor ExplicitForms with username, password and TOTP passcode), store resource
   list and launch, from a native login window generated from the gateway's own form definition.
-- Optional credential storage in the macOS Keychain (this device only), with Touch ID or password
-  required before the TOTP secret is read.
+- Optional credential storage in the macOS Keychain, with Touch ID or password required before the
+  TOTP secret is read. Builds with Keychain entitlements (a provisioning profile, see Building) use
+  the data protection keychain: Touch ID enforced by the Keychain, items bound to this Mac. Builds
+  without one (ad hoc, or Developer ID without a profile) use the login keychain: the items are
+  limited to this app, but Touch ID is checked by the app and the items move with backups.
 - TLS to the gateway, CGP with session reliability: the session survives network drops, Wi-Fi
   changes and short sleeps (up to the server's reliability timeout, typically 180 s), with dimmed
   windows and a countdown while reconnecting.
