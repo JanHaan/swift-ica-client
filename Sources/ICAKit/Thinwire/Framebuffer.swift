@@ -42,8 +42,13 @@ public final class Framebuffer {
 
     deinit { back.deallocate() }
 
+    /// The largest screen the host may ask for (INIT carries up to 2^32 × 2^30): 16384 px a side and 2^27 px
+    /// (512 MiB per buffer, two buffers). Our module offers at most 5120 × 4096 (ScalingLimits); security review L-09.
+    public static let maxSide = 16384
+    public static let maxPixels = 1 << 27
+
     static func makeBuffer(width: Int, height: Int) -> CVPixelBuffer? {
-        guard width > 0, height > 0 else { return nil }
+        guard width > 0, height > 0, width <= maxSide, height <= maxSide, width * height <= maxPixels else { return nil }
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferCGImageCompatibilityKey: true,

@@ -586,6 +586,7 @@ public final class ThinwireEngine: VirtualChannelEngine {
                 glyph = (w, gh, d1, d2, bits)
             }
             guard let g = glyph else { throw TWError.invalid("glyph object \(h) truncated") }
+            guard Self.glyphFits(width: g.w, height: g.h) else { throw TWError.invalid("glyph \(g.w)x\(g.h) too large") }
             if i > 0 { pen = TWPoint(pen.x + g.d2.x, pen.y + g.d2.y) }
             let at = TWPoint(pen.x + g.d1.x, pen.y + g.d1.y)
             pen.x += g.w
@@ -600,6 +601,12 @@ public final class ThinwireEngine: VirtualChannelEngine {
                 fb.blit(mono, srcWidth: g.w, srcHeight: g.h, srcRect: TWRect(0, 0, g.w, g.h), to: at, limit: part) { s, d in s != 0 ? fg : d }
             }
         }
+    }
+
+    /// A glyph is one character: at most 2048 px a side and 2^22 px (its 1-bit cache object may hold 512 M px, which
+    /// the 4-byte mask below would turn into 2 GiB; security review L-09).
+    static func glyphFits(width: Int, height: Int) -> Bool {
+        width > 0 && height > 0 && width <= 2048 && height <= 2048 && width * height <= 1 << 22
     }
 
     // MARK: Pointer

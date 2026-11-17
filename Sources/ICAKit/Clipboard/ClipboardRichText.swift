@@ -209,6 +209,11 @@ public enum ClipboardRichText {
                 if let group = attach(picture) {
                     replacement = group
                     end = groupEnd
+                } else {
+                    // Not convertible (a metafile): the group stays as it is, and its inside is not scanned again; a
+                    // chain of nested unclosed `{\pict` groups was quadratic (security review L-09).
+                    i = groupEnd
+                    continue
                 }
             default: break
             }

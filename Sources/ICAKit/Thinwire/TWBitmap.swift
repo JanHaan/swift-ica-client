@@ -322,6 +322,10 @@ struct TWRLEDecoder {
     }
 
     mutating func alternating(_ n: Int) {
+        // An extended count reaches 2^32 without any data behind it: pixels past the bitmap's end are never stored,
+        // so the loop stops there (security review L-09; it used to spin 2^31 times per op). The parity swap below
+        // only matters while pixels remain, and then n is unchanged.
+        let n = min(n, max(0, count - pos) + 1)
         for _ in 0..<(n >> 1) { emit(prev); emit(cur) }
         if n & 1 != 0 {
             emit(prev)
