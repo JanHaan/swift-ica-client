@@ -607,3 +607,18 @@ private func makePDF(pages: Int, title: String? = nil, password: String? = nil) 
         #expect(PrintTestGate.confirmationDate(at: folder) == nil)
     }
 }
+
+@Suite struct PrinterNameDecodingTests {
+    @Test func openNameIsDecodedAsSentNotAsNegotiated() {
+        // D123, live: CONNECT2 version 8 (UTF-16) but OPEN carried "Citrix PDF Printer" + NUL as 19 bytes of 8-bit text.
+        let eight = Data("Citrix PDF Printer\u{0}".utf8)
+        #expect(PrinterWire.decodeName(eight, negotiated: .utf16) == "Citrix PDF Printer\u{0}")
+        // Real UTF-16LE stays UTF-16, also with non-ASCII characters.
+        let wide = Data(PrinterWire.Encoding.utf16.encode("Drucker Büro\u{0}"))
+        #expect(PrinterWire.decodeName(wide, negotiated: .utf16) == "Drucker Büro\u{0}")
+        // An even-length 8-bit name is not mistaken for UTF-16.
+        #expect(PrinterWire.decodeName(Data("PDF1".utf8), negotiated: .utf16) == "PDF1")
+        // ASCII negotiated: always 8-bit.
+        #expect(PrinterWire.decodeName(Data("PDF".utf8), negotiated: .ascii) == "PDF")
+    }
+}

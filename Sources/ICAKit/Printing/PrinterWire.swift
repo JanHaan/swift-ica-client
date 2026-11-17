@@ -86,6 +86,17 @@ public enum PrinterWire {
         }
     }
 
+    /// The OPEN printer name (D123): the 2402 VDA sends it as 8-bit text even after CONNECT2 version 8 chose UTF-16
+    /// ("Citrix PDF Printer" + NUL, 19 B, live in the lab). UTF-16 only when it looks like it: an even length with zero
+    /// high bytes for at least half of the characters; else Latin-1.
+    public static func decodeName(_ bytes: Data, negotiated: Encoding) -> String {
+        guard negotiated == .utf16 else { return Encoding.ascii.decode(bytes) }
+        let b = [UInt8](bytes)
+        let highZero = stride(from: 1, to: b.count, by: 2).filter { b[$0] == 0 }.count
+        let looksUTF16 = b.count % 2 == 0 && b.count >= 2 && highZero * 2 >= b.count / 2
+        return (looksUTF16 ? Encoding.utf16 : Encoding.ascii).decode(bytes)
+    }
+
     /// The metafile driver advertised in the QUERY_METAFILE reply (§3.8).
     public static let metafileFormat = "PDF"
     public static let metafileDriver = "Citrix PDF Universal Printer"

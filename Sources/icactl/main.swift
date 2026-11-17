@@ -410,6 +410,22 @@ case "policyprobe":
         fail("\(error)")
     }
 
+case "typeprobe":
+    // icactl typeprobe [resource] — typing latency in a lab Notepad (backlog 1.7, TypeProbe.swift): key → first
+    // non-caret screen update; median/p90/max; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1, default "Notepad").
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("typeprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let typeApp = testApp(args.first ?? "Notepad", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "typeprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == typeApp.resource }) else { fail("no resource named \(typeApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runTypeProbe(ica: ica, app: typeApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "printtest":
     // icactl printtest [resource] — client printing test, Notepad only (docs/97 §10 L1–L5): announces the PDF-mode
     // CTXCPM module and logs every host command. In a session this run logged on itself: types a test line in
@@ -536,6 +552,12 @@ case "relay-decode":
     guard let dir = args.first else { fail("usage: icactl relay-decode <dir>") }
     relayDecode(dir)
 
+case "pcap-decode":
+    // icactl pcap-decode <capture.pcap(ng)> [outdir] — TCP 1494/2598 reassembled and decoded per connection as
+    // relay-decode does, UDP listed with timing (see PcapDecode.swift).
+    guard let file = args.first else { fail("usage: icactl pcap-decode <capture.pcapng> [outdir]") }
+    pcapDecode(file, outdir: args.count > 1 ? args[1] : nil)
+
 case "relay-modules":
     // icactl relay-modules <wd-C.log> <out> — the stock client's INIT_RESPONSE modules from a relay-decode log as an
     // ICA_STOCK_MODULES file (docs/76 §7.14). The UI module (it carries the recorded session's logon ticket) is written
@@ -552,12 +574,6 @@ case "relay-modules":
     let replay: WDStockReplay
     do { replay = try WDStockReplay.parse(text) } catch { fail("recorded module list does not parse: \(error)") }
     FileManager.default.createFile(atPath: args[1], contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
-case "pcap-decode":
-    // icactl pcap-decode <capture.pcap(ng)> [outdir] — TCP 1494/2598 reassembled and decoded per connection as
-    // relay-decode does, UDP listed with timing (see PcapDecode.swift).
-    guard let file = args.first else { fail("usage: icactl pcap-decode <capture.pcapng> [outdir]") }
-    pcapDecode(file, outdir: args.count > 1 ? args[1] : nil)
-
     print("\(replay.slots.count) slots (\(replay.modules.count) modules + UI) → \(args[1])")
     for slot in replay.slots {
         if case .module(let m) = slot { print("  \(replay.key(of: m)) \(m.count) B") } else { print("  UI (ours)") }
@@ -671,6 +687,7 @@ default:
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
       icactl cdmtest-explorer [resource] drive mapping in a lab Explorer ("File Explorer"): temp folder as M:, list, copy
                                          a file inside it, mkdir, delete both, links leading outside; Mac-side checks
+      icactl typeprobe [resource]        lab: typing latency in Notepad (key → first non-caret update), median/p90/max
       icactl policyprobe [resource]      lab: which redirections the host opens (clipboard, drives, printers, audio), no
                                          input, logoff; ICA_POLICYPROBE_EXPECT=on|off for pass/fail
       icactl printtest [resource]        printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
@@ -2621,10 +2638,12 @@ func runPrintTest(ica: ICAFile, confirm: Bool, labConfirm: Bool = false, app: Te
     if !fresh {
         say("not a fresh logon by this run: no input is sent (this may be an existing session)")
     } else if !found || target == nil {
-        say("no Notepad window: no input is sent")
-    } else if let target, case .refuse(let why) = await onSession(session, {
+        say("no \(app.resource) window: no input is sent")
+    } else if let target, !labConfirm, case .refuse(let why) = await onSession(session, {
         PrintTestGate.mayOpenDialog(enumCount: printer.commandCounts["ENUM"] ?? 0, hostNames: printer.hostNames)
     }) {
+        // (Lab: no paper printers, and the VDA creates its PDF printer itself without naming it on CTXCPM before a job,
+        // live 2026-11-17; so gate 1 does not apply there.)
         // Gate 1: without the host's PDF printer on CTXCPM, Enter in a dialog could print on paper: no Ctrl+P at all.
         steps.append("gate: \(why); no Ctrl+P, Esc only")
         say(steps.last!)
@@ -2679,11 +2698,23 @@ func runPrintTest(ica: ICAFile, confirm: Bool, labConfirm: Bool = false, app: Te
                         try await Task.sleep(nanoseconds: 500_000_000)
                     }
                 }
-                let dialogGate = await onSession(session) {
+                let dialogGate = labConfirm ? .proceed : await onSession(session) {
                     PrintTestGate.mayOpenDialog(enumCount: printer.commandCounts["ENUM"] ?? 0, hostNames: printer.hostNames)
                 }
                 let decision = PrintTestGate.mayConfirm(confirmEnv: confirm, dialogGate: dialogGate, screenshotSaved: shot, confirmCreated: created)
                 if decision == .proceed {
+                    if labConfirm {
+                        // Lab: the session's default is "Microsoft Print to PDF" (a Save dialog); Home selects the first
+                        // printer of the list, "Citrix PDF Printer (from <client>) in session N" (live 2026-11-17).
+                        say("(b0) lab: Home in the printer list (Citrix PDF Printer sorts first)")
+                        session.sendInput { wd in
+                            wd.keyScancodes([0xE0, 0x47], up: false)
+                            wd.keyScancodes([0xE0, 0x47], up: true)
+                        }
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                        let selected = sessionDir.appendingPathComponent("printtest-dialog-selected.png")
+                        if await screenshot(selected) { say("dialog after Home: \(selected.path)") }
+                    }
                     say("(b) Enter in the print dialog (confirmed for run \(runID))")
                     key(0x1C)
                     let got = await waitFor(session, 90) { !jobs.isEmpty || !refused.isEmpty }

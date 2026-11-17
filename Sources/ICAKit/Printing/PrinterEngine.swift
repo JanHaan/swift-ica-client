@@ -167,7 +167,7 @@ public final class PrinterEngine: VirtualChannelEngine, VirtualChannelModule {
 
         case let .open(flags, name):
             count("OPEN")
-            let printer = Self.dropTerminator(encoding.decode(name))
+            let printer = Self.dropTerminator(PrinterWire.decodeName(name, negotiated: encoding))
             hostNames.append(printer)
             guard flags & PrinterWire.openRequiredFlags == PrinterWire.openRequiredFlags else {
                 reply(PrinterReply.open(tag: tag, result: PrinterWire.Result.accessDenied, context: 0xFFFF))

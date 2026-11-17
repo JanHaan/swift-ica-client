@@ -228,6 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 launcher?.launchEnded()
                 if !launchQueue.isEmpty { launch(launchQueue.removeFirst(), interactive: true) }
             }
+            // The connection this launch created, if its start fails (D122): it must not stay in `sessions`, where it
+            // would count as an open connection of this session (the automatic reconnect then stopped with "another
+            // connection of ours holds the session again" after a relaunch that only timed out).
+            var created: SessionController?
             do {
                 // D110: automated launches (hold, self test, ICAVIEWER_LAUNCH) check the store first; with no session
                 // listed, nothing can be reconnected, so the logon UI means a fresh logon (logged off at the end).
@@ -361,7 +365,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if ProcessInfo.processInfo.environment["ICAVIEWER_PROBE_CLICK"] == "1" {
                     probe = ActivationProbe(controller: controller)
                 }
+                created = controller
                 try await controller.start()
+                created = nil
                 // ICAVIEWER_HOLD_SECONDS=N: no automated input; log the session off N seconds after the
                 // last app window appeared (logon shows a console window before the app's own).
                 if let hold = ProcessInfo.processInfo.environment["ICAVIEWER_HOLD_SECONDS"].flatMap(Double.init) {
@@ -390,7 +396,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 vlog("launch failed: \(error)")
                 launcher?.setStatus("Launch failed: \(error)")
-                if autoLaunch != nil { AppQuit.request("launch failed") }
+                if let c = created, sessions.contains(where: { $0 === c }) {
+                    sessions.removeAll { $0 === c }
+                    clientNames[ObjectIdentifier(c)] = nil
+                    refreshSessionRows()
+                }
+                // Only the automated run's own launch ends the app; a failed automatic-reconnect attempt is retried.
+                if autoLaunch != nil, autoAttempt == nil { AppQuit.request("launch failed") }
                 // Sign-in cancelled: the user is there and said no, so the panel; anything else is tried again later.
                 if let autoAttempt { autoReconnect.failed(autoAttempt, error is LoginCancelled ? "sign-in cancelled" : "\(error)", toPanel: error is LoginCancelled) }
             }
@@ -421,7 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the manual panel. Never for a connection the user disconnected or logged off, while quitting, or in headless
     /// and test runs.
     private func beginAutoReconnect(_ c: SessionController, resource: StoreClient.Resource, giveUp: CGPTransport.GiveUp) -> Bool {
-        let automated = autoLaunch != nil || LaunchPolicy.envAutomated() || HelperManager.automated || StoreService.autofill || Demo.enabled
+        // ICAVIEWER_TEST_AUTO_RECONNECT=1 (D122): automated lab runs also reconnect automatically, to test it.
+        let automated = (autoLaunch != nil || LaunchPolicy.envAutomated() || HelperManager.automated || StoreService.autofill || Demo.enabled)
+            && ProcessInfo.processInfo.environment["ICAVIEWER_TEST_AUTO_RECONNECT"] != "1"
         let userEnded = userDisconnected.contains(ObjectIdentifier(c)) || c.endRequested || terminating
         let skip = AutoReconnect.skipReason(giveUp, mode: AutoReconnectSetting.stored, automated: automated, userEnded: userEnded)
         switch autoReconnect.begin(c, resource: resource, giveUp: giveUp, skip: skip) {
