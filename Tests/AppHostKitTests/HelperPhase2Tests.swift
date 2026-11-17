@@ -45,7 +45,7 @@ import Testing
         #expect(!taken.contains(HelperShortcut(",")) && !taken.contains(HelperShortcut("c", [.shift, .command])))
         #expect(Set(taken).count == taken.count)
         #expect(HelperMenu.launcherShortcut.description == "⌃⌥⌘L")
-        #expect(HelperMenu.readmeURL.absoluteString.hasPrefix("https://github.com/"))
+        #expect(HelperMenu.helpURL.absoluteString.hasPrefix("https://github.com/") && HelperMenu.helpURL.path.hasSuffix("/manual/README.md"))
     }
 }
 

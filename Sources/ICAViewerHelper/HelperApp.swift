@@ -498,6 +498,6 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
     }
 
     @objc private func openHelp(_ sender: Any?) {
-        NSWorkspace.shared.open(HelperMenu.readmeURL)
+        NSWorkspace.shared.open(HelperMenu.helpURL)
     }
 }

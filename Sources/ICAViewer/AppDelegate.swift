@@ -926,13 +926,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(windowMenu, loc("Bring All to Front", "Alle nach vorne bringen"), #selector(NSApplication.arrangeInFront(_:)))
 
         let helpMenu = submenu(loc("Help", "Hilfe"))
-        add(helpMenu, loc("ICA Viewer Help", "ICA Viewer-Hilfe"), #selector(openHelp))
+        // Apple's standard item (action showHelp:), aimed at us instead of NSApplication's Help Book lookup. ⌘? needs no
+        // key equivalent here: it is the system's "Show Help menu" shortcut (⇧⌘/), which opens this menu with its
+        // search field, this item first; AppKit drops a "?" key equivalent on the item at run time (VM run ux-help5).
+        add(helpMenu, loc("ICA Viewer Help", "ICA Viewer-Hilfe"), #selector(showHelp(_:))).target = self
         helpMenu.addItem(.separator())   // FeedbackMenu adds Report a Problem… below
         NSApp.mainMenu = main
         NSApp.windowsMenu = windowMenu
         NSApp.helpMenu = helpMenu
     }
 
-    /// The same page as the helpers' Help item (HelperMenu.readmeURL).
-    @objc private func openHelp() { NSWorkspace.shared.open(HelperMenu.readmeURL) }
+    /// The user manual, as the helpers' Help item (HelperMenu.helpURL).
+    @objc func showHelp(_ sender: Any?) {
+        vlog("help: opening the user manual")
+        NSWorkspace.shared.open(HelperMenu.helpURL)
+    }
 }

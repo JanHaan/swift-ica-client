@@ -92,7 +92,8 @@ public struct HelperMenuSection: Equatable, Sendable {
 /// taken by the window before the menu sees them (the same Ctrl+key either way). `takenShortcuts` lists what
 /// the menu takes from the remote app (docs/99 §12.22).
 public enum HelperMenu {
-    public static let readmeURL = URL(string: "https://github.com/JanHaan/swift-ica-client#readme")!
+    /// Help > ICA Viewer Help in the main app and the helpers: the user manual (manual/README.md, mac-G).
+    public static let helpURL = URL(string: "https://github.com/JanHaan/swift-ica-client/blob/main/manual/README.md")!
     public static let launcherShortcut = HelperShortcut("l", [.control, .option, .command])
 
     /// German when the first preferred language is German, as `loc` in the main app.
