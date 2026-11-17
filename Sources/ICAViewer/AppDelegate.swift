@@ -357,6 +357,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 controller.onAutoReconnect = { [weak self] c, giveUp in
                     self?.beginAutoReconnect(c, resource: resource, giveUp: giveUp) ?? false
                 }
+                // A full desktop's window closed by the user: disconnect, as the stock client does (D139).
+                controller.onDesktopClosed = { [weak self] c in self?.disconnect(c) }
                 controller.onParkedChanged = { [weak self] c in
                     self?.refreshSessionRows()
                     // No visible window left: the Connection Center lists the session with Show.

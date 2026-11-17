@@ -406,3 +406,22 @@ public final class WindowModel {
         return best
     }
 }
+
+// MARK: - Full desktop sessions (D139)
+
+extension TWIWindow {
+    /// The id of the stand-in window of a full desktop session (TWIMode off): never a host window id in practice
+    /// (host ids are window handles; this one is outside their range on the lab and farm hosts seen).
+    public static let desktopID: UInt32 = 0xFFFF_FFF0
+
+    /// A stand-in app window covering the whole session desktop of a non-seamless (desktop) session, so the app can
+    /// show the session in one window with the same rendering and input path as seamless windows.
+    public static func desktop(width: Int, height: Int, title: String) -> TWIWindow {
+        let rect = TWIRect(x: 0, y: 0, width: Int32(width), height: Int32(height))
+        return TWIWindow(id: desktopID, flags: 0, style: TWIStyle.visible, exStyle: 0, windowRect: rect, clientRect: rect, ownerId: 0,
+                         title: title, isMenu: false, processId: nil, appIdString: nil, windowAbove: nil, kind: .appWindow,
+                         hasTaskbarEntry: true, appKey: "desktop:" + title)
+    }
+
+    public var isDesktop: Bool { id == Self.desktopID }
+}

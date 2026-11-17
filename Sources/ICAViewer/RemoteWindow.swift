@@ -412,7 +412,17 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         displayScale = CGFloat(controller.layout.monitors[monitorIndex].scale)
         let frame = controller.layout.pointRect(info.windowRect, monitor: monitorIndex)
         view = SessionView(frame: NSRect(origin: .zero, size: frame.size))
-        if info.kind == .appWindow {
+        if info.isDesktop {
+            // A full desktop session (D139): an ordinary titled window with the session in it, full screen allowed.
+            let w = SeamlessWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            w.title = displayName(info.title)
+            w.tabbingMode = .disallowed
+            // Full screen only for a session sized to the screen (ICAVIEWER_DESKTOP_FULLSCREEN=1, entered at once): the
+            // session's size is fixed at connect, so a windowed session would be stretched there and input misplaced.
+            let fullScreen = ProcessInfo.processInfo.environment["ICAVIEWER_DESKTOP_FULLSCREEN"] == "1"
+            w.collectionBehavior = [.managed, .participatesInCycle, fullScreen ? .fullScreenPrimary : .fullScreenNone]
+            window = w
+        } else if info.kind == .appWindow {
             var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
             if TWIWindowControls(style: info.style).resizable { style.insert(.resizable) }
             let w = SeamlessWindow(contentRect: frame, styleMask: style, backing: .buffered, defer: false)
@@ -509,7 +519,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
 
     /// Local window controls follow the remote style (sizing border, maximize box).
     func applyControls() {
-        guard isApp else { return }
+        guard isApp, !info.isDesktop else { return }
         let c = TWIWindowControls(style: info.style)
         if c.resizable { window.styleMask.insert(.resizable) } else { window.styleMask.remove(.resizable) }
         window.standardWindowButton(.zoomButton)?.isEnabled = c.zoomable
@@ -713,6 +723,8 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
     }
 
     private func localGeometryChanged() {
+        // The desktop window moves on the Mac only; the session desktop does not move with it.
+        if info.isDesktop { return }
         guard !applyingRemote, !closingFromRemote, !window.isMiniaturized else { return }
         if frozenRect == nil { beginLocalGeometry(); gestureActive = false }
         let local = localRemoteRect

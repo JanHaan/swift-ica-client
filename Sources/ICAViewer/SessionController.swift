@@ -53,7 +53,9 @@ final class SessionController: NSObject {
     /// whatever the gap (the lab logs on in 1–4 s).
     private var logon: FreshLogonDetector
     var sawLogonUI: Bool { logon.sawLogonUI }
-    var freshLogon: Bool { logon.isFresh }
+    /// A desktop session has no TWI and so no logon UI window to see; there the store check alone decides (D139):
+    /// with no session listed before the launch, the session is ours.
+    var freshLogon: Bool { logon.isFresh || (desktopMode && logon.noPriorSession && surface != nil) }
 
     private func logonVerdict(_ gap: TimeInterval, _ what: String) -> String {
         switch logon.basis {
@@ -133,15 +135,35 @@ final class SessionController: NSObject {
     /// windows are over by then); with several apps all must have ended before a last-window logoff. nil before.
     private var appWindowProcesses: Set<UInt32>?
 
+    /// A full desktop session (ICA `TWIMode` off, D139): the whole session desktop in one window, sized from the main
+    /// screen's visible area (90 %, or the whole screen in full screen with ICAVIEWER_DESKTOP_FULLSCREEN=1).
+    let desktopMode: Bool
+    /// Called when the user closes the desktop window: the app disconnects (as the stock client does).
+    var onDesktopClosed: ((SessionController) -> Void)?
+
+    /// The one "screen" a desktop session is laid out on: the desktop window's content rect on the main screen.
+    static func desktopScreen(fullScreen: Bool) -> [ScalingScreen] {
+        guard let main = NSScreen.main ?? NSScreen.screens.first else { return [] }
+        if fullScreen { return [ScalingScreen(frame: main.frame, visible: main.frame, backingScale: main.backingScaleFactor)] }
+        let vf = main.visibleFrame
+        let title: CGFloat = 28
+        let w = (vf.width * 0.9 / 2).rounded(.down) * 2, h = ((vf.height - title) * 0.9 / 2).rounded(.down) * 2
+        let rect = CGRect(x: (vf.midX - w / 2).rounded(), y: (vf.minY + (vf.height - title - h) / 2).rounded(), width: w, height: h)
+        return [ScalingScreen(frame: rect, visible: rect, backingScale: main.backingScaleFactor)]
+    }
+
     init(name: String, ica: ICAFile, noPriorSession: Bool = false) throws {
         logon = FreshLogonDetector(noPriorSession: noPriorSession)
+        desktopMode = !WDLogon(ica: ica).seamless
         self.name = name
         appNames = [name]
         shareKey = SessionShareKey(ica: ica)
         awaitingApps = [AwaitedLaunch(resource: name, hint: AppNaming.launchHint(initialProgram: ica["InitialProgram"] ?? ""),
                                       alias: AppNaming.launchAlias(initialProgram: ica["InitialProgram"] ?? ""), ownLaunch: true)]
         scalingSettings = ScalingSettings.load()
-        layout = ScalingLayout.resolve(screens: Self.currentScreens(), settings: scalingSettings, limit: ScalingLimits.sessionLimit())
+        let screens = desktopMode ? Self.desktopScreen(fullScreen: ProcessInfo.processInfo.environment["ICAVIEWER_DESKTOP_FULLSCREEN"] == "1")
+                                  : Self.currentScreens()
+        layout = ScalingLayout.resolve(screens: screens, settings: scalingSettings, limit: ScalingLimits.sessionLimit())
         var config = WinstationDriver.Configuration()
         config.logon = WDLogon(ica: ica)
         // German client keyboard layout (the user's); scancodes are interpreted with it.
@@ -255,6 +277,8 @@ final class SessionController: NSObject {
     /// place keep their monitor, others map through the primary's scale, clipped to the session, so
     /// Windows moves windows off monitors that are gone (`ScalingLayout.keepingSession`).
     private func screensChanged() {
+        // A desktop session keeps its window's layout; the window stays where the user put it.
+        if desktopMode { return }
         let next = layout.keepingSession(screens: Self.currentScreens())
         guard next != layout else { return }
         let previous = layout
@@ -481,6 +505,23 @@ final class SessionController: NSObject {
         fpsTimer = timer
     }
 
+    /// Desktop mode: the stand-in window once the session's surface exists (first Thinwire INIT); its size follows
+    /// the session's (a later INIT with another size replaces it).
+    private func showDesktopWindow(_ info: ThinwireSessionInfo) {
+        guard desktopMode else { return }
+        let w = TWIWindow.desktop(width: Int(info.width), height: Int(info.height), title: name)
+        if let existing = windows[TWIWindow.desktopID] {
+            guard existing.info.windowRect != w.windowRect else { return }
+            remove(TWIWindow.desktopID)
+        }
+        vlog("desktop session: one window for the whole session desktop, \(info.width)x\(info.height) px")
+        materialise(w)
+        if ProcessInfo.processInfo.environment["ICAVIEWER_DESKTOP_FULLSCREEN"] == "1", let remote = windows[TWIWindow.desktopID] {
+            // The session has the main screen's size: full screen shows it 1:1 (the title bar goes).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { remote.window.toggleFullScreen(nil) }
+        }
+    }
+
     private func surfaceChanged(_ surface: IOSurfaceRef?, info: ThinwireSessionInfo) {
         // The post-logon Thinwire INIT is the most reliable logon marker: our PAUSE/RESUME after it
         // makes the host answer with CLOSE/OPEN instead of a second TWI host init.
@@ -501,6 +542,7 @@ final class SessionController: NSObject {
         }
         windows.values.forEach { $0.view.refresh() }
         if HelperManager.enabled { HelperManager.shared.surfaceChanged(self) }
+        showDesktopWindow(info)
     }
 
     private var pendingRects: [CGRect] = []
@@ -725,7 +767,8 @@ final class SessionController: NSObject {
         guard w.kind != .hidden, windows[w.id] == nil else { return }
         let remote = RemoteWindow(info: w, controller: self)
         windows[w.id] = remote
-        if HelperManager.enabled { HelperManager.shared.claim(remote) }
+        // The desktop window stays in this process (a helper's window has no title bar for it; D139).
+        if HelperManager.enabled, !w.isDesktop { HelperManager.shared.claim(remote) }
         if let dimAlpha { remote.setDimmed(dimAlpha) }
         remote.show(activate: w.kind == .appWindow && (foreground == w.id || appWindowCount == 1))
         if w.kind == .appWindow {
@@ -922,6 +965,11 @@ final class SessionController: NSObject {
     }
 
     func requestClose(id: UInt32) {
+        if id == TWIWindow.desktopID {
+            vlog("desktop window closed by the user: disconnecting")
+            onDesktopClosed?(self)
+            return
+        }
         userClosed.insert(id)
         vlog("close requested for \(String(id, radix: 16))")
         session.send { _, twi in twi.requestClose(windowId: id) }
