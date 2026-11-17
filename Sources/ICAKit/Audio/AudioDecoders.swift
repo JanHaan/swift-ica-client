@@ -132,14 +132,24 @@ public final class OpusDecoder: AudioDecoder {
         return total
     }
 
+    /// Silence for lost packets is capped at one second per WRITE: 2-byte `00 00` entries each asked for up to
+    /// 120 ms, so a 64 KiB WRITE could have demanded 1.5 GB of samples (security review F-03).
+    static func maxConcealedFramesPerWrite(_ sampleRate: Double) -> Int { Int(sampleRate) }
+
     public func decode(_ payload: Data) -> [Float] {
         let (list, truncated) = Self.packets(in: payload)
         if truncated { errors += 1 }
         var out: [Float] = []
+        var concealed = 0
+        let concealLimit = Self.maxConcealedFramesPerWrite(stream.sampleRate)
         for packet in list {
             if packet.isEmpty {
                 lostPackets += 1
-                out += [Float](repeating: 0, count: lastFrames * stream.channels)
+                let frames = min(lastFrames, concealLimit - concealed)
+                if frames > 0 {
+                    out += [Float](repeating: 0, count: frames * stream.channels)
+                    concealed += frames
+                }
                 continue
             }
             guard let frames48 = Self.samplesAt48k(packet), let converter else {
