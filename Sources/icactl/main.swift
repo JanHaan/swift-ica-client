@@ -245,6 +245,24 @@ case "cliptest-rich":
         fail("\(error)")
     }
 
+case "cliptest-word":
+    // icactl cliptest-word [text,rtf,image,html-image] — rich text with an image into "Microsoft Word ABC" and back
+    // (D96, docs/70 §10.4): fresh logon only, one new blank document, Ctrl+A/V/C only, nothing saved, logoff.
+    let names = (args.first ?? WordClipCase.allCases.map(\.rawValue).joined(separator: ",")).split(separator: ",").map(String.init)
+    let cases = names.compactMap(WordClipCase.init(rawValue:))
+    guard cases.count == names.count, !cases.isEmpty else {
+        fail("usage: icactl cliptest-word [\(WordClipCase.allCases.map(\.rawValue).joined(separator: ","))]")
+    }
+    do {
+        let resources = try await storeClient().resources()
+        guard let resource = resources.first(where: { $0.name == WordClipCase.resource }) else { fail("no resource named \(WordClipCase.resource)") }
+        guard let ica = ICAFile(text: try await storeClient().launchICA(resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runClipWordTest(ica: ica, cases: cases)
+    } catch {
+        fail("\(error)")
+    }
+
 case "cliptest-files":
     // icactl cliptest-files — clipboard file copy discovery (docs/75 §10 E2/E3), "Explorer Citrix ABC" only, fresh
     // logon only. Mac → session: two known files pasted into %TEMP%\ica-cliptest-<run> (created by this run);
@@ -507,6 +525,8 @@ default:
                                          ICA_CLIPTEST_MIXED=1: offer text + HTML + RTF in one list)
       icactl cliptest-rich html|rtf|image  HTML/RTF in "Word 2016 - TEST", an image in "Paint ABC": paste in, copy
                                          out, compare; fresh logon only, never saves (ICA_CLIPRICH_START_KEYS=…)
+      icactl cliptest-word [cases]       "Microsoft Word ABC", one blank document: text, rtf, image (RTFD → RTF \\pict and
+                                         back as RTFD), html-image (data URI, informational); Ctrl+A/V/C only, logoff
       icactl cliptest-files              clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
                                          copy them back (SHA-256), delete only that folder, log off (fresh logon only)
                                          (ICA_GDT=1: also announce CTXGDT, log host GDT writes to .session/gdt/;
@@ -1074,6 +1094,9 @@ func runClipTest(ica: ICAFile) async throws {
     say("fresh logon: \(fresh)")
     for step in steps { say("  " + step) }
     say("end: \(ending)")
+    let (served, equal) = await onSession(session) { (pasteServed != nil, hostText?.equal ?? false) }
+    let pass = fresh && served && equal && ending.hasPrefix("logged off")
+    say("RESULT: \(pass ? "PASS" : "FAIL") cliptest: fresh \(fresh), Mac → session \(served), session → Mac equal \(equal), end: \(ending)")
 }
 
 // MARK: - Clipboard file discovery (docs/75 §10)
@@ -1848,6 +1871,9 @@ func runClipFilesTest(ica: ICAFile) async throws {
         "stubs=\(stubs.count) stub_writes=[\(stubWrites)] " +
         "wd_types=[\(await onSession(session) { wdTypes.sorted { $0.key < $1.key }.map { String(format: "%02x", $0.key) + ":\($0.value)" }.joined(separator: ",") })] " +
         "clip_version=\(version) fresh=\(fresh) pasted=\(pasted) deleted=\(deleted) protocol_errors=\(protocolErrors) end=\"\(ending)\"")
+    let filesPass = fresh && pasted && compared && deleted && ending.hasPrefix("logged off")
+    say("RESULT: \(filesPass ? "PASS" : "FAIL") cliptest-files run \(runID): fresh \(fresh), E2 pasted \(pasted), E3 equal \(compared), "
+        + "test folder deleted \(deleted), end: \(ending)")
 }
 
 // MARK: - Sessions command (docs/90)

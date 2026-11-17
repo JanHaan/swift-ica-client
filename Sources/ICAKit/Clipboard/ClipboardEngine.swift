@@ -39,6 +39,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
         public var html = true
         public var rtf = true
         public var images = true
+        /// Pictures in rich text (with `images`): Mac RTFD attachments are served as RTF `\pict` groups, host RTF
+        /// pictures are delivered as RTFD too (docs/70 §4.9).
+        public var rtfPictures = true
         /// Give up on one format after this long without a DATA_RESPONSE (§6 [P]).
         public var requestTimeout: TimeInterval = 5
         /// Host → Mac data above this is consumed and discarded; Mac → host data above it fails (§4.8).
@@ -200,7 +203,8 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private var hostListAt: UInt64 = 0
     private var hostListSeen = false
 
-    private enum LocalData { case bytes(Data), image(ClipboardImage) }
+    /// Announced data: bytes, an image converted on the first request, or a conversion run on the first request.
+    private enum LocalData { case bytes(Data), image(ClipboardImage), deferred(() -> Data?) }
     private var localData: [UInt16: LocalData] = [:]
     private var localFiles: [ClipboardLocalFile] = []
     private var localText: String?
@@ -529,7 +533,12 @@ public final class ClipboardEngine: VirtualChannelEngine {
             }
             fetched.html = ClipboardHTML.macDocument(fragment: fragment)
         case registeredId(ClipboardFormat.rtfName):
-            fetched.rtf = ClipboardRTF.decodeHost(data)
+            let rtf = ClipboardRTF.decodeHost(data)
+            fetched.rtf = rtf
+            // Pictures in the RTF (Word: \shppict PNG/JPEG) reach Mac apps only as RTFD attachments (§4.9).
+            if config.images, config.rtfPictures, let converted = ClipboardRichText.flatRTFD(fromRTF: rtf) {
+                fetched.rtfd = converted.rtfd
+            }
         default:
             return
         }
@@ -589,9 +598,21 @@ public final class ClipboardEngine: VirtualChannelEngine {
             formats.append(id)
             data[id] = .bytes(ClipboardHTML.build(html))
         }
-        if config.rtf, let rtf = content.rtf, !rtf.isEmpty, let id = registeredId(ClipboardFormat.rtfName) {
-            formats.append(id)
-            data[id] = .bytes(ClipboardRTF.encodeForHost(rtf))
+        if config.rtf, let id = registeredId(ClipboardFormat.rtfName) {
+            let rtf = content.rtf.flatMap { $0.isEmpty ? nil : $0 }
+            if config.images, config.rtfPictures, let rtfd = content.rtfd, !rtfd.isEmpty {
+                // RTFD (an image in rich text, e.g. TextEdit): converted only if the host asks for RTF. Without any
+                // picture the Mac's own RTF is served as it is (§4.9).
+                formats.append(id)
+                data[id] = .deferred {
+                    let converted = ClipboardRichText.rtf(fromFlatRTFD: rtfd)
+                    guard let body = (converted?.pictures ?? 0) > 0 ? converted?.rtf : rtf ?? converted?.rtf else { return nil }
+                    return ClipboardRTF.encodeForHost(body)
+                }
+            } else if let rtf {
+                formats.append(id)
+                data[id] = .bytes(ClipboardRTF.encodeForHost(rtf))
+            }
         }
         if config.images, let image = content.image, image.width > 0, image.height > 0,
            image.width <= config.maxImageSide, image.height <= config.maxImageSide,
@@ -680,6 +701,10 @@ public final class ClipboardEngine: VirtualChannelEngine {
             guard let rgba = image.rgba(), let dib = ClipboardDIB.encode(width: image.width, height: image.height, rgba: rgba) else { return nil }
             localData[format] = .bytes(dib)
             return dib
+        case .deferred(let make):
+            guard let made = make() else { return nil }
+            localData[format] = .bytes(made)
+            return made
         case nil: return nil
         }
     }

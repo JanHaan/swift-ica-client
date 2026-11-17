@@ -1720,7 +1720,7 @@ final class TWICapture: @unchecked Sendable {
     }
 }
 
-/// NSPasteboard for the clipboard sync (main thread). Reads text, HTML, RTF and PNG/TIFF images;
+/// NSPasteboard for the clipboard sync (main thread). Reads text, HTML, RTF, RTFD and PNG/TIFF images;
 /// items marked concealed or transient (password managers) read as nothing (docs/70 §5.4 [P]).
 final class SystemPasteboard: ClipboardPasteboard {
     private let board = NSPasteboard.general
@@ -1746,6 +1746,9 @@ final class SystemPasteboard: ClipboardPasteboard {
         content.text = board.string(forType: .string)
         content.html = board.string(forType: .html)
         content.rtf = board.data(forType: .rtf)
+        // Rich text with images (TextEdit, Notes): AppKit's public.rtf drops the attachments, so the RTFD goes along;
+        // the engine turns it into RTF with \pict only if the host asks for RTF (docs/70 §4.9).
+        if readImages, types.contains(.rtfd) { content.rtfd = board.data(forType: .rtfd) }
         if readFiles, !types.contains(HostFileOffer.markerType), types.contains(.fileURL),
            let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             let snapshot = ClipboardFileSnapshot.make(urls: urls)
@@ -1771,6 +1774,8 @@ final class SystemPasteboard: ClipboardPasteboard {
         if let text = content.text { item.setString(text, forType: .string) }
         if let html = content.html { item.setString(html, forType: .html) }
         if let rtf = content.rtf { item.setData(rtf, forType: .rtf) }
+        // Host RTF with pictures (Word) as RTFD, which Mac apps read with the images (docs/70 §4.9).
+        if let rtfd = content.rtfd { item.setData(rtfd, forType: .rtfd) }
         if let image = content.image, let cg = Self.cgImage(image) {
             let rep = NSBitmapImageRep(cgImage: cg)
             if let png = rep.representation(using: .png, properties: [:]) { item.setData(png, forType: .png) }

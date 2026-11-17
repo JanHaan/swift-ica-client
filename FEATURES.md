@@ -133,7 +133,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | Clipboard: plain text | Likely | Yes | Yes | Yes | ? | ? | ? | Yes | |
-| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Partly | Web: HTML confirmed, images not. Ours: images verified both ways (D85); HTML and RTF built, not verified live |
+| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Partly | Web: HTML confirmed, images not. Ours: images verified both ways (D85); RTF with formatting and rich text with an embedded image (RTFD ⇄ RTF `\pict`) verified both ways with Word, headless (D100); HTML built, not carried by the site's Word |
 | Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | Built | Ours: both ways over CTXGDT, Finder ⇄ Explorer, folders included; protocol verified live headless (D88), app built, live check pending (D90) |
 | Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: one shared folder; the test site maps no drives |
 | File transfer (upload, download) | Likely | Likely | Likely | Likely | Likely | ? | ? | No | Not a matrix row. Ours: under investigation |

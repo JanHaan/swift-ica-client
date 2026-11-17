@@ -436,4 +436,7 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind) async throws {
     say("Mac → session: \(pasteOK), session → Mac: \(copyOK)")
     if let url = trace.url { say("trace: \(url.path)") }
     say("end: \(ending)")
+    let pass = fresh && pasteOK && copyOK && ending.hasPrefix("logged off")
+    say("RESULT: \(pass ? "PASS" : "FAIL") cliptest-rich \(kind.rawValue) run \(runID): fresh \(fresh), Mac → session \(pasteOK), "
+        + "session → Mac \(copyOK), end: \(ending)")
 }
