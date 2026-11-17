@@ -166,8 +166,12 @@ final class SessionController: NSObject {
         layout = ScalingLayout.resolve(screens: screens, settings: scalingSettings, limit: ScalingLimits.sessionLimit())
         var config = WinstationDriver.Configuration()
         config.logon = WDLogon(ica: ica)
-        // German client keyboard layout (the user's); scancodes are interpreted with it.
-        config.logon.keyboardLayout = UInt32(ProcessInfo.processInfo.environment["ICA_KBD_LAYOUT"].flatMap { UInt32($0, radix: 16) } ?? 0x407)
+        // The Mac's keyboard input source as the session's layout (D141; ICA_KBD_LAYOUT overrides, else German):
+        // scancodes are positional, so the session must use the layout the Mac uses.
+        let kbdLayout = KeyboardLayoutSync.sessionLayout()
+        config.logon.keyboardLayout = kbdLayout.klid
+        sessionKLID = kbdLayout.klid
+        vlog(String(format: "keyboard layout %08x from %@", kbdLayout.klid, kbdLayout.source))
         // Match macOS text rendering: greyscale anti-aliasing (1 = standard) instead of ClearType's
         // colour fringes. ICA_FONT_SMOOTHING: 0 none, 1 standard, 2 ClearType.
         config.logon.fontSmoothing = UInt16(ProcessInfo.processInfo.environment["ICA_FONT_SMOOTHING"] ?? "") ?? 1
@@ -193,6 +197,11 @@ final class SessionController: NSObject {
         super.init()
         refused.register(self)
         keyboard.controller = self
+        // A mid-session input source switch (D141): no protocol message exists (the stock client works in Unicode mode
+        // and sends none), so while the Mac's layout differs from the announced one, printable keys go as text.
+        inputSourceObserver = DistributedNotificationCenter.default().addObserver(
+            forName: KeyboardLayoutSync.changedNotification, object: nil, queue: .main) { [weak self] _ in self?.inputSourceChanged() }
+        inputSourceChanged()
         setUpClipboard()
         setUpDriveMapping()
         setUpPrinting()
@@ -345,6 +354,20 @@ final class SessionController: NSObject {
             default: break
             }
         }
+    }
+
+    /// The keyboard layout announced at logon, and the observer of Mac input source changes (D141).
+    private var sessionKLID: UInt32 = 0x0000_0407
+    private var inputSourceObserver: NSObjectProtocol?
+
+    private func inputSourceChanged() {
+        let id = KeyboardLayoutSync.currentInputSourceID() ?? "?"
+        let current = KeyboardLayoutSync.klid(forInputSource: id)
+        let mismatch = current != sessionKLID
+        guard mismatch != keyboard.textForPrintables else { return }
+        keyboard.textForPrintables = mismatch
+        vlog(String(format: "keyboard: input source %@ %@ the session layout %08x: printable keys as %@", id,
+                    mismatch ? "differs from" : "matches", sessionKLID, mismatch ? "Unicode text" : "scancodes"))
     }
 
     /// Redirections the server refused (D118): Connection Center lines and the one-time notice.
@@ -1060,6 +1083,7 @@ final class SessionController: NSObject {
         ended = true
         endReason = reason
         refused.unregister()
+        if let inputSourceObserver { DistributedNotificationCenter.default().removeObserver(inputSourceObserver) }
         pendingLogoff?.cancel()
         statsTimer?.cancel()
         fpsTimer?.invalidate()

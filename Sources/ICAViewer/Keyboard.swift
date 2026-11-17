@@ -35,6 +35,9 @@ struct KeyInput {
 /// (the macOS layout's Option characters differ from the Windows AltGr ones). Cmd+key becomes Ctrl+key.
 final class KeyboardTranslator {
     weak var controller: SessionController?
+    /// The Mac's input source differs from the layout announced at logon (D141): printable characters go as Unicode
+    /// text, as the stock client always does, so they stay right after a mid-session switch. Set by the controller.
+    var textForPrintables = false
     /// Scancodes currently down on the server, to release on focus loss.
     private var down: Set<KeyMap.Code> = []
     /// Option is held but Alt has not been sent yet (it might compose a character).
@@ -102,6 +105,12 @@ final class KeyboardTranslator {
             // Option-composed character (e.g. @ € | on a German Mac layout): send it as text, without Alt.
             sendText(chars)
             return
+        }
+        if textForPrintables, !flags.contains(.control), !flags.contains(.option) {
+            // Layout differs from the session's: the Mac's character, not the key position (D141). A dead key gives no
+            // characters yet; it is swallowed and the composed character follows as text.
+            if let chars = event.characters, KeyboardLayoutSync.isPrintable(chars) { sendText(chars); return }
+            if event.characters?.isEmpty ?? true, code != nil, KeyMap.isCharacterKey(event.keyCode) { return }
         }
         if let code {
             if pendingAlt != nil { flushPendingAlt(); altUsed = true }

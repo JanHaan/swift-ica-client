@@ -118,7 +118,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Partly | Ours: German layout tested; no live sync when the Mac layout changes |
+| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at logon (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text (D141) |
 | Keyboard layout sync to a Linux VDA | Yes | Yes | Yes | No | No | Yes | Yes | ? | |
 | Scancode keyboard mode | Yes | Yes | Yes | Yes | Yes | No | No | Yes | |
 | Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters only |

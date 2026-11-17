@@ -399,6 +399,24 @@ case "cdmtest-explorer":
         fail("\(error)")
     }
 
+case "kbdtest":
+    // icactl kbdtest <klid hex> [resource] — keyboard layout announced at logon reaches the session (D141, KbdTest.swift):
+    // fixed scancodes in Notepad, read back through the clipboard; ICA_KBDTEST_TEXT=1 sends Unicode text instead.
+    // Lab only (ICA_ALLOW_ANY_RESOURCE=1).
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("kbdtest needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    guard let klidText = args.first, let klid = UInt32(klidText, radix: 16) else { fail("usage: icactl kbdtest <klid hex, e.g. 00000407> [resource]") }
+    let kbdApp = testApp(args.count > 1 ? args[1] : "Notepad", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "kbdtest")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == kbdApp.resource }) else { fail("no resource named \(kbdApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runKbdTest(ica: ica, app: kbdApp, klid: klid, text: ProcessInfo.processInfo.environment["ICA_KBDTEST_TEXT"] == "1")
+    } catch {
+        fail("\(error)")
+    }
+
 case "bulkprobe":
     // icactl bulkprobe [seconds] — bulk throughput, independent of GDT (D135, BulkProbe.swift): a noise window in the lab's
     // Command Prompt; transport bytes per second; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1). ICA_EDT=1 for EDT.
