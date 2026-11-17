@@ -121,7 +121,8 @@ func edgeCheck(_ image: CGImage, name: String) -> [String] {
     let transparent = corners.allSatisfy { $0.a == 0 }
     let flat = corners.allSatisfy { $0.a == 255 && near($0.r, background.r) && near($0.g, background.g) && near($0.b, background.b) }
     let kind = transparent ? "transparent corners" : flat ? "composite on #E5E5EA" : "UNKNOWN corners"
-    if !transparent && !flat {
+    // ICA_SHOT_ANY_CORNERS=1: region and full-screen captures (the user manual) have opaque square corners.
+    if !transparent && !flat && ProcessInfo.processInfo.environment["ICA_SHOT_ANY_CORNERS"] != "1" {
         let list = corners.map { String(format: "%02x%02x%02x/a%d", $0.r, $0.g, $0.b, $0.a) }.joined(separator: " ")
         problems.append("corners are neither fully transparent nor the flat background (\(list))")
     }

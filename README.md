@@ -79,6 +79,10 @@ The calculator above is a live session; the other images use the app's demo mode
 - Report a Problem (Help menu): builds a scrubbed report and a prefilled GitHub issue; see
   [Reporting problems](#reporting-problems).
 
+## User manual
+
+A full user manual with screenshots is in [manual/](manual/README.md): installation, signing in, the launcher, remote apps, clipboard, drives, printing, audio and webcam, displays, the Connection Center, reconnect, every setting, troubleshooting and privacy notes. It is regenerated for every release; the release's PDF is attached to the GitHub release.
+
 ## Status
 
 See [FEATURES.md](FEATURES.md) for a feature-by-feature comparison with the official clients.

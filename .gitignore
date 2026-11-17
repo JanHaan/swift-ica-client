@@ -14,6 +14,7 @@ signing/*.xcodeproj/
 # Local screenshot-check word lists (private)
 .shotcheck-forbidden
 .shotcheck-censor
+manual/*.pdf
 
 # Python bytecode (scripts/macvm/udprelay.py etc.)
 __pycache__/
