@@ -56,3 +56,27 @@ func runEDTProbe(host: String, port: UInt16, seconds: Double) {
           + "cookie \(c.cookie.map { String(format: "%08x", $0) } ?? "none"), keep-alives received \(c.keepAlivesReceived), end: \(c.state)")
     if !ok { exit(1) }
 }
+
+/// `icactl edtprobe --dtls <server name> <vda-ipv4> [port, default 443] [seconds]` (D148): DTLS to the VDA's TLS port,
+/// then the EDT handshake inside, through ICAKit's `EDTStream`; holds `seconds`, logs, closes. No CGP, no session.
+func runEDTDTLSProbe(serverName: String, peer: String, port: UInt16, seconds: Double) async {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let queue = DispatchQueue(label: "edtprobe.dtls")
+    let ip = peer.split(separator: ".").compactMap { UInt8($0) }
+    let stream = EDTStream(host: serverName, port: port, queue: queue, dtlsServerName: serverName, peerIPv4: ip.count == 4 ? ip : nil)
+    let t0 = Date()
+    stream.log = { print(String(format: "+%7.3f %@", Date().timeIntervalSince(t0), $0)) }
+    do {
+        try await stream.connect(timeout: 8)
+        print(String(format: "+%7.3f EDT over DTLS connected to %@:%d", Date().timeIntervalSince(t0), serverName, Int(port)))
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+        let stats = queue.sync { stream.edt.stats.description }
+        stream.close()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        print("RESULT: PASS edtprobe DTLS \(serverName):\(port): \(stats)")
+    } catch {
+        print(String(format: "+%7.3f %@", Date().timeIntervalSince(t0), "\(error)"))
+        print("RESULT: FAIL edtprobe DTLS \(serverName):\(port): \(error)")
+        exit(1)
+    }
+}

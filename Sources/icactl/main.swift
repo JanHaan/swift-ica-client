@@ -436,6 +436,13 @@ case "bulkprobe":
 case "edtprobe":
     // icactl edtprobe <vda-ipv4> [port] [seconds] — EDT handshake only (D130, EDTProbe.swift); needs ICA_EDT=1.
     guard EDTFeature.enabled() else { fail("edtprobe needs ICA_EDT=1 (EDT is experimental)") }
+    if args.first == "--dtls" {
+        // icactl edtprobe --dtls <server name> <vda-ipv4> [port] [seconds] — EDT inside DTLS (D148).
+        guard args.count >= 3 else { fail("usage: icactl edtprobe --dtls <server name> <vda-ipv4> [port, default 443] [seconds, default 3]") }
+        await runEDTDTLSProbe(serverName: args[1], peer: args[2], port: args.count > 3 ? UInt16(args[3]) ?? 443 : 443,
+                              seconds: args.count > 4 ? Double(args[4]) ?? 3 : 3)
+        break
+    }
     guard let host = args.first else { fail("usage: icactl edtprobe <vda-ipv4> [port, default 2598] [seconds, default 3]") }
     runEDTProbe(host: host, port: args.count > 1 ? UInt16(args[1]) ?? 2598 : 2598, seconds: args.count > 2 ? Double(args[2]) ?? 3 : 3)
 

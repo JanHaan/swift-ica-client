@@ -154,8 +154,17 @@ public final class ICASession: @unchecked Sendable {
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, tls: plan.tls, framing: plan.framing, queue: queue)
         transport.reconnectTicket = acr?.ticket
-        // EDT (D132): only with ICA_EDT=1, a direct CGP plan without TLS (no DTLS yet) and HDX over UDP allowed.
-        if EDTFeature.enabled(), case .cgp = plan.framing, !plan.tls, (ica["HDXoverUDP"] ?? "Off").lowercased() != "off" {
+        // EDT (D132): only with ICA_EDT=1, a direct CGP plan and HDX over UDP allowed. With TLS straight to the VDA, EDT
+        // runs inside DTLS on the TLS port (D148); never through a gateway (not tested there).
+        let hdxOverUDP = (ica["HDXoverUDP"] ?? "Off").lowercased() != "off"
+        if EDTFeature.enabled(), case .cgp = plan.framing, plan.tls, plan.route == .direct, hdxOverUDP {
+            // The handshake's peer address field wants the VDA's IPv4 (docs/80 §4.1): from `Address` when it is one.
+            let address = ica["Address"].map { String($0.split(separator: ":").first ?? "") } ?? ""
+            let ip = address.split(separator: ".").compactMap { UInt8($0) }
+            let port = ProcessInfo.processInfo.environment["ICA_EDT_PORT"].flatMap(UInt16.init) ?? plan.port
+            transport.edtTarget = .init(host: plan.host, port: port, dtlsServerName: plan.host, peerIPv4: ip.count == 4 ? ip : nil)
+        }
+        if EDTFeature.enabled(), case .cgp = plan.framing, !plan.tls, hdxOverUDP {
             let udp = ica["UDPCGPPort"].flatMap { value -> (String, UInt16)? in
                 let parts = value.split(separator: ":")
                 guard parts.count == 2, let p = UInt16(parts[1]) else { return nil }
@@ -163,7 +172,7 @@ public final class ICASession: @unchecked Sendable {
             } ?? (host, 2598)
             // ICA_EDT_PORT overrides the UDP port (tests: a dead port shows the TCP fallback).
             let port = ProcessInfo.processInfo.environment["ICA_EDT_PORT"].flatMap(UInt16.init) ?? udp.1
-            transport.edtTarget = (udp.0, port)
+            transport.edtTarget = .init(host: udp.0, port: port)
         }
         // T_sr without a server cap 9: the ICA file's SessionReliabilityTTL (§3.12.4).
         transport.srTimeoutFallback = ica["SessionReliabilityTTL"].flatMap(TimeInterval.init)
@@ -618,7 +627,21 @@ public final class CGPTransport: @unchecked Sendable {
     private var stream: ICAByteStream?
     /// EDT (CGP over UDP, docs/80, D132): tried first when set (`ICA_EDT=1` and the ICA file allows HDX over UDP);
     /// a failed EDT handshake falls back to TCP for the rest of the session, as the stock client does.
-    public var edtTarget: (host: String, port: UInt16)?
+    public var edtTarget: EDTTarget?
+
+    /// Where EDT goes: plain UDP to `host:port`, or DTLS with `dtlsServerName` (D148).
+    public struct EDTTarget: Sendable {
+        public var host: String
+        public var port: UInt16
+        public var dtlsServerName: String?
+        public var peerIPv4: [UInt8]?
+        public init(host: String, port: UInt16, dtlsServerName: String? = nil, peerIPv4: [UInt8]? = nil) {
+            self.host = host
+            self.port = port
+            self.dtlsServerName = dtlsServerName
+            self.peerIPv4 = peerIPv4
+        }
+    }
     private var edtFailed = false
     /// "TCP", "TLS" or "EDT": the transport of the current connection (any thread).
     public var transportKind: String { onQueue { stream?.kind == "TCP" && tls ? "TLS" : stream?.kind ?? "-" } }
@@ -750,7 +773,7 @@ public final class CGPTransport: @unchecked Sendable {
         let stream = try await openStream()
         perform { [self] in
             guard !closed else { return stream.close() }
-            log(stream.kind == "EDT" ? "EDT connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)"
+            log(stream.kind.hasPrefix("EDT") ? "\(stream.kind) connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)"
                                      : "\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
             install(stream)
             if case .raw(let socks) = framing {
@@ -787,7 +810,8 @@ public final class CGPTransport: @unchecked Sendable {
             try await tcp.connect(timeout: timing.connectTimeout)
             return tcp
         }
-        let edt = EDTStream(host: target.host, port: target.port, queue: queue)
+        let edt = EDTStream(host: target.host, port: target.port, queue: queue, dtlsServerName: target.dtlsServerName,
+                            peerIPv4: target.peerIPv4)
         edt.log = { [weak self] in self?.log($0) }
         let started = ContinuousClock.now
         let edtTask = Task { () -> Error? in

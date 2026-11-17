@@ -43,7 +43,7 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
     public let queue: DispatchQueue
     public let edt: EDTConnection
     public var onSendError: ((Error) -> Void)?
-    public var kind: String { "EDT" }
+    public var kind: String { dtlsServerName == nil ? "EDT" : "EDT/DTLS" }
     /// Protocol notes and statistics for the session log.
     public var log: (String) -> Void = { _ in }
 
@@ -55,15 +55,33 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
     private var finished = false
     private var lastStats = ContinuousClock.now
 
-    /// `host` must be an IPv4 address (the handshake carries it, docs/80 §4.1).
-    public init(host: String, port: UInt16, queue: DispatchQueue, config: EDTConnection.Config? = nil) {
+    /// DTLS server name (EDT over DTLS, D148): set, the datagrams run inside DTLS 1.2+ with this SNI and the TLS trust
+    /// of the TCP path (`TLSStream.tlsOptions`, i.e. the system store and the lab CA where configured).
+    public let dtlsServerName: String?
+    /// Bytes DTLS adds to every datagram (record header 13 + AES-GCM explicit nonce 8 + tag 16, rounded up): taken off
+    /// the packet size offered, so an EDT packet plus DTLS still fits the path.
+    public static let dtlsOverhead = 40
+
+    /// `host` is an IPv4 address or a name; the handshake carries the peer's IPv4 address (docs/80 §4.1), so with a name
+    /// `peerIPv4` gives it.
+    public init(host: String, port: UInt16, queue: DispatchQueue, config: EDTConnection.Config? = nil,
+                dtlsServerName: String? = nil, peerIPv4: [UInt8]? = nil) {
         self.host = host
         self.port = port
         self.queue = queue
-        let ip = host.split(separator: ".").compactMap { UInt8($0) }
+        self.dtlsServerName = dtlsServerName
+        let ip = peerIPv4 ?? host.split(separator: ".").compactMap { UInt8($0) }
         edt = EDTConnection(config: config ?? EDTConnection.Config(peerIPv4: ip.count == 4 ? ip : [0, 0, 0, 0]))
         // Don't fragment (D135): an oversized probe must be lost, not fragmented, or path MTU discovery would lie.
-        let parameters = NWParameters.udp
+        let parameters: NWParameters
+        if let name = dtlsServerName {
+            let tls = TLSStream.tlsOptions()
+            sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .DTLSv12)
+            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, name)
+            parameters = NWParameters(dtls: tls, udp: NWProtocolUDP.Options())
+        } else {
+            parameters = NWParameters.udp
+        }
         if let ip = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.disableFragmentation = true }
         connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
     }
@@ -125,8 +143,9 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
                     // Offer the route's interface MTU (at most 1500), so the VDA's packets fit our first hop (D135).
                     let name = self.connection.currentPath?.availableInterfaces.first?.name
                     let mtu = name.flatMap(Self.interfaceMTU)
-                    let offer = min(1500, mtu ?? Int(self.edt.config.maxPacketSize))
-                    self.log("EDT: route via \(name ?? "?") (MTU \(mtu.map(String.init) ?? "?")): offering packet size \(offer)")
+                    let overhead = self.dtlsServerName == nil ? 0 : Self.dtlsOverhead
+                    let offer = min(1500, mtu ?? Int(self.edt.config.maxPacketSize)) - overhead
+                    self.log("EDT: route via \(name ?? "?") (MTU \(mtu.map(String.init) ?? "?"))\(overhead > 0 ? ", DTLS \(self.dtlsServerName!)" : ""): offering packet size \(offer)")
                     self.edt.connect(now: self.now(), maxPacketSize: offer)
                 case .failed(let error):
                     finish(.failure(Failure.handshake("\(error)")))
