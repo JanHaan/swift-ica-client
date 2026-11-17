@@ -24,8 +24,16 @@ public final class TLSStream: @unchecked Sendable {
         self.queue = queue
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
-        let parameters = NWParameters(tls: tls ? NWProtocolTLS.Options() : nil, tcp: tcp)
+        let parameters = NWParameters(tls: tls ? Self.tlsOptions() : nil, tcp: tcp)
         connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
+    }
+
+    /// System trust and host name check (Network.framework defaults), TLS 1.2 at least: ATS sets that floor for
+    /// URLSession, not for an NWConnection (security review L-02).
+    static func tlsOptions() -> NWProtocolTLS.Options {
+        let options = NWProtocolTLS.Options()
+        sec_protocol_options_set_min_tls_protocol_version(options.securityProtocolOptions, .TLSv12)
+        return options
     }
 
     public func connect(timeout: TimeInterval = 20) async throws {
