@@ -552,6 +552,12 @@ case "relay-modules":
     let replay: WDStockReplay
     do { replay = try WDStockReplay.parse(text) } catch { fail("recorded module list does not parse: \(error)") }
     FileManager.default.createFile(atPath: args[1], contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
+case "pcap-decode":
+    // icactl pcap-decode <capture.pcap(ng)> [outdir] — TCP 1494/2598 reassembled and decoded per connection as
+    // relay-decode does, UDP listed with timing (see PcapDecode.swift).
+    guard let file = args.first else { fail("usage: icactl pcap-decode <capture.pcapng> [outdir]") }
+    pcapDecode(file, outdir: args.count > 1 ? args[1] : nil)
+
     print("\(replay.slots.count) slots (\(replay.modules.count) modules + UI) → \(args[1])")
     for slot in replay.slots {
         if case .module(let m) = slot { print("  \(replay.key(of: m)) \(m.count) B") } else { print("  UI (ours)") }

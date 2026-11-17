@@ -4,7 +4,14 @@ import ICAKit
 /// `icactl relay-decode <dir>`: decodes `ica-C.bin` / `ica-S.bin` written by scripts/cgp-split.py from a
 /// scripts/cgp-relay.py recording of the stock client's own session (black box, §69d(3)).
 /// Writes `wd-C.log` / `wd-S.log` (one line per WD packet) and prints a per-channel summary.
-func relayDecode(_ dir: String) {
+/// `soft` (pcap-decode, many connections per capture): a stream that cannot be decoded prints why and returns false
+/// instead of exiting.
+@discardableResult
+func relayDecode(_ dir: String, soft: Bool = false) -> Bool {
+    func giveUp(_ message: String) -> Bool {
+        if soft { print(message); return false }
+        fail(message)
+    }
     func load(_ name: String) -> [UInt8] {
         guard let d = FileManager.default.contents(atPath: "\(dir)/\(name)") else { fail("missing \(dir)/\(name)") }
         return [UInt8](d)
@@ -71,7 +78,7 @@ func relayDecode(_ dir: String) {
     let clientFrames = fa.feed(client.framed), serverFrames = fb.feed(server.framed)
 
     // Key from the client's PDCRYPT1 reply (04 00 key).
-    guard let keyFrame = clientFrames.first(where: { $0.count == 3 && $0[0] == 0x04 }) else { fail("no PDCRYPT1 key reply in client frames") }
+    guard let keyFrame = clientFrames.first(where: { $0.count == 3 && $0[0] == 0x04 }) else { return giveUp("no PDCRYPT1 key reply in client frames") }
     let key = keyFrame[2]
 
     // Client direction: mirror of the server's receive side.
@@ -229,4 +236,5 @@ func relayDecode(_ dir: String) {
     }
     index("C", c, clientPlainEnd)
     index("S", s, serverPlainEnd)
+    return true
 }
