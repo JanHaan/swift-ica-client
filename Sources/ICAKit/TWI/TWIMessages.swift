@@ -15,6 +15,10 @@ public struct TWIRect: Equatable, Hashable, Sendable {
     public static let zero = TWIRect(left: 0, top: 0, right: 0, bottom: 0)
     public var width: Int32 { right - left }
     public var height: Int32 { bottom - top }
+    /// Host rectangles are clamped to ±2^24 when parsed (`TWIPayload.rect`): every sum or difference of two
+    /// coordinates, here and in the viewer, then fits Int32 (a host could send ±2^31 and trap the viewer).
+    /// Real coordinates stay far inside (Windows parks minimised windows at -32000).
+    public static let coordinateLimit: Int32 = 1 << 24
 }
 
 /// Win32 style bits the seamless layer evaluates (docs/50 §2.7).
@@ -225,7 +229,8 @@ struct TWIPayload {
     func i16(_ o: Int) throws -> Int16 { Int16(bitPattern: try u16(o)) }
     func i32(_ o: Int) throws -> Int32 { Int32(bitPattern: try u32(o)) }
     func rect(_ o: Int) throws -> TWIRect {
-        TWIRect(left: try i32(o), top: try i32(o + 4), right: try i32(o + 8), bottom: try i32(o + 12))
+        func c(_ v: Int32) -> Int32 { min(max(v, -TWIRect.coordinateLimit), TWIRect.coordinateLimit) }
+        return TWIRect(left: c(try i32(o)), top: c(try i32(o + 4)), right: c(try i32(o + 8)), bottom: c(try i32(o + 12)))
     }
     func data(_ o: Int, _ n: Int) throws -> Data {
         guard o >= 0, n >= 0, o + n <= bytes.count else { throw ByteError.truncated }
