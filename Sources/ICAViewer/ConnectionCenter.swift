@@ -278,9 +278,6 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         }
         var result: [Row] = []
         recentlyDisconnected.removeAll { Date().timeIntervalSince($0.at) > 30 }
-        defer {
-            for i in result.indices { if let key = result[i].local?.key { result[i].refused = RefusedFeatureMonitor.lines(for: key) } }
-        }
         for s in storeRows {
             switch s.state {
             case .connectedHere:
@@ -309,6 +306,9 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         for gone in recentlyDisconnected where !result.contains(where: { $0.group == .disconnected && $0.title == title(gone.apps) }) {
             result.append(Row(group: .disconnected, title: title(gone.apps), detail: loc("Disconnected", "Getrennt")))
         }
+        // Not in a `defer`: Swift evaluates `return result` before a defer block runs, so lines added there never
+        // reached the returned (value-type) rows; the refused-feature lines were never shown (mac-C S15).
+        for i in result.indices { if let key = result[i].local?.key { result[i].refused = RefusedFeatureMonitor.lines(for: key) } }
         return result
     }
 

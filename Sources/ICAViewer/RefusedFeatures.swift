@@ -104,7 +104,11 @@ final class RefusedFeatureMonitor: @unchecked Sendable {
         lock.unlock()
         guard first else { return }
         DispatchQueue.main.async {
-            if let f = self.status.hostData(channel: channel) { vlog("redirection \(f.rawValue): in use (host data)") }
+            if let f = self.status.hostData(channel: channel) {
+                // CTXGDT opens even without clipboard rights (D118): file copy follows the clipboard's verdict.
+                vlog("redirection \(f.rawValue): " + (f == .fileCopy ? "host opened its channel (the verdict follows the clipboard)"
+                                                                     : "in use (host data)"))
+            }
             NotificationCenter.default.post(name: .refusedFeaturesChanged, object: nil)
         }
     }
