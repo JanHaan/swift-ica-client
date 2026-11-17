@@ -16,13 +16,13 @@
 #                          signing/ICAViewer.release.entitlements; with ICA_RELEASE_PROFILE=<Developer ID
 #                          provisioning profile> that profile is embedded and the Keychain group added.
 #                          Never uses signing/ICAViewer.provisionprofile (development, device-bound).
-#   ICA_VERSION=<x.y>      CFBundleShortVersionString (default 0.1)
+#   ICA_VERSION=<x.y>      CFBundleShortVersionString (default: the VERSION file)
 #   ICA_SWIFT_FLAGS=<...>  extra swift build flags (word-split), e.g. "--arch arm64 --arch x86_64"
 set -eu
 config="${1:-release}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-version="${ICA_VERSION:-0.1}"
+. "$root/scripts/build-identity.sh"
 # shellcheck disable=SC2086
 swift build -c "$config" --product ICAViewer ${ICA_SWIFT_FLAGS:-}
 # shellcheck disable=SC2086
@@ -55,7 +55,8 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleVersion</key><string>$build</string>
+    $commit_xml
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>

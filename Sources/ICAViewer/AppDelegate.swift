@@ -820,11 +820,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in self?.autoReconnect.tickAll() }
     }
 
+    @objc private func showAbout() { MainActor.assumeIsolated { AboutPanel.show() } }
+
     private func buildMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: loc("About ICA Viewer", "Über ICA Viewer"), action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: loc("Settings…", "Einstellungen…"), action: #selector(showSettings), keyEquivalent: ",")
         appMenu.addItem(withTitle: loc("Sign In…", "Anmelden…"), action: #selector(signIn), keyEquivalent: "")
         appMenu.addItem(.separator())

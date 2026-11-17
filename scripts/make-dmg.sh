@@ -1,7 +1,7 @@
 #!/bin/sh
 # Release build: universal (arm64 + x86_64) ICAViewer.app in a compressed DMG with a SHA-256 file.
 # Usage: scripts/make-dmg.sh [version]   → .build/dist/swift-ica-client-<version>.dmg (+ .sha256)
-# Version defaults to the one in bundle.sh. Only writes under .build/dist/.
+# Version defaults to the VERSION file (a different argument works but prints a warning). Only writes under .build/dist/.
 #
 # Default: ad-hoc signature (no profile, no entitlements, no development identity).
 # Notarized release: ICA_SIGN=developer-id (or ICA_SIGN_IDENTITY="Developer ID Application: …"),
@@ -10,7 +10,11 @@
 set -eu
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-version="${1:-${ICA_VERSION:-0.1}}"
+file_version="$(tr -d ' \n\r' <"$root/VERSION" 2>/dev/null || true)"
+version="${1:-${ICA_VERSION:-${file_version:-0.1}}}"
+if [ -n "$file_version" ] && [ "$version" != "$file_version" ]; then
+    echo "warning: building version $version, but the VERSION file says $file_version" >&2
+fi
 dist="$root/.build/dist"
 app="$dist/ICAViewer.app"
 dmg="$dist/swift-ica-client-$version.dmg"

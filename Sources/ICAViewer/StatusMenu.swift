@@ -134,6 +134,7 @@ final class MenuBarHost: NSObject, NSMenuDelegate {
         }
         add(menu, loc("Connection Center", "Verbindungscenter"), #selector(openConnectionCenter))
         add(menu, loc("Settings…", "Einstellungen…"), #selector(openSettings))
+        add(menu, loc("About ICA Viewer", "Über ICA Viewer"), #selector(openAbout))
         menu.addItem(.separator())
         let open = actions.sessions().filter { !$0.ended }
         if open.isEmpty {
@@ -209,6 +210,8 @@ final class MenuBarHost: NSObject, NSMenuDelegate {
     @objc private func openConnectionCenter() { NSApp.activate(); actions.connectionCenter() }
     @objc private func openSettings() { NSApp.activate(); actions.settings() }
     @objc private func openReport() { NSApp.activate(); actions.reportProblem() }
+
+    @objc private func openAbout() { AboutPanel.show() }
 
     @objc private func bringApp(_ sender: NSMenuItem) {
         guard let w = (sender.representedObject as? WindowRef)?.window, let c = w.controller, !c.ended else { return }

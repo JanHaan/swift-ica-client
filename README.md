@@ -131,6 +131,9 @@ Keychain entitlements, which enables Keychain-enforced Touch ID protection
 (`scripts/fetch-profile.sh` describes how to obtain one; profiles never go into git). Set your own
 team in `signing/project.yml`.
 
+The app version comes from the `VERSION` file (`ICA_VERSION` overrides it); the build number is the git
+commit count, and the About panel also shows the short commit hash.
+
 On first start ICAViewer asks for the gateway URL and your credentials.
 
 `scripts/make-dmg.sh [version]` builds a universal release DMG into `.build/dist/` (ad hoc signed by

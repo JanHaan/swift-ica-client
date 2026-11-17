@@ -156,8 +156,9 @@ public enum HelperMenu {
     }
 
     /// The About panel's line under the remote app's name.
-    public static func aboutCredits(german: Bool) -> String {
-        german ? "Remote-App über ICA Viewer" : "Remote app via ICA Viewer"
+    public static func aboutCredits(german: Bool, host: AppVersion = .current) -> String {
+        (german ? "Remote-App über ICA Viewer" : "Remote app via ICA Viewer")
+            + "\n" + (german ? "Angezeigt von ICA Viewer " : "Shown by ICA Viewer ") + host.shortString(german: german)
     }
 
     /// Shortcuts the menu takes from the remote app (they would otherwise reach it as Ctrl+key): the Edit

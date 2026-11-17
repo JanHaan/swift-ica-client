@@ -1,3 +1,4 @@
+import AppHostKit
 import AppKit
 import ICAKit
 import SystemConfiguration
@@ -59,11 +60,7 @@ enum FeedbackSources {
         #else
         arch = sysctlInt("sysctl.proc_translated") == 1 ? "x86_64 (Rosetta)" : "x86_64"
         #endif
-        if let version = info["CFBundleShortVersionString"] as? String {
-            lines.append("ICAViewer \(version) (\(info["CFBundleVersion"] as? String ?? "?")), \(arch)")
-        } else {
-            lines.append("ICAViewer development build (no app bundle), \(arch)")
-        }
+        lines.append("\(AppVersion.current.reportString()), \(arch)")
         let os = ProcessInfo.processInfo.operatingSystemVersion
         lines.append("macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
                      + (sysctlString("kern.osversion").map { " (\($0))" } ?? ""))
