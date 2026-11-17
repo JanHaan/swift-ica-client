@@ -15,6 +15,8 @@ import Testing
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: app.appendingPathComponent("Contents/Info.plist"))
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: app.appendingPathComponent("Contents/MacOS/helper"))
+        // Signed as scripts/bundle-helper.sh signs the real template: the generator refuses an unsigned or broken one.
+        try HelperBundleGenerator.sign(app, identity: "-", hardenedRuntime: true)
         return app
     }
 

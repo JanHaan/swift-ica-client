@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreServices
 import Foundation
+import Security
 
 /// Generates one helper bundle from the template (docs/99 §6): copy, relabel Info.plist, write the
 /// icon, strip quarantine, re-sign, verify, register with LaunchServices. Idempotent: a bundle that is
@@ -49,10 +50,16 @@ public struct HelperBundleGenerator {
         let target = dir.appendingPathComponent(HelperBundle.fileName(for: label.name), isDirectory: true)
 
         let existed = fm.fileExists(atPath: target.path)
-        if existed, HelperBundle.isCurrent(existing: Self.readInfo(target), label: label, templateHash: templateHash, iconHash: iconHash),
+        // Reuse within this run: only a bundle this process built, still with the cdhash it had then (security
+        // review L-06: a valid signature alone proves nothing, any ad-hoc bundle has one).
+        let current = existed && HelperBundle.isCurrent(existing: Self.readInfo(target), label: label, templateHash: templateHash,
+                                                        iconHash: iconHash)
+        if current, let recorded = Self.recorded(target), CodeIdentity.cdhash(bundle: target) == recorded,
            (try? Self.verify(target)) != nil {
             return (target, .unchanged)
         }
+        // The template must be intact before its code is copied and blessed with a new signature.
+        try Self.verifyTemplate(template)
 
         try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let staging = dir.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
@@ -75,6 +82,15 @@ public struct HelperBundleGenerator {
         try Self.stripQuarantine(built)
         try Self.sign(built, identity: signIdentity, hardenedRuntime: hardenedRuntime)
         try Self.verify(built)
+        guard let fresh = CodeIdentity.cdhash(bundle: built) else { throw HelperBundleError.codesign("no cdhash for the new bundle") }
+
+        // First use in this run of a bundle from an earlier run: ad-hoc signing is deterministic, so a bundle that
+        // still holds exactly our code has the fresh build's cdhash. Kept as it is (Dock tile and LaunchServices
+        // record stay put); anything else is replaced.
+        if current, CodeIdentity.cdhash(bundle: target) == fresh, (try? Self.verify(target)) != nil {
+            Self.record(target, cdhash: fresh)
+            return (target, .unchanged)
+        }
 
         // Exactly one bundle per key: an old name of the same app goes, and with it its LaunchServices record
         // (docs/99 §12.19: the database would otherwise keep every name an app ever had).
@@ -84,6 +100,7 @@ public struct HelperBundleGenerator {
             try fm.removeItem(at: item)
         }
         try fm.moveItem(at: built, to: target)
+        Self.record(target, cdhash: fresh)
         if registerWithLaunchServices { _ = LSRegisterURL(target as CFURL, true) }
         return (target, existed ? .updated : .created)
     }
@@ -142,6 +159,41 @@ public struct HelperBundleGenerator {
 
     public static func verify(_ bundle: URL) throws {
         try codesign(["--verify", "--strict", bundle.path])
+    }
+
+    /// The template's own signature, strictly, all architectures (no codesign process).
+    public static func verifyTemplate(_ template: URL) throws {
+        var code: SecStaticCode?
+        var status = SecStaticCodeCreateWithPath(template as CFURL, [], &code)
+        if status == errSecSuccess, let code {
+            status = SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures
+                                                                     | kSecCSCheckNestedCode), nil)
+        }
+        guard status == errSecSuccess else { throw HelperBundleError.badTemplate("signature invalid (OSStatus \(status))") }
+    }
+
+    // MARK: Bundles built by this process
+
+    private static let recordLock = NSLock()
+    nonisolated(unsafe) private static var builtByThisProcess: [String: String] = [:]
+
+    static func record(_ bundle: URL, cdhash: String) {
+        recordLock.lock()
+        builtByThisProcess[bundle.standardizedFileURL.path] = cdhash
+        recordLock.unlock()
+    }
+
+    static func recorded(_ bundle: URL) -> String? {
+        recordLock.lock()
+        defer { recordLock.unlock() }
+        return builtByThisProcess[bundle.standardizedFileURL.path]
+    }
+
+    /// Tests: forget what this process built (as a new run would).
+    static func forgetRecords() {
+        recordLock.lock()
+        builtByThisProcess = [:]
+        recordLock.unlock()
     }
 
     /// Runs codesign; returns its stderr (where `-d` writes), throws with it on failure.
