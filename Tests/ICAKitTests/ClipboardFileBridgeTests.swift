@@ -218,6 +218,8 @@ private final class GDTHarness {
             w.update(.done(files: 2))
         }
         #expect(w.wait(item: 1) == .partial(w.url(item: 1), failed: 1))
+        // `.done` may still be in flight on the other queue when item 1 resolves.
+        for _ in 0..<400 where !w.isFinished { Thread.sleep(forTimeInterval: 0.005) }
         #expect(w.isFinished && w.progress == (6, 9))
     }
 

@@ -12,7 +12,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
   audio playback and microphone.
 - **Built, not yet verified live:** client drive (one shared folder), printing to PDF, H.264,
   formatted text (HTML, RTF) on the clipboard, webcam with a real camera, copying files through the
-  clipboard in the app (both ways; the protocol is verified live in the headless test, D88, D90).
+  clipboard in the app is verified live both ways (D92).
 - **Main gaps:** file transfer, links opening on the Mac, automatic reconnect after longer drops,
   UDP transport (EDT), Teams optimisation, smart cards, USB devices.
 
@@ -250,8 +250,9 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 3. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
    optimisation is a separate, larger piece).
 4. **Full-desktop launch.** Only seamless apps are exercised.
-5. **General file transfer.** Clipboard files are built both ways (D90, live check in the app
-   pending); beyond that only the shared folder exists.
+5. **General file transfer.** Clipboard files work both ways (verified live); beyond that only the
+   shared folder exists. Mixed clipboard content (text plus an image as a file, e.g. from Pages)
+   arrives incomplete.
 6. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,

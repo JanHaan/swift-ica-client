@@ -70,8 +70,9 @@ The calculator above is a live session; the other images use the app's demo mode
 - Clipboard: text works both ways in the app (verified live).
 - Copying files through the clipboard, both ways: copy in Finder and paste in Explorer, or copy in
   Explorer and paste in Finder (folders too, up to 200 MB per paste from the session). Settings ›
-  Clipboard › "Copy files through the clipboard", on by default. Built; the protocol is verified
-  live in the headless test, the app itself awaits a live check.
+  Clipboard › "Copy files through the clipboard", on by default. Verified live both ways, including
+  a folder with a subfolder; files from the session get the quarantine flag.
+- Clipboard images both ways (verified live).
 - Report a Problem (Help menu): builds a scrubbed report and a prefilled GitHub issue; see
   [Reporting problems](#reporting-problems).
 
@@ -81,7 +82,7 @@ See [FEATURES.md](FEATURES.md) for a feature-by-feature comparison with the offi
 
 Implemented but not yet verified live:
 
-- Clipboard HTML, RTF and images.
+- Clipboard HTML and RTF.
 - Client drive mapping: one shared folder (default `~/Citrix Shared`, read-write, strictly
   confined, files written by the session get the quarantine flag). Security-reviewed; the test site
   does not redirect client drives.
