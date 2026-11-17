@@ -70,12 +70,13 @@ enum ClipboardFilesSetting {
     }
 
     /// Session → Mac read tuning (session queue): no per-file cap; 1 MiB Reads (1 MiB was read live from a host with
-    /// icactl fetch-file, the stock client asks the whole file [B]); 2 Reads in flight (offline-measured, docs/76
-    /// §7.17; [H] live). `ICA_GDT_READSIZE` / `ICA_GDT_READAHEAD` override.
+    /// icactl fetch-file, the stock client asks the whole file [B]); **one** Read in flight: live in the lab (D140) a
+    /// 141 MiB file came at 0.35 MiB/s with 1, 0.23 with 2 and 0.17 with 4 Reads in flight, and the read size did not
+    /// matter (0.19–0.26 MiB/s for 256 KiB…4 MiB). `ICA_GDT_READSIZE` / `ICA_GDT_READAHEAD` override.
     static func tune(_ files: GDTFileTransfer, env: [String: String] = ProcessInfo.processInfo.environment) {
         files.maxFileSize = .max
         files.readSize = env["ICA_GDT_READSIZE"].flatMap(Int.init).flatMap { (1...(16 << 20)).contains($0) ? $0 : nil } ?? 1 << 20
-        files.readAhead = env["ICA_GDT_READAHEAD"].flatMap(Int.init).flatMap { (1...8).contains($0) ? $0 : nil } ?? 2
+        files.readAhead = env["ICA_GDT_READAHEAD"].flatMap(Int.init).flatMap { (1...8).contains($0) ? $0 : nil } ?? 1
     }
 }
 
