@@ -203,8 +203,8 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         let alert = NSAlert()
         alert.messageText = String(format: loc("%d disconnected session(s)", "%d getrennte Sitzung(en)"), apps.count)
         alert.informativeText = apps.joined(separator: "\n") + "\n\n"
-            + loc("Reconnect brings their windows back to this Mac.", "Verbinden holt ihre Fenster auf diesen Mac zurück.")
-        alert.addButton(withTitle: loc("Reconnect", "Verbinden"))
+            + loc("Reconnect brings their windows back to this Mac.", "„Erneut verbinden“ holt ihre Fenster auf diesen Mac zurück.")
+        alert.addButton(withTitle: loc("Reconnect", "Erneut verbinden"))
         alert.addButton(withTitle: loc("Not Now", "Nicht jetzt"))
         alert.showsSuppressionButton = true
         alert.suppressionButton?.title = loc("Don't ask again", "Nicht mehr fragen")

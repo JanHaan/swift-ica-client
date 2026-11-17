@@ -1,9 +1,12 @@
+import AppHostKit
 import AppKit
 import ICAKit
 
-/// Our own UI texts in the system language (German or English).
+/// Our own UI texts in the system language (German or English). German follows Apple's style for the ellipsis:
+/// a no-break space before "…" ("Einstellungen …", as in TextEdit and Screen Sharing), added here so the
+/// strings can be written either way.
 func loc(_ en: String, _ de: String) -> String {
-    Locale.preferredLanguages.first?.lowercased().hasPrefix("de") == true ? de : en
+    Locale.preferredLanguages.first?.lowercased().hasPrefix("de") == true ? HelperMenu.germanEllipsis(de) : en
 }
 
 struct LoginCancelled: Error, CustomStringConvertible {

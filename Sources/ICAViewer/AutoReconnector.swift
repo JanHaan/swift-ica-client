@@ -137,12 +137,12 @@ final class AutoReconnector {
             switch why {
             case .serverHold:
                 text = { loc("Connection lost. Reconnecting automatically in \(Self.clock($0))…",
-                             "Verbindung verloren. Automatisch neu verbinden in \(Self.clock($0))…") }
+                             "Verbindung verloren. Automatisch erneut verbinden in \(Self.clock($0))…") }
             case .backoff:
                 text = { loc("Reconnecting did not work. Next try in \(Self.clock($0))…",
-                             "Neu verbinden hat nicht geklappt. Nächster Versuch in \(Self.clock($0))…") }
+                             "Erneutes Verbinden hat nicht geklappt. Nächster Versuch in \(Self.clock($0))…") }
             case .networkSettle:
-                text = { _ in loc("The network is back. Reconnecting…", "Das Netzwerk ist wieder da. Neu verbinden…") }
+                text = { _ in loc("The network is back. Reconnecting…", "Das Netzwerk ist wieder da. Erneut verbinden…") }
             }
             show(job, reconnectNow: why != .serverHold) { text(until.timeIntervalSinceNow) }
             schedule(job, at: until)
@@ -157,7 +157,7 @@ final class AutoReconnector {
             job.serial += 1
             vlog("auto reconnect: \(logName(name)): relaunch \(n)/\(total) through the store")
             show(job, reconnectNow: false) {
-                loc("Reconnecting automatically (try \(n) of \(total))…", "Automatisch neu verbinden (Versuch \(n) von \(total))…")
+                loc("Reconnecting automatically (try \(n) of \(total))…", "Automatisch erneut verbinden (Versuch \(n) von \(total))…")
             }
             launch(job.resource, Attempt(job: job, serial: job.serial))
         case .inProgress:
@@ -303,7 +303,7 @@ final class AutoReconnector {
         guard !job.over else { return }
         vlog("auto reconnect: \(logName(job.old.name)): \(reason); Reconnect panel")
         end(job)
-        job.old.showManualReconnect(note: loc("Automatic reconnect did not succeed.", "Automatisches Neuverbinden hat nicht geklappt."))
+        job.old.showManualReconnect(note: loc("Automatic reconnect did not succeed.", "Automatisches erneutes Verbinden hat nicht geklappt."))
     }
 
     static func clock(_ seconds: TimeInterval) -> String {

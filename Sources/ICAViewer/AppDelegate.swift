@@ -790,7 +790,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if command == .disconnect {
             alert.messageText = String(format: loc("Disconnect the session with %@?", "Sitzung mit %@ trennen?"), apps)
             alert.informativeText = loc("All apps of this session close on this Mac. They keep running; the session can be reconnected later.",
-                                        "Alle Apps dieser Sitzung werden auf diesem Mac geschlossen. Sie laufen weiter; die Sitzung kann später wieder verbunden werden.")
+                                        "Alle Apps dieser Sitzung werden auf diesem Mac geschlossen. Sie laufen weiter; die Sitzung kann später erneut verbunden werden.")
             button = alert.addButton(withTitle: loc("Disconnect", "Trennen"))
         } else {
             alert.messageText = String(format: loc("Log off the session with %@?", "Sitzung mit %@ abmelden?"), apps)
@@ -850,48 +850,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showAbout() { MainActor.assumeIsolated { AboutPanel.show() } }
 
+    /// The main menu in the standard order (HIG, The menu bar): app, File, Edit, Window, Help. The launcher and the
+    /// Connection Center are windows, so they are listed in the Window menu; Help gets Report a Problem… from
+    /// `FeedbackMenu`.
     private func buildMenu() {
         let main = NSMenu()
-        let appItem = NSMenuItem()
-        main.addItem(appItem)
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: loc("About ICA Viewer", "Über ICA Viewer"), action: #selector(showAbout), keyEquivalent: "")
+        func submenu(_ title: String) -> NSMenu {
+            let menu = NSMenu(title: title)
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = menu
+            main.addItem(item)
+            return menu
+        }
+        @discardableResult
+        func add(_ menu: NSMenu, _ title: String, _ action: Selector?, _ key: String = "",
+                 _ modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            return item
+        }
+        let appMenu = submenu("ICA Viewer")
+        add(appMenu, loc("About ICA Viewer", "Über ICA Viewer"), #selector(showAbout))
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: loc("Settings…", "Einstellungen…"), action: #selector(showSettings), keyEquivalent: ",")
-        appMenu.addItem(withTitle: loc("Sign In…", "Anmelden…"), action: #selector(signIn), keyEquivalent: "")
+        add(appMenu, loc("Settings…", "Einstellungen…"), #selector(showSettings), ",")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Show Launcher", action: #selector(showLauncher), keyEquivalent: "l")
+        let services = NSMenu(title: loc("Services", "Dienste"))
+        add(appMenu, services.title, nil).submenu = services
+        NSApp.servicesMenu = services
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide ICA Viewer", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        add(appMenu, loc("Hide ICA Viewer", "ICA Viewer ausblenden"), #selector(NSApplication.hide(_:)), "h")
+        add(appMenu, loc("Hide Others", "Andere ausblenden"), #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
+        add(appMenu, loc("Show All", "Alle einblenden"), #selector(NSApplication.unhideAllApplications(_:)))
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit ICA Viewer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
+        add(appMenu, loc("Quit ICA Viewer", "ICA Viewer beenden"), #selector(NSApplication.terminate(_:)), "q")
+
+        let fileMenu = submenu(loc("File", "Ablage"))
+        add(fileMenu, loc("Sign In…", "Anmelden…"), #selector(signIn))
+        fileMenu.addItem(.separator())
+        add(fileMenu, loc("Close", "Schließen"), #selector(NSWindow.performClose(_:)), "w")
+
         // Standard Edit menu, so text fields (login, settings, search) get Cut/Copy/Paste/Undo shortcuts.
         // Remote windows take Cmd-Z/X/C/V/A before the menu does (SessionView.performKeyEquivalent).
-        let editItem = NSMenuItem()
-        main.addItem(editItem)
-        let editMenu = NSMenu(title: loc("Edit", "Bearbeiten"))
-        editMenu.addItem(withTitle: loc("Undo", "Widerrufen"), action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = editMenu.addItem(withTitle: loc("Redo", "Wiederholen"), action: Selector(("redo:")), keyEquivalent: "z")
-        redo.keyEquivalentModifierMask = [.command, .shift]
+        let editMenu = submenu(loc("Edit", "Bearbeiten"))
+        add(editMenu, loc("Undo", "Widerrufen"), Selector(("undo:")), "z")
+        add(editMenu, loc("Redo", "Wiederholen"), Selector(("redo:")), "z", [.command, .shift])
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: loc("Cut", "Ausschneiden"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: loc("Copy", "Kopieren"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: loc("Paste", "Einsetzen"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: loc("Select All", "Alles auswählen"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = editMenu
-        let windowItem = NSMenuItem()
-        main.addItem(windowItem)
-        let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        add(editMenu, loc("Cut", "Ausschneiden"), #selector(NSText.cut(_:)), "x")
+        add(editMenu, loc("Copy", "Kopieren"), #selector(NSText.copy(_:)), "c")
+        add(editMenu, loc("Paste", "Einsetzen"), #selector(NSText.paste(_:)), "v")
+        add(editMenu, loc("Select All", "Alles auswählen"), #selector(NSText.selectAll(_:)), "a")
+
+        // AppKit appends the open windows after the last item.
+        let windowMenu = submenu(loc("Window", "Fenster"))
+        add(windowMenu, loc("Minimize", "Im Dock ablegen"), #selector(NSWindow.performMiniaturize(_:)), "m")
+        add(windowMenu, loc("Zoom", "Zoomen"), #selector(NSWindow.performZoom(_:)))
         windowMenu.addItem(.separator())
+        add(windowMenu, loc("Launcher", "Launcher"), #selector(showLauncher), "l")
         // Cmd-Shift-C; a focused remote window takes Cmd-C combinations itself (SessionView).
-        let center = windowMenu.addItem(withTitle: loc("Connection Center", "Verbindungscenter"),
-                                        action: #selector(showConnectionCenter), keyEquivalent: "c")
-        center.keyEquivalentModifierMask = [.command, .shift]
-        windowItem.submenu = windowMenu
+        add(windowMenu, loc("Connection Center", "Verbindungscenter"), #selector(showConnectionCenter), "c", [.command, .shift])
+        windowMenu.addItem(.separator())
+        add(windowMenu, loc("Bring All to Front", "Alle nach vorne bringen"), #selector(NSApplication.arrangeInFront(_:)))
+
+        let helpMenu = submenu(loc("Help", "Hilfe"))
+        add(helpMenu, loc("ICA Viewer Help", "ICA Viewer-Hilfe"), #selector(openHelp))
+        helpMenu.addItem(.separator())   // FeedbackMenu adds Report a Problem… below
         NSApp.mainMenu = main
         NSApp.windowsMenu = windowMenu
+        NSApp.helpMenu = helpMenu
     }
+
+    /// The same page as the helpers' Help item (HelperMenu.readmeURL).
+    @objc private func openHelp() { NSWorkspace.shared.open(HelperMenu.readmeURL) }
 }

@@ -7,21 +7,26 @@ import Testing
 @Suite struct HelperMenuTests {
     @Test func englishAndGermanMenus() {
         let en = HelperMenu.sections(appName: "Text App", german: false)
-        #expect(en.map(\.role) == [.app, .edit, .window, .ica, .help])
-        #expect(en.map(\.title) == ["Text App", "Edit", "Window", "ICA", "Help"])
+        #expect(en.map(\.role) == [.app, .edit, .ica, .window, .help])
+        #expect(en.map(\.title) == ["Text App", "Edit", "Session", "Window", "Help"])
         #expect(en[0].items.filter { !$0.isSeparator }.map(\.title)
             == ["About Text App", "Hide Text App", "Hide Others", "Show All", "Quit Text App"])
-        #expect(en[3].items.filter { !$0.isSeparator }.map(\.title)
-            == ["Open Launcher", "Connection Center", "Settings…", "Report a Problem…", "Disconnect Session…", "Log Off Session…"])
+        #expect(en[2].items.filter { !$0.isSeparator }.map(\.title)
+            == ["Open Launcher", "Connection Center", "Settings…", "Disconnect Session…", "Log Off Session…"])
+        #expect(en[4].items.filter { !$0.isSeparator }.map(\.title) == ["ICA Viewer Help", "Report a Problem…"])
         let de = HelperMenu.sections(appName: "Calc App", german: true)
-        #expect(de.map(\.title) == ["Calc App", "Bearbeiten", "Fenster", "ICA", "Hilfe"])
+        #expect(de.map(\.title) == ["Calc App", "Bearbeiten", "Sitzung", "Fenster", "Hilfe"])
         #expect(de[0].items.first?.title == "Über Calc App")
         #expect(de[0].items.last?.title == "Calc App beenden")
         #expect(de[1].items.filter { !$0.isSeparator }.map(\.title) == ["Widerrufen", "Ausschneiden", "Kopieren", "Einsetzen", "Alles auswählen"])
-        #expect(de[3].items.last?.title == "Sitzung abmelden…")
+        #expect(de[2].items.last?.title == "Sitzung abmelden\u{00A0}…")
         // Same structure in both languages.
         #expect(en.map { $0.items.map(\.action) } == de.map { $0.items.map(\.action) })
         #expect(en.map { $0.items.map(\.shortcut) } == de.map { $0.items.map(\.shortcut) })
+        #expect(HelperMenu.germanEllipsis("Einstellungen…") == "Einstellungen\u{00A0}…")
+        #expect(HelperMenu.germanEllipsis("Auswählen …") == "Auswählen\u{00A0}…")
+        #expect(HelperMenu.germanEllipsis("(Protokoll wird vorbereitet …)") == "(Protokoll wird vorbereitet\u{00A0}…)")
+        #expect(HelperMenu.germanEllipsis("„…“") == "„…“" && HelperMenu.germanEllipsis("Ohne") == "Ohne")
         #expect(HelperMenu.isGerman(["de-DE", "en"]) && !HelperMenu.isGerman(["en-US", "de"]) && !HelperMenu.isGerman([]))
     }
 
@@ -36,7 +41,7 @@ import Testing
     /// Connection Center have none, so Ctrl+, and Ctrl+Shift+C still reach it.
     @Test func takenShortcutsAreTheDocumentedOnes() {
         let taken = HelperMenu.takenShortcuts(HelperMenu.sections(appName: "A", german: false))
-        #expect(taken.map(\.description) == ["⌘H", "⌥⌘H", "⌘Q", "⌘W", "⌘M", "⌃⌥⌘L"])
+        #expect(taken.map(\.description) == ["⌘H", "⌥⌘H", "⌘Q", "⌃⌥⌘L", "⌘W", "⌘M"])
         #expect(!taken.contains(HelperShortcut(",")) && !taken.contains(HelperShortcut("c", [.shift, .command])))
         #expect(Set(taken).count == taken.count)
         #expect(HelperMenu.launcherShortcut.description == "⌃⌥⌘L")

@@ -430,7 +430,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         switch s.joinAmbiguous ? .connectedHere : s.state {
         case .disconnected, .unknown:
             if let entry = s.reconnect, s.state == .disconnected {
-                list.append((loc("Reconnect", "Verbinden"), { [weak self] in
+                list.append((loc("Reconnect", "Erneut verbinden"), { [weak self] in
                     guard !isDemo else { return }
                     vlog("connection center: reconnect a disconnected session (\(entry.initialapp ?? "?"))")
                     self?.launch([entry.resource])
@@ -438,7 +438,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 }))
             } else if let entry = s.takeOver {
                 // Not known to be disconnected: it may be open on another device.
-                list.append((loc("Reconnect…", "Verbinden…"), { [weak self] in
+                list.append((loc("Reconnect…", "Erneut verbinden…"), { [weak self] in
                     guard !isDemo else { return }
                     self?.confirmTakeOver(row.title, device: nil) {
                         self?.launch([entry.resource])
@@ -447,7 +447,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 }))
             } else if s.state == .disconnected, !s.joinAmbiguous, let resource = resourceForApps(s) {
                 // §7.3 way 2: launching one of its apps reconnects the disconnected session.
-                list.append((loc("Reconnect", "Verbinden"), { [weak self] in
+                list.append((loc("Reconnect", "Erneut verbinden"), { [weak self] in
                     guard !isDemo else { return }
                     vlog("connection center: reconnect via resource \(logName(resource.name))")
                     self?.launch([resource])
@@ -590,7 +590,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             : Demo.screenshotMode || device!.isEmpty ? loc("another device", "einem anderen Gerät") : device!
         confirm(String(format: loc("Disconnect %@ on %@?", "%@ auf %@ trennen?"), apps, name),
                 loc("The apps keep running; the session can be reconnected later.",
-                    "Die Apps laufen weiter; die Sitzung kann später wieder verbunden werden."),
+                    "Die Apps laufen weiter; die Sitzung kann später erneut verbunden werden."),
                 loc("Disconnect", "Trennen"), destructive: false, then: then)
     }
 }

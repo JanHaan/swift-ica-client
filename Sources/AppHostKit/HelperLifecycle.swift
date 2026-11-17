@@ -162,13 +162,13 @@ public enum HelperDockMenu {
 
     /// `untitled`: the title for a window without one (the app's name).
     public static func items(windows: [Window], untitled: String, german: Bool) -> [Item] {
-        func t(_ en: String, _ de: String) -> String { german ? de : en }
+        func t(_ en: String, _ de: String) -> String { german ? HelperMenu.germanEllipsis(de) : en }
         var items = windows.sorted { $0.id < $1.id }.map { w in
             let title = w.title.trimmingCharacters(in: .whitespacesAndNewlines)
             return Item(title.isEmpty ? untitled : String(title.prefix(80)), .window(w.id), checked: w.isKey)
         }
         if !items.isEmpty { items.append(.separator) }
-        items.append(Item(t("Show Launcher", "Launcher zeigen"), .host(.showLauncher)))
+        items.append(Item(t("Open Launcher", "Launcher öffnen"), .host(.showLauncher)))
         items.append(Item(t("Connection Center", "Verbindungscenter"), .host(.connectionCenter)))
         return items
     }

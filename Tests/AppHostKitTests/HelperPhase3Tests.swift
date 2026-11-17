@@ -107,7 +107,7 @@ import Testing
         let items = HelperDockMenu.items(windows: [.init(id: 7, title: "Notes.txt - Editor", isKey: false),
                                                    .init(id: 3, title: "  ", isKey: true)],
                                          untitled: "Text App", german: false)
-        #expect(items.map(\.title) == ["Text App", "Notes.txt - Editor", "", "Show Launcher", "Connection Center"])
+        #expect(items.map(\.title) == ["Text App", "Notes.txt - Editor", "", "Open Launcher", "Connection Center"])
         #expect(items.map(\.action) == [.window(3), .window(7), nil, .host(.showLauncher), .host(.connectionCenter)])
         #expect(items.map(\.checked) == [true, false, false, false, false])
         #expect(items[2].isSeparator)
@@ -115,7 +115,7 @@ import Testing
 
     @Test func germanAndNoWindows() {
         let items = HelperDockMenu.items(windows: [], untitled: "Rechner", german: true)
-        #expect(items.map(\.title) == ["Launcher zeigen", "Verbindungscenter"])
+        #expect(items.map(\.title) == ["Launcher öffnen", "Verbindungscenter"])
         let long = HelperDockMenu.items(windows: [.init(id: 1, title: String(repeating: "x", count: 300), isKey: false)],
                                         untitled: "A", german: false)
         #expect(long[0].title.count == 80)
@@ -187,7 +187,7 @@ import Testing
 
     @Test func helperMenuShowsTheConfiguredLauncherShortcut() throws {
         func launcherItem(_ shortcut: HelperShortcut?) -> HelperMenuItem? {
-            HelperMenu.sections(appName: "A", german: false, launcher: shortcut)[3].items.first
+            HelperMenu.sections(appName: "A", german: false, launcher: shortcut)[2].items.first
         }
         #expect(launcherItem(HelperMenu.launcherShortcut)?.shortcut?.description == "⌃⌥⌘L")
         let k = LauncherHotKey.choices[1].shortcut

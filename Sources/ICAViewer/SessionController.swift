@@ -1563,7 +1563,7 @@ final class ReconnectHUD: NSObject {
     private let label = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let buttons = NSStackView()
-    private let reconnectButton = NSButton(title: loc("Reconnect", "Neu verbinden"), target: nil, action: nil)
+    private let reconnectButton = NSButton(title: loc("Reconnect", "Erneut verbinden"), target: nil, action: nil)
     private let closeButton = NSButton(title: loc("Close", "Schließen"), target: nil, action: nil)
     private var timer: Timer?
     private var update: (() -> Void)?
@@ -1640,7 +1640,7 @@ final class ReconnectHUD: NSObject {
         closeButton.isHidden = false
         reconnectButton.isHidden = !canReconnectNow
         reconnectButton.isEnabled = true
-        reconnectButton.title = loc("Reconnect Now", "Jetzt verbinden")
+        reconnectButton.title = loc("Reconnect Now", "Jetzt erneut verbinden")
         label.stringValue = displayName(name)
         run { [weak self] in self?.detail.stringValue = status() }
     }
@@ -1656,10 +1656,10 @@ final class ReconnectHUD: NSObject {
             // Until the server's SR hold ends, a relaunch would not reconnect yet (docs/20 §3.12.11).
             if let notBefore, notBefore.timeIntervalSinceNow > 0 {
                 self.reconnectButton.isEnabled = false
-                self.reconnectButton.title = loc("Reconnect", "Neu verbinden") + " (\(clock(notBefore.timeIntervalSinceNow)))"
+                self.reconnectButton.title = loc("Reconnect", "Erneut verbinden") + " (\(clock(notBefore.timeIntervalSinceNow)))"
             } else {
                 self.reconnectButton.isEnabled = true
-                self.reconnectButton.title = loc("Reconnect", "Neu verbinden")
+                self.reconnectButton.title = loc("Reconnect", "Erneut verbinden")
             }
         }
     }

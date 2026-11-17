@@ -100,9 +100,24 @@ public enum HelperMenu {
         languages.first?.lowercased().hasPrefix("de") == true
     }
 
+    /// Apple's German style puts a no-break space before an ellipsis ("Einstellungen …", "Erneut verbinden …");
+    /// a normal space before it becomes a no-break one too.
+    public static func germanEllipsis(_ text: String) -> String {
+        guard text.contains("…") else { return text }
+        var out = ""
+        for ch in text {
+            if ch == "…", let last = out.last, last != "\u{00A0}", last != "(", last != "„", last != "\n" {
+                if last == " " { out.removeLast() }
+                out.append("\u{00A0}")
+            }
+            out.append(ch)
+        }
+        return out
+    }
+
     /// `launcher`: the Open Launcher item's key equivalent, the global shortcut chosen in Settings (nil = off).
     public static func sections(appName name: String, german: Bool, launcher: HelperShortcut? = launcherShortcut) -> [HelperMenuSection] {
-        func t(_ en: String, _ de: String) -> String { german ? de : en }
+        func t(_ en: String, _ de: String) -> String { german ? germanEllipsis(de) : en }
         let app = HelperMenuSection(role: .app, title: name, items: [
             HelperMenuItem(String(format: t("About %@", "Über %@"), name), .about),
             .separator,
@@ -120,6 +135,17 @@ public enum HelperMenu {
             HelperMenuItem(t("Paste", "Einsetzen"), .edit(.paste), HelperShortcut("v")),
             HelperMenuItem(t("Select All", "Alles auswählen"), .edit(.selectAll), HelperShortcut("a")),
         ])
+        // The host's commands: an app-specific menu, so between Edit and Window (HIG, The menu bar).
+        // No ⌘, for Settings and no ⇧⌘C for the Connection Center here: those are Ctrl+, and Ctrl+Shift+C
+        // for the remote app (Word: copy formatting).
+        let ica = HelperMenuSection(role: .ica, title: t("Session", "Sitzung"), items: [
+            HelperMenuItem(t("Open Launcher", "Launcher öffnen"), .host(.showLauncher), launcher),
+            HelperMenuItem(t("Connection Center", "Verbindungscenter"), .host(.connectionCenter)),
+            HelperMenuItem(t("Settings…", "Einstellungen…"), .host(.settings)),
+            .separator,
+            HelperMenuItem(t("Disconnect Session…", "Sitzung trennen…"), .host(.disconnect)),
+            HelperMenuItem(t("Log Off Session…", "Sitzung abmelden…"), .host(.logoff)),
+        ])
         // AppKit appends the app's windows after the last item (NSApp.windowsMenu).
         let window = HelperMenuSection(role: .window, title: t("Window", "Fenster"), items: [
             HelperMenuItem(t("Close", "Schließen"), .close, HelperShortcut("w")),
@@ -128,22 +154,13 @@ public enum HelperMenu {
             .separator,
             HelperMenuItem(t("Bring All to Front", "Alle nach vorne bringen"), .bringAllToFront),
         ])
-        // No ⌘, for Settings and no ⇧⌘C for the Connection Center here: those are Ctrl+, and Ctrl+Shift+C
-        // for the remote app (Word: copy formatting).
-        let ica = HelperMenuSection(role: .ica, title: "ICA", items: [
-            HelperMenuItem(t("Open Launcher", "Launcher öffnen"), .host(.showLauncher), launcher),
-            HelperMenuItem(t("Connection Center", "Verbindungscenter"), .host(.connectionCenter)),
-            HelperMenuItem(t("Settings…", "Einstellungen…"), .host(.settings)),
-            .separator,
-            HelperMenuItem(t("Report a Problem…", "Problem melden…"), .host(.reportProblem)),
-            .separator,
-            HelperMenuItem(t("Disconnect Session…", "Sitzung trennen…"), .host(.disconnect)),
-            HelperMenuItem(t("Log Off Session…", "Sitzung abmelden…"), .host(.logoff)),
-        ])
+        // Help as in the main app: the help page, then Report a Problem….
         let help = HelperMenuSection(role: .help, title: t("Help", "Hilfe"), items: [
             HelperMenuItem(t("ICA Viewer Help", "ICA Viewer-Hilfe"), .help),
+            .separator,
+            HelperMenuItem(t("Report a Problem…", "Problem melden…"), .host(.reportProblem)),
         ])
-        return [app, edit, window, ica, help]
+        return [app, edit, ica, window, help]
     }
 
     /// Whether a key-down is one of this menu's own key equivalents (exact key and modifiers, as AppKit
