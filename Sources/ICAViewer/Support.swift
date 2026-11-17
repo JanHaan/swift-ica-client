@@ -348,7 +348,8 @@ final class StoreService: @unchecked Sendable {
         vlog("account: \(gateway?.host ?? "none") (\(accountKind?.rawValue ?? "kind not probed")); logon: \(usesEnvCredentials ? ".env" : "login window")")
         http.trace = { vlog("http " + $0) }   // paths and cookie names only (HTTPClient redacts query values)
         if Demo.enabled { return }   // demo mode touches neither the disk nor the network
-        try? FileManager.default.createDirectory(at: Paths.sessionDir, withIntermediateDirectories: true)
+        // 0700, also when it exists: it holds the cookie jar and the TOTP state (security review L-01).
+        PrivateFile.ensureDirectory(Paths.sessionDir)
         try? http.loadCookies(from: Paths.cookieFile)
     }
 
