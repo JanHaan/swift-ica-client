@@ -97,9 +97,11 @@ private final class FakeVDA {
     // Keep-alives both ways.
     c.receive(EDTPacket.keepAlive(destination: config.socketID).bytes, now: 1.0)
     #expect(c.keepAlivesReceived == 1)
+    // Idle: something goes out at least once a second (the repeated cumulative ACK or a keep-alive), to the server.
     c.tick(now: 1.5)
-    #expect(outbox.count == 1 && (try? EDTPacket.parse(outbox[0]))?.controlType == .keepAlive)
-    #expect((try? EDTPacket.parse(outbox[0]))?.destination == vda.socket)
+    let idle = outbox.compactMap { try? EDTPacket.parse($0) }
+    #expect(!idle.isEmpty && idle.allSatisfy { $0.destination == vda.socket })
+    #expect(idle.allSatisfy { $0.controlType == .ack || $0.controlType == .keepAlive })
     outbox = []
 
     // The peer's shutdown closes; nothing more is sent.
@@ -135,7 +137,7 @@ private final class FakeVDA {
     #expect((try? EDTPacket.parse(out.last!))?.controlType == .shutdown)
 }
 
-@Test func edtConnectionDeliversDataInOrderAndAcks() {
+@Test func edtConnectionDeliversDataInOrderNaksGapsAndAcks() {
     let vda = FakeVDA()
     let c = EDTConnection(config: EDTConnection.Config(peerIPv4: [192, 0, 2, 20], socketID: 3, initialSequence: 40))
     var out: [[UInt8]] = []
@@ -145,22 +147,120 @@ private final class FakeVDA {
     c.connect(now: 0)
     c.receive(vda.reply(to: out.removeLast())!, now: 0)
     c.receive(vda.reply(to: out.removeLast())!, now: 0)
-    // The fake VDA's ISN is ours echoed (40): data 41 before 40 waits; a duplicate of 40 is dropped.
+    // The fake VDA's ISN is ours echoed (40): 41 before 40 waits and NAKs 40 at once; a duplicate of 40 is dropped.
     func data(_ seq: UInt32, _ b: UInt8) -> [UInt8] {
         EDTPacket.data(sequence: seq, position: 3, inOrder: false, message: seq, timestamp: 0, destination: 3, payload: [b]).bytes
     }
     c.receive(data(41, 2), now: 1)
     #expect(got.isEmpty)
+    let nak = out.compactMap { try? EDTPacket.parse($0) }.first { $0.controlType == .nak }
+    if case .control(_, _, _, _, _, let body)? = nak { #expect(EDTLossList.decode(body) == [40]) } else { Issue.record("no NAK") }
     c.receive(data(40, 1), now: 1)
     c.receive(data(40, 1), now: 1)
     #expect(got == [[1], [2]])
-    let acks = out.compactMap { try? EDTPacket.parse($0) }.compactMap(EDTAck.init)
-    #expect(acks.last?.lastSequence == 42)
-    // Our own data: sequence from our ISN, a whole message, numbered from 1.
+    #expect(c.stats.duplicatesReceived == 1)
+    // The cumulative ACK goes out on the next tick: next expected 42, our RTT in µs, a free buffer.
     out = []
+    c.tick(now: 1.02)
+    let ack = out.compactMap { try? EDTPacket.parse($0) }.compactMap(EDTAck.init).last
+    #expect(ack?.lastSequence == 42)
+    #expect((ack?.availableBuffer ?? 0) > 0)
+    // The peer's ACK2 for it gives an RTT sample.
+    let before = c.rtt
+    c.receive(EDTPacket.control(type: EDTControlType.ack2.rawValue, reserved: 0, info: ack!.ackNumber, timestamp: 0,
+                                destination: 3, body: [0, 0, 0, 0]).bytes, now: 1.03)
+    #expect(c.stats.ack2Received == 1 && c.rtt < before)
+}
+
+/// A connected client with captured output (data packets parsed).
+private func connected(window: Double = 16) -> (EDTConnection, () -> [EDTPacket], FakeVDA) {
+    let vda = FakeVDA()
+    var config = EDTConnection.Config(peerIPv4: [192, 0, 2, 20], socketID: 5, initialSequence: 1000)
+    config.initialWindow = window
+    let c = EDTConnection(config: config)
+    var out: [[UInt8]] = []
+    c.send = { out.append($0) }
+    c.connect(now: 0)
+    c.receive(vda.reply(to: out.removeLast())!, now: 0)
+    c.receive(vda.reply(to: out.removeLast())!, now: 0)
+    out = []
+    return (c, { defer { out = [] }; return out.compactMap { try? EDTPacket.parse($0) } }, vda)
+}
+
+private func ackFrom(_ vda: FakeVDA, next: UInt32, number: UInt32 = 1) -> [UInt8] {
+    var a = EDTAck(ackNumber: number, lastSequence: next)
+    a.rtt = 20_000
+    a.availableBuffer = 8192
+    return a.packet(destination: 5, timestamp: 0).bytes
+}
+
+@Test func edtStreamIsCutToThePayloadSizeAndLimitedByTheWindow() {
+    let (c, take, vda) = connected(window: 4)
+    // Packet size 1280 (ours; the fake VDA echoes it): 1280 - 28 - 16 = 1236 data bytes per packet.
+    #expect(c.payloadSize == 1236)
+    c.write([UInt8](repeating: 7, count: 1236 * 6 + 10), now: 1)
+    var sent = take().compactMap { p -> (UInt32, Int)? in
+        if case .data(let seq, _, _, _, _, _, let payload) = p { return (seq, payload.count) } else { return nil }
+    }
+    #expect(sent.map(\.0) == [1000, 1001, 1002, 1003])            // window 4
+    #expect(sent.allSatisfy { $0.1 == 1236 })
+    #expect(c.queuedBytes == 1236 * 2 + 10)
+    // ACK of 1000…1001: two more go out, the window grows (slow start).
+    c.receive(ackFrom(vda, next: 1002), now: 1.05)
+    sent = take().compactMap { p -> (UInt32, Int)? in
+        if case .data(let seq, _, _, _, _, _, let payload) = p { return (seq, payload.count) } else { return nil }
+    }
+    #expect(sent.map(\.0) == [1004, 1005, 1006])
+    #expect(sent.last?.1 == 10)
+    #expect(c.window == 6)
+    // A full ACK answers with ACK2 and empties the flight.
+    c.receive(ackFrom(vda, next: 1007, number: 2), now: 1.1)
+    #expect(take().contains { $0.controlType == .ack2 })
+    #expect(c.unacknowledgedPackets == 0)
+}
+
+@Test func edtNakRetransmitsAndHalvesTheWindowOncePerRTT() {
+    let (c, take, vda) = connected(window: 16)
+    c.write([UInt8](repeating: 1, count: 1236 * 10), now: 1)
+    _ = take()
+    let nak = EDTPacket.control(type: EDTControlType.nak.rawValue, reserved: 0, info: 0, timestamp: 0, destination: 5,
+                                body: EDTLossList.encode([1002, 1003, 1004, 1007]))
+    c.receive(nak.bytes, now: 1.02)
+    let resent = take().compactMap { p -> UInt32? in if case .data(let s, _, _, _, _, _, _) = p { return s } else { return nil } }
+    #expect(resent == [1002, 1003, 1004, 1007])
+    #expect(c.stats.dataRetransmitted == 4)
+    #expect(c.window == 8)
+    c.receive(nak.bytes, now: 1.03)                                  // the same loss event: no second halving
+    #expect(c.window == 8)
+    _ = vda
+}
+
+@Test func edtRetransmissionTimeoutResendsEverythingUnacknowledged() {
+    let (c, take, _) = connected(window: 16)
+    c.write([UInt8](repeating: 2, count: 1236 * 3), now: 1)
+    _ = take()
+    c.tick(now: 1.1)                                                 // before the RTO (≥ 200 ms)
+    #expect(!take().contains { if case .data = $0 { return true } else { return false } })
+    c.tick(now: 1.5)
+    let resent = take().compactMap { p -> UInt32? in if case .data(let s, _, _, _, _, _, _) = p { return s } else { return nil } }
+    #expect(resent.sorted() == [1000, 1001, 1002])
+    #expect(c.stats.rtos == 1 && c.window == 16)
+}
+
+@Test func edtLossListEncodesRanges() {
+    #expect(EDTLossList.encode([5]) == [0, 0, 0, 5])
+    #expect(EDTLossList.encode([5, 6, 7, 9]) == [0x80, 0, 0, 5, 0, 0, 0, 7, 0, 0, 0, 9])
+    #expect(EDTLossList.decode(EDTLossList.encode([5, 6, 7, 9])) == [5, 6, 7, 9])
+    // Wrap at 2^31.
+    #expect(EDTLossList.decode(EDTLossList.encode([0x7FFF_FFFF, 0])) == [0x7FFF_FFFF, 0])
+    #expect(EDTConnection.diff(0, 0x7FFF_FFFF) == 1 && EDTConnection.add(0x7FFF_FFFF, 1) == 0)
+}
+
+@Test func edtOurDataStartsAtOurISN() {
+    let (c, take, vda) = connected()
     c.sendMessage([0xAA], now: 2)
-    #expect((try? EDTPacket.parse(out[0])) == .data(sequence: 40, position: 3, inOrder: false, message: 1,
-                                                     timestamp: 2_000_000, destination: vda.socket, payload: [0xAA]))
+    #expect(take().first == .data(sequence: 1000, position: 3, inOrder: false, message: 1, timestamp: 2_000_000,
+                                  destination: vda.socket, payload: [0xAA]))
 }
 
 @Test func edtFeatureIsOffByDefault() {

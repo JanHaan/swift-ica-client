@@ -154,6 +154,17 @@ public final class ICASession: @unchecked Sendable {
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, tls: plan.tls, framing: plan.framing, queue: queue)
         transport.reconnectTicket = acr?.ticket
+        // EDT (D132): only with ICA_EDT=1, a direct CGP plan without TLS (no DTLS yet) and HDX over UDP allowed.
+        if EDTFeature.enabled(), case .cgp = plan.framing, !plan.tls, (ica["HDXoverUDP"] ?? "Off").lowercased() != "off" {
+            let udp = ica["UDPCGPPort"].flatMap { value -> (String, UInt16)? in
+                let parts = value.split(separator: ":")
+                guard parts.count == 2, let p = UInt16(parts[1]) else { return nil }
+                return (String(parts[0]), p)
+            } ?? (host, 2598)
+            // ICA_EDT_PORT overrides the UDP port (tests: a dead port shows the TCP fallback).
+            let port = ProcessInfo.processInfo.environment["ICA_EDT_PORT"].flatMap(UInt16.init) ?? udp.1
+            transport.edtTarget = (udp.0, port)
+        }
         // T_sr without a server cap 9: the ICA file's SessionReliabilityTTL (§3.12.4).
         transport.srTimeoutFallback = ica["SessionReliabilityTTL"].flatMap(TimeInterval.init)
         transport.configureTestHooks(from: ProcessInfo.processInfo.environment)
@@ -494,6 +505,8 @@ public final class CGPTransport: @unchecked Sendable {
         public var startDelay: TimeInterval = 3
         public var retryDelay: TimeInterval = 3
         public var connectTimeout: TimeInterval = 20
+        /// EDT handshake budget before falling back to TCP (D132; the VDA answers in milliseconds).
+        public var edtHandshakeTimeout: TimeInterval = 3
         public var firstReadTimeout: TimeInterval = 20
         public var livenessInterval: TimeInterval = 5
         public var livenessMinimum: TimeInterval = 25
@@ -600,7 +613,13 @@ public final class CGPTransport: @unchecked Sendable {
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Bool>()
     let cgp = CGPSession()
-    private var stream: TLSStream?
+    private var stream: ICAByteStream?
+    /// EDT (CGP over UDP, docs/80, D132): tried first when set (`ICA_EDT=1` and the ICA file allows HDX over UDP);
+    /// a failed EDT handshake falls back to TCP for the rest of the session, as the stock client does.
+    public var edtTarget: (host: String, port: UInt16)?
+    private var edtFailed = false
+    /// "TCP", "TLS" or "EDT": the transport of the current connection (any thread).
+    public var transportKind: String { onQueue { stream?.kind == "TCP" && tls ? "TLS" : stream?.kind ?? "-" } }
     /// Bumped whenever the current connection is dropped; callbacks of older connections are ignored.
     private var generation = 0
     private var sawDetect = false
@@ -726,11 +745,11 @@ public final class CGPTransport: @unchecked Sendable {
 
     /// Connects and starts the receive loop; returns once the bind request is on the wire.
     public func start() async throws {
-        let stream = TLSStream(host: host, port: port, tls: tls, queue: queue)
-        try await stream.connect(timeout: timing.connectTimeout)
+        let stream = try await openStream()
         perform { [self] in
             guard !closed else { return stream.close() }
-            log("\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
+            log(stream.kind == "EDT" ? "EDT connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)"
+                                     : "\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
             install(stream)
             if case .raw(let socks) = framing {
                 // Raw ICA (docs/16 §4): no CGP, no session reliability.
@@ -756,7 +775,27 @@ public final class CGPTransport: @unchecked Sendable {
         }
     }
 
-    private func install(_ stream: TLSStream) {
+    /// EDT first when configured and not failed before, else TCP(+TLS) (D132).
+    private func openStream() async throws -> ICAByteStream {
+        if let target = edtTarget, !onQueue({ edtFailed }) {
+            let edt = EDTStream(host: target.host, port: target.port, queue: queue)
+            edt.log = { [weak self] in self?.log($0) }
+            do {
+                try await edt.connect(timeout: timing.edtHandshakeTimeout)
+                return edt
+            } catch {
+                perform { [self] in
+                    edtFailed = true
+                    log("\(error): falling back to TCP for this session")
+                }
+            }
+        }
+        let stream = TLSStream(host: host, port: port, tls: tls, queue: queue)
+        try await stream.connect(timeout: timing.connectTimeout)
+        return stream
+    }
+
+    private func install(_ stream: ICAByteStream) {
         generation += 1
         let current = generation
         self.stream = stream
@@ -1156,13 +1195,12 @@ public final class CGPTransport: @unchecked Sendable {
         attemptToken += 1
         let token = attemptToken
         onEvent(.resuming(attempt: attempt))
-        log("resume attempt \(attempt): connecting to \(host):\(port)")
-        let stream = TLSStream(host: host, port: port, tls: tls, queue: queue)
-        let timeout = timing.connectTimeout
+        log("resume attempt \(attempt): connecting to \(edtTarget != nil && !edtFailed ? "\(edtTarget!.host):\(edtTarget!.port) (EDT)" : "\(host):\(port)")")
         Task { [weak self] in
             do {
-                try await stream.connect(timeout: timeout)
-                self?.perform { self?.attemptConnected(stream, token: token) }
+                guard let self else { return }
+                let stream = try await self.openStream()
+                self.perform { self.attemptConnected(stream, token: token) }
             } catch {
                 self?.perform {
                     guard let self, token == self.attemptToken, self.attemptInProgress else { return }
@@ -1172,7 +1210,7 @@ public final class CGPTransport: @unchecked Sendable {
         }
     }
 
-    private func attemptConnected(_ stream: TLSStream, token: Int) {
+    private func attemptConnected(_ stream: ICAByteStream, token: Int) {
         guard token == attemptToken, attemptInProgress, !closed, cgp.state == .suspended else { return stream.close() }
         install(stream)
         cgp.beginConnection()

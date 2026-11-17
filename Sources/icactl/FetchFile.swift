@@ -28,7 +28,11 @@ func fetchFileCommand(_ args: [String], store: StoreClient) async {
     }
     guard (2...3).contains(positional.count) else { fail(usage) }
     let resourceName = positional[0]
-    guard resourceName == "Explorer Citrix ABC" else { fail("fetch-file is limited to \"Explorer Citrix ABC\"") }
+    // Lab (D132): "File Explorer" with ICA_ALLOW_ANY_RESOURCE=1, gated on the lab user having no session at all.
+    let lab = resourceName == "File Explorer" && ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1"
+    guard resourceName == "Explorer Citrix ABC" || lab else {
+        fail("fetch-file is limited to \"Explorer Citrix ABC\" (lab: \"File Explorer\" with ICA_ALLOW_ANY_RESOURCE=1)")
+    }
     guard let (folder, name) = HostFileFetch.split(positional[1]) else { fail("not an absolute Windows file path: \(positional[1])") }
     let destDir = positional.count == 3
         ? URL(fileURLWithPath: (positional[2] as NSString).expandingTildeInPath, isDirectory: true)
@@ -41,7 +45,7 @@ func fetchFileCommand(_ args: [String], store: StoreClient) async {
         // Gate: no session of the ABC group may exist (fresh logon only). Others (e.g. the user's XYZ session) stay.
         let resources = try await store.resources()
         let list = try await store.sessions.list()
-        let abc = list.sessions.filter {
+        let abc = lab ? list.sessions : list.sessions.filter {
             HostFileFetch.isTestGroup(appNames: TestSessionGate.resolvedNames($0, resources: resources) + $0.appNames)
         }
         say("sessions before: \(list.sessions.count), in the ABC group: \(abc.count)")
@@ -56,7 +60,7 @@ func fetchFileCommand(_ args: [String], store: StoreClient) async {
         var gone = false
         for _ in 0..<6 {
             let after = try await store.sessions.list()
-            let left = after.sessions.filter { HostFileFetch.isTestGroup(appNames: TestSessionGate.resolvedNames($0, resources: resources) + $0.appNames) }
+            let left = lab ? after.sessions : after.sessions.filter { HostFileFetch.isTestGroup(appNames: TestSessionGate.resolvedNames($0, resources: resources) + $0.appNames) }
             if left.isEmpty { gone = true; break }
             try await Task.sleep(nanoseconds: 5_000_000_000)
         }
