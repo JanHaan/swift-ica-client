@@ -132,7 +132,10 @@ func runClipRichTest(ica: ICAFile, kind: RichClipKind, app: TestApp) async throw
     var original: (width: Int, height: Int, rgba: Data)?
     var content: ClipboardContent
     switch kind {
-    case .html: content = ClipboardContent(html: html)
+    case .html:
+        // ICA_CLIPRICH_HTML_WITH_TEXT=1: HTML plus plain text, as a browser copy offers (D113: the lab apps never fetched
+        // an HTML-only announce).
+        content = env["ICA_CLIPRICH_HTML_WITH_TEXT"] == "1" ? ClipboardContent(text: "\(marker) kursiv rot A1 B1", html: html) : ClipboardContent(html: html)
     case .rtf: content = ClipboardContent(rtf: rtf)
     case .image:
         let pixels = RichClipImage.pixels()

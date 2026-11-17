@@ -23,6 +23,8 @@ enum WordClipCase: String, CaseIterable {
 
     static let resource = "Microsoft Word ABC"
     static let executable = "winword.exe"
+    /// The company app; lab apps (WordPad, LibreOffice Writer) come from lab/apps.conf (D113).
+    static let builtIn = TestApp(resource: resource, executables: [executable])
     /// Counts for pass/fail (html-image is informational).
     var required: Bool { self != .htmlImage }
 }
@@ -52,7 +54,7 @@ enum WordClipImage {
     }
 }
 
-func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
+func runClipWordTest(ica: ICAFile, cases: [WordClipCase], app: TestApp = WordClipCase.builtIn) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
     let runID = String(format: "%06x", UInt32.random(in: 0...0xFF_FFFF))
@@ -61,7 +63,7 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
     let trace = ClipTrace(enabled: clipConfig.traceWire, name: "cliptest-word", runID: runID)
     let outDir = sessionDir.appendingPathComponent("clipfiles")
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    say("run \(runID): cliptest-word in \"\(WordClipCase.resource)\", cases \(cases.map(\.rawValue).joined(separator: ","))")
+    say("run \(runID): cliptest-word in \"\(app.resource)\", cases \(cases.map(\.rawValue).joined(separator: ","))")
 
     var config = WinstationDriver.Configuration()
     config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: env)
@@ -151,11 +153,9 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
     let start = Date()
     let gotReady = await waitFor(session, 90) { ready }
     say(gotReady ? "clipboard channel ready" : "clipboard channel NOT ready after 90 s")
-    let isWord: (UInt32) -> Bool = { id in
-        if let exe = windowsSeen.single(id, seamless.model) { return GuardedLogoff.basename(exe) == WordClipCase.executable }
-        let key = windowsSeen.appKey(id)?.lowercased() ?? ""
-        return key.contains("winword") || key == "app:" + WordClipCase.resource.lowercased()
-    }
+    let isWord: (UInt32) -> Bool = { app.matches(executable: windowsSeen.single($0, seamless.model), appKey: windowsSeen.appKey($0)) }
+    // Word's start screen and title rules only for Word; other apps: the title word and listed first-run dialogs.
+    let wordApp = app.executables.contains(WordClipCase.executable)
     let mainWindow: () -> UInt32? = { appWindows.first { isWord($0) && !(seamless.model.windows[$0]?.title.isEmpty ?? true) } }
     _ = await waitFor(session, max(5, 180 - Date().timeIntervalSince(start))) { logon.isFresh && mainWindow() != nil }
     // Word shows a splash first: wait until windows and titles have been quiet for 6 s (at most 60 s more).
@@ -208,6 +208,7 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
         return true
     }
     func isDocumentTitle(_ t: String) -> Bool {
+        guard wordApp else { return app.isDocumentTitle(t) }
         let l = t.lowercased()
         return l.contains("word") && (l.contains("dokument") || l.contains("document"))
     }
@@ -223,22 +224,35 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
     if !fresh {
         note("not a fresh logon by this run: no input is sent (this may be an existing session)")
     } else if !gotReady || target == nil {
-        note("no \(WordClipCase.resource) window or no clipboard channel: no input is sent")
+        note("no \(app.resource) window or no clipboard channel: no input is sent")
     } else if let main = target {
         session.send { _, twi in twi.activate(windowId: main) }
         try await Task.sleep(nanoseconds: 2_000_000_000)
         await screenshot("start, title \"\(await title())\"")
+        // Known first-run dialogs (lab/apps.conf): Esc on each, then recheck.
+        for _ in 0..<3 {
+            let extra = await captioned().filter { $0.key != main }
+            guard app.onlyFirstRunDialogs(Array(extra.values)) else { break }
+            for (id, t) in extra.sorted(by: { $0.key < $1.key }) {
+                note("first-run dialog \(id) \"\(t)\" (listed for \(app.resource)): Esc")
+                session.send { _, twi in twi.activate(windowId: id) }
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                try await keys("esc", wait: 2)
+            }
+            session.send { _, twi in twi.activate(windowId: main) }
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         if await onlyMainWindow("start") {
             // The start screen (title "Word"): Esc opens the blank document; if not, Ctrl+N.
             var t = await title()
             note("start: title \"\(t)\"")
-            if !isDocumentTitle(t) {
+            if !isDocumentTitle(t), wordApp {
                 note("not a document yet: Esc")
                 try await keys("esc", wait: 4, shoot: true)
                 t = await title()
                 note("after Esc: title \"\(t)\"")
             }
-            if !isDocumentTitle(t), await onlyMainWindow("after esc") {
+            if !isDocumentTitle(t), wordApp, await onlyMainWindow("after esc") {
                 note("still not a document: Ctrl+N")
                 try await keys("ctrl+n", wait: 6, shoot: true)
                 // Ctrl+N may open the document in a new window: take the Word window with a document title.
@@ -252,7 +266,7 @@ func runClipWordTest(ica: ICAFile, cases: [WordClipCase]) async throws {
                 note("after Ctrl+N: title \"\(t)\"")
             }
             if !isDocumentTitle(t) {
-                note("STOP: title \"\(t)\" is not a blank Word document; no further input")
+                note("STOP: title \"\(t)\" is not a blank \(app.resource) document; no further input")
             } else if await onlyMainWindow("document") {
                 atDocument = true
                 note("document window \(target ?? 0) \"\(t)\"")

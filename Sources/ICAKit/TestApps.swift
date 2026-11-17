@@ -8,8 +8,8 @@ public struct TestApp: Equatable, Sendable {
     public var executables: [String]
     /// Lowercased; nil when the test does not check the title.
     public var titleWord: String?
-    /// Exact titles of first-run dialogs the app shows over its first window (e.g. LibreOffice's "Welcome to
-    /// LibreOffice!" in a new profile). A test may close exactly these with Esc; any other window still stops it.
+    /// Title prefixes of first-run dialogs the app shows over its first window (LibreOffice's "Welcome to LibreOffice!"
+    /// and "Tip of the Day: 1/224" in a new profile). A test may close these with Esc; any other window still stops it.
     public var firstRunDialogs: [String]
 
     public init(resource: String, executables: [String], titleWord: String? = nil, firstRunDialogs: [String] = []) {
@@ -21,7 +21,7 @@ public struct TestApp: Equatable, Sendable {
 
     /// Every title is a listed first-run dialog (and there is at least one).
     public func onlyFirstRunDialogs(_ titles: [String]) -> Bool {
-        !titles.isEmpty && titles.allSatisfy(firstRunDialogs.contains)
+        !titles.isEmpty && titles.allSatisfy { title in firstRunDialogs.contains { !$0.isEmpty && title.hasPrefix($0) } }
     }
 
     /// A window is the app's when its executable (from the TWI process table or an `exe:` key) is one of
@@ -47,7 +47,7 @@ public struct TestApp: Equatable, Sendable {
 /// `lab/apps.conf` (D110): the one list of lab apps and lab suite tests, read by icactl and `scripts/live-suite.sh
 /// --lab`. Lines (`|`-separated, `#` comments, blank lines ignored):
 ///
-///     app|<resource>|<executables, comma-separated>|<title word>[|<first-run dialog titles, comma-separated>]
+///     app|<resource>|<executables, comma-separated>|<title word>[|<first-run dialog title prefixes, comma-separated>]
 ///     test|<name>|<resource>|<extra environment>|<icactl arguments>
 ///
 /// The suite runs `icactl <arguments> "<resource>"` for each test, in order.

@@ -305,13 +305,15 @@ case "cliptest-word":
     guard cases.count == names.count, !cases.isEmpty else {
         fail("usage: icactl cliptest-word [\(WordClipCase.allCases.map(\.rawValue).joined(separator: ","))]")
     }
+    // `icactl cliptest-word <cases> <resource>` with ICA_ALLOW_ANY_RESOURCE=1: WordPad or LibreOffice Writer (D113).
+    let wordApp = testApp(args.dropFirst().first ?? WordClipCase.resource, builtIn: WordClipCase.builtIn, command: "cliptest-word")
     do {
         let store = storeClient()
         let resources = try await store.resources()
-        guard let resource = resources.first(where: { $0.name == WordClipCase.resource }) else { fail("no resource named \(WordClipCase.resource)") }
+        guard let resource = resources.first(where: { $0.name == wordApp.resource }) else { fail("no resource named \(wordApp.resource)") }
         guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runClipWordTest(ica: ica, cases: cases)
+        try await runClipWordTest(ica: ica, cases: cases, app: wordApp)
     } catch {
         fail("\(error)")
     }
