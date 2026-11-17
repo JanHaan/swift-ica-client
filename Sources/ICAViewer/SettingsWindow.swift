@@ -832,6 +832,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         guard !demo else { return }
         guard let host = LoginSettings.accountURL(from: gatewayField.stringValue)?.host ?? service.gateway?.host else { return }
         credentials.forgetAll(host: host)
+        service.forgetSession()
         load()
         status.stringValue = loc("Saved credentials for \(host) were deleted.", "Gespeicherte Anmeldedaten für \(host) wurden gelöscht.")
     }

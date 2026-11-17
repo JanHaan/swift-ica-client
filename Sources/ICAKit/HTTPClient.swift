@@ -84,6 +84,13 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         for cookie in jar.cookies ?? [] { jar.deleteCookie(cookie) }
     }
 
+    /// Empties the jar and deletes its saved copy (`saveCookies`): after "forget my login" the gateway and store
+    /// session cookies must not sign the next start in (security review L-03).
+    public func clearCookies(deletingFile path: String) {
+        clearCookies()
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     public func send(
         _ method: String, _ url: URL, headers: [String: String] = [:], form: [(String, String)]? = nil
     ) async throws -> Response {

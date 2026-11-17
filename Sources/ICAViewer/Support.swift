@@ -353,6 +353,12 @@ final class StoreService: @unchecked Sendable {
         try? http.loadCookies(from: Paths.cookieFile)
     }
 
+    /// With "Forget All Saved Credentials": the signed-in state goes too (cookie jar in memory and on disk).
+    func forgetSession() {
+        http.clearCookies(deletingFile: Paths.cookieFile)
+        vlog("forgot the session cookies")
+    }
+
     /// Changes the account address (kind nil: probe at the next `resolveAccount`) and stores it in the settings.
     func setGateway(_ url: URL, kind: AccountKind? = nil) {
         if url.host != gateway?.host { http.clearCookies() }
