@@ -445,7 +445,8 @@ public enum CDMReplyBody: Equatable, Sendable {
     case handle(UInt16, status: UInt16)
     /// READ: `ctx, u16 date, u16 time, u16 len, st, data`. The reference always sends date/time 0.
     case read(UInt16, date: UInt16, time: UInt16, status: UInt16, data: Data)
-    /// READ_CONDITIONAL: the READ reply, then `u16 notModified` (§A.3).
+    /// READ_CONDITIONAL: `ctx, u16 date, u16 time, u16 len, st, u16 notModified, data` (§A.3; the flag before the
+    /// data, D112).
     case readConditional(UInt16, date: UInt16, time: UInt16, status: UInt16, data: Data, notModified: UInt16)
     /// WRITE: `ctx, u16 written, st`.
     case write(UInt16, written: UInt16, status: UInt16)
@@ -507,8 +508,9 @@ public struct CDMReply: Equatable, Sendable {
         case let .read(ctx, date, time, st, data):
             w.u16(ctx); w.u16(date); w.u16(time); w.u16(UInt16(clamping: data.count)); w.u16(st); w.raw(data)
         case let .readConditional(ctx, date, time, st, data, notModified):
-            w.u16(ctx); w.u16(date); w.u16(time); w.u16(UInt16(clamping: data.count)); w.u16(st); w.raw(data)
-            w.u16(notModified)
+            // notModified comes before the data (live against a 2402 VDA, D112): after it, the host took the first
+            // two data bytes as the flag, treated the file as unchanged and used its empty cache.
+            w.u16(ctx); w.u16(date); w.u16(time); w.u16(UInt16(clamping: data.count)); w.u16(st); w.u16(notModified); w.raw(data)
         case let .write(ctx, written, st):
             w.u16(ctx); w.u16(written); w.u16(st)
         case let .find(ctx, st, count, entries):

@@ -372,6 +372,25 @@ case "cdmtest":
         fail("\(error)")
     }
 
+case "cdmtest-explorer":
+    // icactl cdmtest-explorer [resource] — client drive mapping with File Explorer (backlog 1.1, CDMExplorerTest.swift): a
+    // temp folder as M:, Explorer lists it, copies a file inside it, makes a folder, deletes both, and tries the links
+    // that lead outside; checked on the Mac (bytes, quarantine, the outside folder untouched). Lab apps only
+    // (ICA_ALLOW_ANY_RESOURCE=1, default "File Explorer"): the company farm maps no drives (D73).
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("cdmtest-explorer needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let cdmApp = testApp(args.first ?? "File Explorer", builtIn: TestApp(resource: "Explorer Citrix ABC", executables: ["explorer.exe"]),
+                         command: "cdmtest-explorer")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == cdmApp.resource }) else { fail("no resource named \(cdmApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runCDMExplorerTest(ica: ica, app: cdmApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "printtest":
     // icactl printtest [resource] — client printing test, Notepad only (docs/97 §10 L1–L5): announces the PDF-mode
     // CTXCPM module and logs every host command. In a session this run logged on itself: types a test line in
@@ -621,6 +640,8 @@ default:
     ICA_SKIP_SETCLIENT=1                 login: skip /cgi/setclient?wica (native mode needs it too, docs/15 §1.1)
       icactl cdmtest                     drive mapping test in "Notepad": temp folder as M:, Notepad opens a file
                                          from it (ICA_CDMTEST_SAVE=1: also Save As into it); fresh session only
+      icactl cdmtest-explorer [resource] drive mapping in a lab Explorer ("File Explorer"): temp folder as M:, list, copy
+                                         a file inside it, mkdir, delete both, links leading outside; Mac-side checks
       icactl printtest                   printing test in "Notepad": host commands, Ctrl+P, dialog screenshot to
                                          .session/printtest-dialog.png, then Esc; ICA_PRINTTEST_CONFIRM=1: Enter only once
                                          .session/printtest-confirm-<runid> appears (120 s), job to .session/printtest.pdf

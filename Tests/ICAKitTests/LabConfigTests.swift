@@ -10,7 +10,7 @@ private let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathCompon
 @Test func theRepositoryLabConfigParsesAndCoversTheSuite() throws {
     let config = try LabConfig.load(path: LabConfig.defaultPath(root: packageRoot, environment: [:]))
     #expect(config.resourceNames == ["Notepad", "WordPad", "Paint", "File Explorer", "Microsoft Edge", "LibreOffice Writer", "Lab Desktop"])
-    #expect(config.tests.map(\.name) == ["text", "files", "image", "rtf-wordpad", "rtf-writer"])
+    #expect(config.tests.map(\.name) == ["text", "files", "image", "rtf-wordpad", "rtf-writer", "cdm"])
     let files = try #require(config.tests.first { $0.name == "files" })
     #expect(files.resource == "File Explorer" && files.environment == "ICA_GDT=1 ICA_CLIP_VERSION=4" && files.arguments == "cliptest-files")
     #expect(config.app("libreoffice writer")?.executables == ["soffice.bin", "soffice.exe", "swriter.exe"])

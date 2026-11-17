@@ -497,9 +497,10 @@ private struct FindReply {
         r = ByteReader(h.send(.getDateTime(handle: ctx))!)
         _ = try! r.u16(); _ = try! r.u16()
         #expect(try! r.u16() == stamp.date && (try! r.u16()) == stamp.time && (try! r.u16()) == 0)
-        // READ_CONDITIONAL always returns the data, notModified 0.
+        // READ_CONDITIONAL always returns the data, notModified 0, and the flag comes before the data (D112: after it,
+        // the VDA read the first two data bytes as the flag and used its empty cache).
         let rc = h.send(.readConditional(handle: ctx, time: 0xFFFF, date: 0xFFFF, offset: 1, unknown: 0, count: 2))!
-        #expect(rc == Data([0x91, h.lastID, UInt8(ctx), 0, 0, 0, 0, 0, 2, 0, 0, 0]) + p("12") + Data([0, 0]))
+        #expect(rc == Data([0x91, h.lastID, UInt8(ctx), 0, 0, 0, 0, 0, 2, 0, 0, 0]) + Data([0, 0]) + p("12"))
         // Volume info: constants and the label.
         let v = h.send(.volumeInfo(path: p("M:\\"), flags: 0))!
         #expect(v.suffix(17) == Data([13, 0, 0, 0]) + p("Citrix Shared"))
