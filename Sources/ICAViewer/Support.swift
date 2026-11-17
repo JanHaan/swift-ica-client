@@ -51,7 +51,7 @@ private let logStart = Date()
 /// Each line also goes to `LogStore` (memory and log file) for "Report a Problem".
 func vlog(_ text: String) {
     let now = Date()
-    let line = String(format: "%7.2f ", now.timeIntervalSince(logStart)) + text
+    let line = String(format: "%7.2f ", now.timeIntervalSince(logStart)) + LogText.oneLine(text)
     FileHandle.standardError.write(Data((line + "\n").utf8))
     LogStore.shared.append(line, at: now)
 }
