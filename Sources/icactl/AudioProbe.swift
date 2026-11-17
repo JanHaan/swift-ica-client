@@ -22,6 +22,7 @@ func runAudioProbe(ica: ICAFile, app: TestApp) async throws {
     audioConfig.capabilities = AudioWire.Caps.playback
     audioConfig.microphone = mic
     audioConfig.enumeration = env["ICA_AUDIO_V4"] == "1"   // version 4 + ADD_DEVICE (D145)
+    audioConfig.capturePCM = env["ICA_AUDIO_CAPTURE_PCM"] == "1"   // PCM in the capture reply (D149)
     var config = WinstationDriver.Configuration()
     config.expanderPowerOffer = WinstationDriver.Configuration.expanderPowerOffer(environment: env)
     config.logon = WDLogon(ica: ica)
@@ -43,7 +44,7 @@ func runAudioProbe(ica: ICAFile, app: TestApp) async throws {
         switch event {
         case .command(let line):
             commands.append(line)
-            if commands.count <= 12 { say("cam: \(line)") }
+            say("cam: \(line)")
         case .recording(let on):
             recording = recording || on
             say("cam: capture \(on ? "started" : "stopped")")
@@ -174,7 +175,7 @@ enum AudioProbeScript {
         """
         if microphone {
             s += """
-            Add-Type -Name M -Namespace W -MemberDefinition '[DllImport("winmm.dll")] public static extern int mciSendString(string c, System.Text.StringBuilder r, int l, IntPtr h);';\
+            Add-Type -Name M -Namespace W -MemberDefinition '[DllImport("winmm.dll")] public static extern int mciSendString(string c, System.Text.StringBuilder r, int l, IntPtr h); [DllImport("winmm.dll")] public static extern int waveInGetNumDevs();';'waveIn devices '+[W.M]::waveInGetNumDevs();\
             $r="$env:TEMP\\ica-probe-rec.wav";'mci open '+[W.M]::mciSendString('open new type waveaudio alias rec',$null,0,0);\
             'mci set '+[W.M]::mciSendString('set rec bitspersample 16 samplespersec 48000 channels 2 bytespersec 192000 alignment 4',$null,0,0);\
             'mci record '+[W.M]::mciSendString('record rec',$null,0,0);Start-Sleep 3;'mci save '+[W.M]::mciSendString('save rec '+$r,$null,0,0);\

@@ -842,3 +842,19 @@ private func code3Packet(_ frames: [Data]) -> Data {
     #expect(WDModules.audio(versionHigh: 4, date: Date(timeIntervalSince1970: 0))[5] == 4)
     #expect(WDModules.audio(date: Date(timeIntervalSince1970: 0))[5] == AudioWire.versionHigh)
 }
+
+@Test func pcmCaptureEncoderFramesAndSamples() throws {
+    // D149: 16-bit PCM, 20 ms frames, interleaved LE; 8-bit unsigned.
+    let e = try #require(PCMEncoder(AudioFormatCode(AudioWire.Format.pcm, 0x113)))   // 44100 Hz stereo 16-bit
+    #expect(e.frameCount == 882 && e.stream.channels == 2 && e.bits == 16)
+    var frame = [Float](repeating: 0, count: e.frameCount * 2)
+    frame[0] = 1; frame[1] = -1; frame[2] = 0.5
+    let out = try #require(e.encode(frame)?.first)
+    #expect(out.count == e.frameCount * 2 * 2)
+    #expect(Array(out.prefix(6)) == [0xFF, 0x7F, 0x01, 0x80, 0x00, 0x40])   // 32767, -32767, 16384 (0x4000 = 0.5 × 32767 rounded)
+    #expect(e.encode([0]) == nil)
+    let e8 = try #require(PCMEncoder(AudioFormatCode(AudioWire.Format.pcm, 0x000)))   // 8000 Hz mono 8-bit
+    #expect(e8.frameCount == 160 && e8.encode([Float](repeating: 0, count: 160))?.first?.first == 128)
+    #expect(PCMEncoder(AudioFormatCode(AudioWire.Format.opus, 4)) == nil)
+    #expect(makeCaptureEncoder(AudioFormatCode(AudioWire.Format.pcm, 0x101)) is PCMEncoder)
+}

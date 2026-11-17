@@ -84,6 +84,43 @@ public protocol AudioPacketEncoder: AnyObject {
     func encode(_ frame: [Float]) -> [Data]?
 }
 
+/// PCM uplink (D149): 20 ms frames (rate / 50) of 16-bit signed LE or 8-bit unsigned samples, interleaved; no
+/// compression. Offered in the capture CAPINFO reply as the stock client does (it lists PCM, Speex, Vorbis and Opus).
+public final class PCMEncoder: AudioPacketEncoder {
+    public let code: AudioFormatCode
+    public let stream: AudioStreamFormat
+    public let frameCount: Int
+    public let bits: Int
+
+    public init?(_ code: AudioFormatCode) {
+        guard let p = code.pcm else { return nil }
+        self.code = code
+        stream = p.stream
+        bits = p.bits
+        frameCount = Int(p.stream.sampleRate / 50)
+    }
+
+    public func encode(_ frame: [Float]) -> [Data]? {
+        guard frame.count == frameCount * stream.channels else { return nil }
+        var out = Data(capacity: frame.count * bits / 8)
+        for x in frame {
+            let v = max(-1, min(1, x))
+            if bits == 16 {
+                let i = Int16(clamping: Int((v * 32767).rounded()))
+                out.append(UInt8(truncatingIfNeeded: i)); out.append(UInt8(truncatingIfNeeded: i >> 8))
+            } else {
+                out.append(UInt8(clamping: Int(((v + 1) * 127.5).rounded())))
+            }
+        }
+        return [out]
+    }
+}
+
+/// The uplink encoder for an OPEN's format: Opus or PCM (D149).
+public func makeCaptureEncoder(_ code: AudioFormatCode) -> AudioPacketEncoder? {
+    code.opus != nil ? OpusEncoder(code) : PCMEncoder(code)
+}
+
 /// Opus via AudioToolbox (§7.2): rate and channels from the OPEN subformat, **10 ms** frames (rate / 100).
 /// The reference's VOIP application and DTX are libopus settings AudioToolbox does not expose [P]: the
 /// encoder runs with its defaults, so every 10 ms frame produces a packet (no silent frames).

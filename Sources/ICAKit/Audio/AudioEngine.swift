@@ -156,6 +156,8 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         /// as the stock client does; the VDA seems to create the session's recording endpoint only from such an ADD_DEVICE
         /// (mac-D, D138). `ICA_AUDIO_V4=1`.
         public var enumeration = false
+        /// Offer 16-bit PCM for capture as well as Opus (D149; the stock client lists PCM too). `ICA_AUDIO_CAPTURE_PCM=1`.
+        public var capturePCM = false
         /// The Opus subformats AudioToolbox encodes (capture CAPINFO reply).
         public var opusEncodeSubformats: Set<UInt16> = OpusSupport.encodableSubformats
 
@@ -216,7 +218,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     /// Where captured samples are encoded. Nil: inline in the source's callback (tests).
     public var captureQueue: DispatchQueue?
     /// The uplink encoder for an OPEN's format (tests inject their own).
-    public var makeEncoder: (AudioFormatCode) -> AudioPacketEncoder? = { OpusEncoder($0) }
+    public var makeEncoder: (AudioFormatCode) -> AudioPacketEncoder? = { makeCaptureEncoder($0) }
     public private(set) var captureState = CaptureState.closed
     private var captureGeneration = 0
     private var uplink: AudioUplink?
@@ -529,7 +531,10 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     // MARK: Capture (§7)
 
     private func canCapture(_ code: AudioFormatCode) -> Bool {
-        config.microphone && config.codecs.contains(.opus) && code.opus != nil && config.opusEncodeSubformats.contains(code.subformat)
+        guard config.microphone else { return false }
+        // PCM (D149): offered when `capturePCM` is on (16-bit only: 8-bit capture is of no use).
+        if config.capturePCM, let p = code.pcm, p.bits == 16 { return true }
+        return config.codecs.contains(.opus) && code.opus != nil && config.opusEncodeSubformats.contains(code.subformat)
     }
 
     private func onSession(_ block: @escaping () -> Void) {
@@ -647,7 +652,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     private func startSource(_ code: AudioFormatCode) {
         guard !linkDown, !microphoneDisabled, !sourceRunning else { return }
         if uplink == nil { uplink = makeEncoder(code).map { AudioUplink(encoder: $0) } }
-        guard let source = captureSource, let uplink, let stream = code.opus else { return streamError("no source or encoder") }
+        guard let source = captureSource, let uplink, let stream = code.opus ?? code.pcm?.stream else { return streamError("no source or encoder") }
         let generation = captureGeneration
         let queue = captureQueue
         let deliver: ([Float]) -> Void = { [weak self] samples in
@@ -663,7 +668,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             try source.start(format: stream, deliver: deliver)
             sourceRunning = true
             onEvent?(.recording(true))
-            log("START_RECORD → capture started (\(stream), 10 ms Opus packets)")
+            log("START_RECORD → capture started (\(stream), \(code.opus != nil ? "10 ms Opus" : "20 ms PCM") packets)")
         } catch {
             streamError("\(error)")
         }
