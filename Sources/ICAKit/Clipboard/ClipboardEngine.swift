@@ -182,6 +182,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private var hostFileEntries: [ClipboardFileEntry] = []
     /// Fetch FileContents after the descriptor (`Config.files`); off = descriptor only (e.g. to check a selection).
     public var fetchFileContents = true
+    /// Fetch a host FileGroupDescriptorW over CTXCLIP at all (`Config.files`). Off when CTXGDT carries the files
+    /// (docs/76 §7.17): the stock client asks for the descriptor there, not on CTXCLIP [B].
+    public var fetchFileGroup = true
     private var fetched = ClipboardContent()
     private var fetchedFormats: [UInt16] = []
     private var echoCandidate = false
@@ -400,7 +403,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
             want.append(ClipboardFormat.bitmap)
         }
         // Files (experimental): the descriptor first; FileContents per index are queued once it is parsed.
-        if config.files, let id = registeredId(ClipboardFileFormat.groupDescriptorName), hostFormats.contains(id) { want.append(id) }
+        if config.files, fetchFileGroup, let id = registeredId(ClipboardFileFormat.groupDescriptorName), hostFormats.contains(id) { want.append(id) }
         guard !want.isEmpty else { return emit(.hostNothingUsable(hostFormats)) }
         fetching = true
         fetchQueue = want.map { Request(format: $0, index: version >= ClipboardWire.filesVersion ? 0 : nil) }

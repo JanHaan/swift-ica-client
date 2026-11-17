@@ -159,6 +159,7 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
             case .hostWrite(let w): return "host#\(w.index)"
             case .sent(let w, _): return "sent#\(w.index)"
             case .log: return "log"
+            case .file: return "file"
             }
         }
         #expect(kinds == ["module", "host#1", "sent#1", "host#2"])

@@ -1,7 +1,8 @@
 import Foundation
 
-/// Discovery engine for `CTXGDT` (docs/76-gdt.md §6): announces the channel, records every host write, and answers
-/// the host's opening `01` with `02` (D80). Further replies are added as `Responder`s; `ICA_GDT_ECHO_INIT` is one.
+/// Engine for `CTXGDT` (docs/76-gdt.md §6, §7.17): announces the channel, records every host write, answers the
+/// host's opening `01` with `02` (D80), and runs the clipboard file protocol (`files`, §7.17). Further replies can be
+/// added as `Responder`s; `ICA_GDT_ECHO_INIT` is one.
 ///
 /// - Module: the generic 48-byte VD (docs/30 §5.5), versions `Config.versionLow…versionHigh` (1…1), host name
 ///   "ICA", flow type 0, then the stock VD data `87 13 00` (51 bytes, D80); channel 29, bind entry `CTXGDT\0 1D 00`
@@ -62,6 +63,9 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         public var maxPacketSize: UInt16? = GDTWire.maxPacketSize
         /// Answer the host's opening `01` write with `02` (GDTWire, D80). `ICA_GDT_HANDSHAKE=0` turns it off.
         public var handshake = true
+        /// The file protocol (docs/76 §7.17, `files`): answer the host's GetData/OpenStream/Seek/Read/Release and
+        /// read the host's files. `ICA_GDT_FILES=0` turns it off (discovery only).
+        public var fileTransfer = true
         /// Answer the host's first write if it looks like an init (≤ `initMaxSize` bytes, before we sent anything).
         public var initReply: InitReply?
         public var initMaxSize = 128
@@ -87,6 +91,7 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
                 c.maxPacketSize = env["ICA_GDT_MAXPACKET"].flatMap { UInt16($0) }
             }
             if env["ICA_GDT_HANDSHAKE"] == "0" { c.handshake = false }
+            if env["ICA_GDT_FILES"] == "0" { c.fileTransfer = false }
             c.initReply = InitReply(environment: env["ICA_GDT_ECHO_INIT"])
             return c
         }
@@ -99,6 +104,8 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         /// One of our writes went out (a responder, `ICA_GDT_ECHO_INIT` or `send`).
         case sent(GDTHostWrite, reason: String)
         case log(String)
+        /// The file protocol (docs/76 §7.17).
+        case file(GDTFileEvent)
 
         public var description: String {
             switch self {
@@ -106,6 +113,7 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
             case .hostWrite(let w): return GDTHexLog.line(w)
             case .sent(let w, let reason): return GDTHexLog.line(w, direction: "→") + " (\(reason))"
             case .log(let text): return text
+            case .file(let e): return "files: \(e)"
             }
         }
     }
@@ -133,6 +141,11 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
     public static let historyCap = 4096
     public private(set) var sentCount = 0
     public private(set) var moduleBytes: [UInt8]?
+    /// Clipboard files both ways (docs/76 §7.17); fed with every whole host message when `config.fileTransfer`.
+    public let files = GDTFileTransfer()
+    private var reader = GDTMessageReader()
+    /// Our request seq: odd, shared by the opening replies and the file protocol (01, 03, 05, … [B]).
+    private var ownSeq: UInt32 = 1
 
     private let start: Date
     private let now: () -> Date
@@ -151,14 +164,15 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
             })
         }
         if config.handshake {
-            var nextSeq: UInt8 = 1
-            responders.append(Responder(name: "open reply") { write, _ in
+            responders.append(Responder(name: "open reply") { [unowned self] write, _ in
                 let b = write.bytes
                 guard b.count >= 8, b[0] == GDTWire.hostOpen else { return nil }
-                defer { nextSeq &+= 2 }
-                return [GDTWire.clientOpenReply, nextSeq] + b[2...]
+                return [GDTWire.clientOpenReply, UInt8(truncatingIfNeeded: self.takeSeq())] + b[2...]
             })
         }
+        files.send = { [unowned self] bytes, reason in self.send(bytes, reason: reason) }
+        files.takeSeq = { [unowned self] in self.takeSeq() }
+        files.emit = { [unowned self] event in self.onEvent(.file(event)) }
     }
 
     public func module(channel: UInt8, date: Date) -> [UInt8] {
@@ -189,6 +203,15 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
                 break
             }
         }
+        if config.fileTransfer {
+            for message in reader.push(write.bytes) { files.receive(message) }
+        }
+    }
+
+    /// The next odd seq of ours.
+    func takeSeq() -> UInt32 {
+        defer { ownSeq &+= 2 }
+        return ownSeq
     }
 
     /// Writes raw bytes on CTXGDT (discovery: a hello, or a hand-made reply).

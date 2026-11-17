@@ -517,7 +517,8 @@ default:
                                          ICA_GDT_MAXPACKET=N, ICA_WD_CREDVER=N, ICA_WD_EUKS=V[:M];
                                          ICA_STOCK_MODULES=<file>, ICA_STOCK_OURS=KEY,.., ICA_STOCK_UI=stock,
                                          ICA_STOCK_COMPRESS=0, ICA_STOCK_DROPCAPS=id,.., ICA_STUB_REPLY=NAME:hex,..,
-                                         ICA_NO_INPUT=1; docs/76 §6-7)
+                                         ICA_NO_INPUT=1; with ICA_GDT=1 the files go over CTXGDT both ways,
+                                         ICA_GDT_FILES=0 = log only, ICA_GDT_READSIZE=N; docs/76 §6-7, §7.17)
       icactl relay-modules <wd-C.log> <out>  recorded stock INIT_RESPONSE modules as an ICA_STOCK_MODULES file
                                          (UI module never written; keep the file in .session/)
                                          (ICA_STORE_MODE=native: launch through the native store API, docs/15)
@@ -1361,7 +1362,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
         "ICA_STOCK_NAMES", "ICA_GDT_AUDIO", "ICA_UI_VERSION", "ICA_UI_BUILD", "ICA_UI_PRODUCT", "ICA_WD_OSCAP", "ICA_WD_VCMASK",
         "ICA_WD_ECHO_CAPS", "ICA_WD_PRODUCT", "ICA_WD_TAIL", "ICA_TD_ADDR", "ICA_CLIENT_NAME", "ICA_WD_CAP1E",
         "ICA_GDT_MAXPACKET", "ICA_WD_CREDVER", "ICA_WD_EUKS", "ICA_STOCK_MODULES", "ICA_STOCK_OURS", "ICA_STOCK_UI",
-        "ICA_STOCK_COMPRESS", "ICA_STOCK_DROPCAPS", "ICA_STUB_REPLY", "ICA_NO_INPUT"]
+        "ICA_STOCK_COMPRESS", "ICA_STOCK_DROPCAPS", "ICA_STUB_REPLY", "ICA_NO_INPUT", "ICA_GDT_FILES", "ICA_GDT_READSIZE"]
         + env.keys.filter { $0.hasPrefix("ICA_MODNAME_") || $0.hasPrefix("ICA_MODVER_") || $0.hasPrefix("ICA_MODHOST_") }.sorted()).compactMap { key in env[key].map { "\(key)=\($0)" } }
     say("variant: " + (variant.isEmpty ? "(defaults)" : variant.joined(separator: " ")) +
         String(format: "; CLIP_INIT_REPLY word2 0x%04x tail %@", clipConfig.initReplyWord2, GDTHexLog.hex(clipConfig.initReplyTail)))
@@ -1398,33 +1399,20 @@ func runClipFilesTest(ica: ICAFile) async throws {
     let seamless = session.seamless
     let layout = config.logon.keyboardLayout
     var gdtLastHost: Date?
+    // E3 over CTXGDT: the host's descriptor and the files read into gdtInDir (removed at the end).
+    var gdtGroup: [ClipboardFileEntry]?
+    var gdtContents: [(index: UInt32, name: String?, sha: String, bytes: Int)] = []
+    var gdtFetchEnded = false
+    var gdtE3Armed = false
+    let gdtInDir = URL(fileURLWithPath: "/tmp/ica-clipfiles-\(runID)-in", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: gdtInDir) }
     if let gdt = session.gdt {
         let limit = gdt.config.logLimit
-        // docs/76 §7.16 (D82): answer the host's GetData (cmd 0x14) for FileGroupDescriptorW (ctxFormat 2, lindex -1,
-        // TYMED_HGLOBAL) with our FILEGROUPDESCRIPTORW. ICA_GDT_GETDATA=<style> picks the guessed reply layout
-        // (header `cmd u8, seq u32, total length u16` as in every host message):
-        //   a: 15, request seq, status u32 0, length u32, data       b: as a, but our own odd seq
-        //   c: 15, request seq, dataObj u64 (echoed), status, length, data
-        //   d: 15, request seq, status u32 0, data (no length)
-        if let style = env["ICA_GDT_GETDATA"], let descriptor = try? ClipboardFileGroup.build(files.map { $0.entry }) {
-            let data = [UInt8](descriptor)
-            gdt.responders.append(GDTEngine.Responder(name: "GetData FGDW reply (\(style))") { [unowned gdt] write, _ in
-                let b = write.bytes
-                guard b.count >= 31, b[0] == 0x14, b[15] == 2, b[16] == 0, b[17] == 0, b[18] == 0 else { return nil }
-                func u32(_ v: UInt32) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * $0)) & 0xFF) } }
-                let reqSeq = Array(b[1...4])
-                let ownSeq = u32(UInt32(gdt.sentCount * 2 + 1))
-                var body: [UInt8]
-                switch style {
-                case "b": body = u32(0) + u32(UInt32(data.count)) + data
-                case "c": body = Array(b[7...14]) + u32(0) + u32(UInt32(data.count)) + data
-                case "d": body = u32(0) + data
-                default: body = u32(0) + u32(UInt32(data.count)) + data
-                }
-                let total = 7 + body.count
-                return [0x15] + (style == "b" ? ownSeq : reqSeq) + [UInt8(total & 0xFF), UInt8(total >> 8)] + body
-            })
-            say("CTXGDT GetData reply style \(style), FILEGROUPDESCRIPTORW \(data.count) B")
+        // docs/76 §7.17: the file protocol answers the host's requests from the Mac files offered before Ctrl+V (E2)
+        // and reads the host's files into gdtInDir on E3. ICA_GDT_READSIZE=N: our Read count (default 65536).
+        if let text = env["ICA_GDT_READSIZE"] {
+            guard let n = Int(text), n > 0 else { fail("ICA_GDT_READSIZE must be a positive integer") }
+            gdt.files.readSize = n
         }
         gdt.onEvent = { event in
             switch event {
@@ -1435,6 +1423,16 @@ func runClipFilesTest(ica: ICAFile) async throws {
                 gdtLog?.write(GDTHexLog.dump(w, direction: "→", limit: limit) + ["    (\(reason))"])
             case .module, .log:
                 gdtLog?.write(event.description)
+            case .file(let e):
+                gdtLog?.write(event.description)
+                switch e {
+                case .fileGroup(let entries): gdtGroup = entries
+                case .receivedFile(let i, let name, let url, let n):
+                    let sha = (try? Data(contentsOf: url)).map(sha256) ?? "unreadable"
+                    gdtContents.append((UInt32(i), name, sha, n))
+                case .fetchDone, .fetchFailed: gdtFetchEnded = true
+                default: break
+                }
             }
             say("gdt: \(event)")
         }
@@ -1472,6 +1470,11 @@ func runClipFilesTest(ica: ICAFile) async throws {
         say("clip: \(event)")
         switch event {
         case .ready: ready = true
+        case .hostFormats(let ids):
+            if gdtE3Armed, let gdt = session.gdt, gdt.config.fileTransfer, let id = clip.registeredId(ClipboardFileFormat.groupDescriptorName), ids.contains(id) {
+                gdtE3Armed = false
+                gdt.files.fetch(systemFormat: UInt32(id), into: gdtInDir)
+            }
         case .hostFileRequest(_, _, _, let served, _, _):
             fileRequests += 1
             if served { fileServed += 1 }
@@ -1690,7 +1693,10 @@ func runClipFilesTest(ica: ICAFile) async throws {
             if inside == folder {
                 note("in %TEMP%\\\(folder)")
                 // 3. E2: Mac → session paste of the files.
-                await onSession(session) { fileRequests = 0; fileServed = 0 }
+                await onSession(session) {
+                    fileRequests = 0; fileServed = 0
+                    session.gdt?.files.offer(GDTFileSource(files: files))
+                }
                 session.clipboardAnnounce(ClipboardSnapshot(content: ClipboardContent(files: files)))
                 try await Task.sleep(nanoseconds: 500_000_000)
                 let gdtBefore = await onSession(session) { session.gdt?.statistics.packets ?? 0 }
@@ -1700,7 +1706,8 @@ func runClipFilesTest(ica: ICAFile) async throws {
                     _ = await waitFor(session, 60) {
                         let quiet = gdtLastHost.map { Date().timeIntervalSince($0) >= 15 } ?? false
                         let seen = (session.gdt?.statistics.packets ?? 0) > gdtBefore
-                        return fileServed >= files.count + 1 || protocolErrors > 0 || (seen && quiet)
+                        let gdtServed = session.gdt?.files.servedFiles.count ?? 0
+                        return fileServed >= files.count + 1 || gdtServed >= files.count || protocolErrors > 0 || (seen && quiet)
                     }
                 } else {
                     _ = await waitFor(session, 30) { fileServed >= files.count + 1 || protocolErrors > 0 }
@@ -1712,13 +1719,32 @@ func runClipFilesTest(ica: ICAFile) async throws {
                 if let gdt = session.gdt {
                     let stats = await onSession(session) { gdt.statistics }
                     note("E2 GDT: \(stats.packets - gdtBefore) host GDT packets after Ctrl+V; run so far: \(stats.summary)")
+                    let servedFiles = await onSession(session) { gdt.files.servedFiles }
+                    note("E2 GDT: \(servedFiles.count) of \(files.count) files served completely over CTXGDT")
+                    if servedFiles.count == files.count { pasted = true }
                 }
-                pasted = served > 1
+                pasted = pasted || served > 1
                 // 4. E3: session → Mac copy of the folder's contents, with SHA-256 compare.
-                await onSession(session) { hostGroup = nil; hostContents = []; clip.fetchFileContents = true }
+                // With the GDT file protocol the descriptor and contents come over CTXGDT (as the stock client does), not
+                // CTXCLIP: the host list with FileGroupDescriptorW starts gdt.files.fetch.
+                let overGDT = session.gdt?.config.fileTransfer ?? false
+                await onSession(session) {
+                    hostGroup = nil; hostContents = []; clip.fetchFileContents = true
+                    gdtGroup = nil; gdtContents = []; gdtFetchEnded = false
+                    if overGDT { clip.fetchFileGroup = false; gdtE3Armed = true }
+                }
                 try await keys("ctrl+a", wait: 1)
                 try await keys("ctrl+c", wait: 1)
-                _ = await waitFor(session, 30) { hostGroup != nil && hostContents.count >= (hostGroup?.filter { !$0.isDirectory }.count ?? 1) }
+                if overGDT {
+                    _ = await waitFor(session, 60) { gdtFetchEnded }
+                    await onSession(session) {
+                        gdtE3Armed = false; clip.fetchFileGroup = true
+                        if !gdtFetchEnded { session.gdt?.files.cancelFetch() }
+                        hostGroup = gdtGroup; hostContents = gdtContents
+                    }
+                } else {
+                    _ = await waitFor(session, 30) { hostGroup != nil && hostContents.count >= (hostGroup?.filter { !$0.isDirectory }.count ?? 1) }
+                }
                 let (group, contents) = await onSession(session) { (hostGroup, hostContents) }
                 if let group {
                     note("E3 descriptor: " + group.map { "\"\($0.name)\" \($0.size) B" }.joined(separator: ", "))
@@ -1729,7 +1755,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
                         if match { compared = true }
                     }
                 } else {
-                    note("E3: no FileGroupDescriptorW from the host within 30 s")
+                    note("E3: no FileGroupDescriptorW from the host" + (overGDT ? " over CTXGDT within 60 s" : " within 30 s"))
                 }
                 // 5. Cleanup: up to %TEMP%, select this run's folder by name, check the selection, Shift+Del, confirm.
                 try await keys("backspace", wait: 2.5)
@@ -1802,6 +1828,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     say("end: \(ending)")
     // One line for scripts/gdt-matrix.sh.
     let (gdtPackets, requests, served) = await onSession(session) { (session.gdt?.statistics.packets, fileRequests, fileServed) }
+    let (gdtServedFiles, gdtReceived) = await onSession(session) { (session.gdt?.files.servedFiles.count, gdtContents.count) }
     let ctl = await onSession(session) { () -> String in
         guard let d = session.control?.diagnostics else { return "off" }
         func ids(_ caps: [ControlCapability]) -> String { caps.map { String(format: "%02x", $0.id) }.joined(separator: ",") }
@@ -1815,7 +1842,7 @@ func runClipFilesTest(ica: ICAFile) async throws {
     let stubWrites = await onSession(session) {
         stubs.filter { $0.hostWrites > 0 }.map { "\($0.label):\($0.hostWrites)/\($0.hostBytes)B" }.joined(separator: ",")
     }
-    say("MATRIX gdt_host_packets=\(gdtPackets.map(String.init) ?? "off") file_requests=\(requests) file_served=\(served) ctl=\(ctl) " +
+    say("MATRIX gdt_host_packets=\(gdtPackets.map(String.init) ?? "off") gdt_served=\(gdtServedFiles.map(String.init) ?? "off") gdt_received=\(gdtReceived) file_requests=\(requests) file_served=\(served) ctl=\(ctl) " +
         "cdm=\(cdmConfig == nil ? "off" : "on") cdm_connect=\(await onSession(session) { cdmConnect }) " +
         "ch_writes=[\(await onSession(session) { channelWrites.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",") })] " +
         "stubs=\(stubs.count) stub_writes=[\(stubWrites)] " +
