@@ -194,6 +194,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func signIn() { loadResources(forceLogon: true) }
 
+    /// Ends the gateway/store session at the servers and forgets the cookies (security review L-04); open sessions stay.
+    @MainActor @objc private func signOut() {
+        guard let store else { return }
+        Task { @MainActor in
+            await store.signOut()
+            launcher?.setResources([])
+            launcher?.setStatus(loc("Signed out.", "Abgemeldet."))
+        }
+    }
+
     @MainActor @objc private func showSettings() {
         guard let store else { return }
         if settings == nil { settings = SettingsWindowController(service: store) }
@@ -883,6 +893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let fileMenu = submenu(loc("File", "Ablage"))
         add(fileMenu, loc("Sign In…", "Anmelden…"), #selector(signIn))
+        add(fileMenu, loc("Sign Out", "Vom Konto abmelden"), #selector(signOut))
         fileMenu.addItem(.separator())
         add(fileMenu, loc("Close", "Schließen"), #selector(NSWindow.performClose(_:)), "w")
 

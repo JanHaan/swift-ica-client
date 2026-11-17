@@ -183,6 +183,10 @@ case "list":
         fail("\(error)")
     }
 
+case "signout":
+    // Security review L-04: server-side sign-out (Authentication/Logoff, /cgi/logout), then the jar (SignOut.swift).
+    await runSignOut(args)
+
 case "launch":
     // icactl launch <resource name>  — saves the ICA file to .session/last.ica and prints it redacted. The saved file is
     // the full, single-use file for a stock-client run: its consumer deletes it after use (security review L-12).
@@ -664,6 +668,8 @@ case "native":
 default:
     print("""
     usage:
+      icactl signout [--verify]          end the store and gateway sessions at the servers, delete the jar; --verify:
+                                         the old cookies must be refused afterwards (security review L-04)
       icactl login                       nFactor logon at the gateway, saves cookies in .session/; with
                                          CITRIX_STOREFRONT_URL (no gateway, docs/16): explicit logon at the store
                                          (CITRIX_USERNAME, CITRIX_PASSWORD, CITRIX_DOMAIN); http:// allowed for a lab

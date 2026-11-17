@@ -355,11 +355,22 @@ final class StoreService: @unchecked Sendable {
         try? http.loadCookies(from: Paths.cookieFile)
     }
 
-    /// With "Forget All Saved Credentials": the signed-in state goes too (cookie jar in memory and on disk).
-    func forgetSession() {
-        http.clearCookies(deletingFile: Paths.cookieFile)
-        vlog("forgot the session cookies")
+    /// File > Sign Out, and "Forget All Saved Credentials": the store and gateway sessions end at the servers, then the
+    /// cookie jar goes, in memory and on disk (security review L-03, L-04). Open ICA sessions are not touched.
+    @discardableResult
+    func signOut() async -> [AccountSignOut.Step] {
+        guard !Demo.enabled else { return [] }
+        let signedIn = gateway != nil && !http.cookieNames.isEmpty
+        let steps = signedIn
+            ? await AccountSignOut.run(http: http, storeBase: store?.base, gateway: accountKind == .storeFront ? nil : gateway,
+                                       cookieFile: Paths.cookieFile)
+            : { http.clearCookies(deletingFile: Paths.cookieFile); return [] }()
+        vlog("sign-out: " + (steps.isEmpty ? "not signed in" : steps.map(\.description).joined(separator: "; ")) + "; cookies deleted")
+        return steps
     }
+
+    /// "Forget All Saved Credentials": sign out as well (asynchronously; the jar is gone when it returns).
+    func forgetSession() { Task { await signOut() } }
 
     /// Changes the account address (kind nil: probe at the next `resolveAccount`) and stores it in the settings.
     func setGateway(_ url: URL, kind: AccountKind? = nil) {
