@@ -9,7 +9,7 @@ if git -C "$root" rev-parse --git-dir >/dev/null 2>&1 && git -C "$root" rev-pars
     build="$(git -C "$root" rev-list --count HEAD 2>/dev/null || echo 1)"
     commit="$(git -C "$root" rev-parse --short HEAD 2>/dev/null || true)"
     if [ -n "$commit" ]; then
-        [ -z "$(git -C "$root" status --porcelain 2>/dev/null)" ] || commit="$commit-dirty"
+        [ -z "$(git -C "$root" status --porcelain 2>/dev/null | grep -v "\.DS_Store$")" ] || commit="$commit-dirty"
         commit_xml="<key>ICAGitCommit</key><string>$commit</string>"
     fi
 fi

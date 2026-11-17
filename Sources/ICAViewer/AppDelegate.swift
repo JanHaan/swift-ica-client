@@ -98,6 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         startSystemHooks()
         configureAutoReconnect()
+        // Clipboard file staging folders of earlier runs that are gone (D90).
+        ClipboardFilesBridge.launchCleanup()
         vlog("helper apps: \(HelperManager.enabled ? "on" : "off") (\(HelperManager.setting.source.rawValue))")
         if HelperManager.enabled {
             HelperManager.shared.onCommand = { [weak self] command, controller, cancelled in
@@ -655,6 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let open = sessions.filter { !$0.ended }
         guard !open.isEmpty else {
             connectionCenter?.close()
+            ClipboardFilesBridge.quitting = true
             return .terminateNow
         }
         if terminating {
@@ -666,6 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if initiator == .selftest || initiator == .hold {
             connectionCenter?.close()
             terminating = true
+            ClipboardFilesBridge.quitting = true
             vlog("quit (automated): fresh logons are logged off, reconnects disconnected (\(open.count) session(s))")
             for c in open {
                 if c.freshLogon { c.logoff() } else { let s = c.session; Task { await s.close() } }
@@ -689,6 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         vlog("quit: \(action.rawValue) (\(QuitAction.stored == .ask ? "chosen" : "remembered"))")
         terminating = true
+        ClipboardFilesBridge.quitting = true
         if action == .disconnect {
             vlog("quit: disconnecting \(open.count) session(s)")
             for c in open { let s = c.session; Task { await s.close() } }
@@ -714,6 +719,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Helper apps go with the main process (docs/99 §5); they would also exit on its death.
     func applicationWillTerminate(_ notification: Notification) {
         if HelperManager.enabled { HelperManager.shared.quitAll() }
+        // Promised session files leave the pasteboard, staging folders are removed (D90).
+        if !Demo.enabled { ClipboardFilesBridge.quitCleanup() }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

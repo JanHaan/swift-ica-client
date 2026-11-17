@@ -218,5 +218,21 @@ import Testing
         ])
         #expect(mapped == ["aumid:Microsoft.Windows.Explorer": "Files App"])
     }
-}
 
+    /// Live: the store showed "Browser App", the host named the app by its farm-internal name; `InitialProgram`
+    /// carries that internal name as `#<name>`.
+    @Test func internalPublishedNameFromInitialProgramMatchesTheLaunch() {
+        #expect(AppNaming.launchAlias(initialProgram: "#Browser App_1") == "Browser App_1")
+        #expect(AppNaming.launchAlias(initialProgram: " # ") == nil)
+        #expect(AppNaming.launchAlias(initialProgram: "C:\\Windows\\explorer.exe") == nil)
+        #expect(AppNaming.mayBeLaunchedApp(executable: nil, publishedName: "Browser App_1", resource: "Browser App", hint: nil,
+                                           alias: "Browser App_1", launchStarted: true))
+        #expect(!AppNaming.mayBeLaunchedApp(executable: nil, publishedName: "Other App", resource: "Browser App", hint: nil,
+                                            alias: "Browser App_1", launchStarted: true))
+        #expect(!AppNaming.mayBeLaunchedApp(executable: nil, publishedName: "Browser App_1", resource: "Browser App", hint: nil,
+                                            alias: "Browser App_1", launchStarted: false))
+        let pending = [AwaitedLaunch(resource: "Browser App", alias: "Browser App_1", startedAt: Date(timeIntervalSince1970: 0), ownLaunch: true)]
+        #expect(AppNaming.firstMatch(pending, key: "app:Browser App_1", executable: nil, publishedName: "Browser App_1",
+                                     at: Date(timeIntervalSince1970: 2)) == 0)
+    }
+}

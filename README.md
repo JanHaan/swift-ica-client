@@ -68,6 +68,10 @@ The calculator above is a live session; the other images use the app's demo mode
   for permission on first use, and a menu-bar item disables the microphone for the current session.
   Verified live.
 - Clipboard: text works both ways in the app (verified live).
+- Copying files through the clipboard, both ways: copy in Finder and paste in Explorer, or copy in
+  Explorer and paste in Finder (folders too, up to 200 MB per paste from the session). Settings ›
+  Clipboard › "Copy files through the clipboard", on by default. Built; the protocol is verified
+  live in the headless test, the app itself awaits a live check.
 - Report a Problem (Help menu): builds a scrubbed report and a prefilled GitHub issue; see
   [Reporting problems](#reporting-problems).
 

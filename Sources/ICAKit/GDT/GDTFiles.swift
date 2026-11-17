@@ -39,6 +39,10 @@ extension GDTWire {
     public static let statusOK: UInt32 = 0, statusFalse: UInt32 = 1
     public static let statusFormat: UInt32 = 0x8004_0064   // DV_E_FORMATETC
     public static let statusInvalid: UInt32 = 0x8007_0057  // E_INVALIDARG
+    /// A file we offered that cannot be read now (deleted, permissions, swapped) [P].
+    public static let statusAccessDenied: UInt32 = 0x8007_0005  // E_ACCESSDENIED
+    /// A read that failed after its begin message promised a length [P; the host's reaction is untested].
+    public static let statusFail: UInt32 = 0x8000_4005  // E_FAIL
 
     /// One message's bytes: header with `total` = 7 + body.
     public static func message(_ command: UInt8, seq: UInt32, _ body: [UInt8]) -> [UInt8] {
@@ -220,14 +224,18 @@ struct LEBytes {
 public struct GDTFileSource {
     public var entries: [ClipboardFileEntry]
     public var read: (_ index: Int, _ offset: UInt64, _ length: Int) -> Data?
+    /// Whether file `index` can be read now (OpenStream refuses it otherwise); nil = always.
+    public var check: ((_ index: Int) -> Bool)?
 
-    public init(entries: [ClipboardFileEntry], read: @escaping (_ index: Int, _ offset: UInt64, _ length: Int) -> Data?) {
+    public init(entries: [ClipboardFileEntry], check: ((_ index: Int) -> Bool)? = nil,
+                read: @escaping (_ index: Int, _ offset: UInt64, _ length: Int) -> Data?) {
         self.entries = entries
+        self.check = check
         self.read = read
     }
 
     public init(files: [ClipboardLocalFile]) {
-        self.init(entries: files.map(\.entry)) { i, offset, length in
+        self.init(entries: files.map(\.entry), check: { i in i < files.count && files[i].isReadable }) { i, offset, length in
             i < files.count ? files[i].read(offset: offset, length: length) : nil
         }
     }
@@ -251,11 +259,15 @@ public enum GDTFileEvent: CustomStringConvertible {
     case hostRead(stream: UInt64, index: Int?, requested: UInt32, returned: Int, position: UInt64)
     /// All bytes of file `index` went out on one stream.
     case servedFile(index: Int, name: String, bytes: Int)
+    /// A host Read of file `index` failed (not readable, or shorter than announced).
+    case serveFailed(index: Int, why: String)
     case hostRelease(stream: UInt64, known: Bool)
     // Session → Mac (we read the host's files)
     case fetchStarted(systemFormat: UInt32)
     case fileGroup([ClipboardFileEntry])
     case receivedFile(index: Int, name: String, url: URL, bytes: Int)
+    /// One file of a fetch failed; the fetch goes on with the next file.
+    case fileFailed(index: Int, why: String)
     case fetchFailed(String)
     case fetchDone(files: Int)
     case unexpected(GDTMessage, why: String)
@@ -273,10 +285,12 @@ public enum GDTFileEvent: CustomStringConvertible {
         case .hostRead(let s, let index, let requested, let returned, let pos):
             return String(format: "← Read stream %016llx", s) + " file \(index.map(String.init) ?? "?") count \(requested) → \(returned) B, position \(pos)"
         case .servedFile(let i, let name, let n): return "served file \(i) \"\(name)\" \(n) B completely"
+        case .serveFailed(let i, let why): return "serving file \(i) failed: \(why)"
         case .hostRelease(let s, let known): return String(format: "← Release stream %016llx", s) + (known ? "" : " (unknown)")
         case .fetchStarted(let f): return "→ GetData FileGroupDescriptorW (systemFormat 0x\(String(f, radix: 16)))"
         case .fileGroup(let e): return "← FILEGROUPDESCRIPTORW \(e.count) entries: " + e.map { "\"\($0.name)\" \($0.isDirectory ? "dir" : "\($0.size) B")" }.joined(separator: ", ")
         case .receivedFile(let i, let name, let url, let n): return "received file \(i) \"\(name)\" \(n) B → \(url.path)"
+        case .fileFailed(let i, let why): return "file \(i) failed: \(why)"
         case .fetchFailed(let why): return "fetch failed: \(why)"
         case .fetchDone(let n): return "fetch done: \(n) files"
         case .unexpected(let m, let why): return String(format: "unexpected cmd 0x%02x seq %u (%@)", m.command, m.seq, why)
@@ -284,24 +298,63 @@ public enum GDTFileEvent: CustomStringConvertible {
     }
 }
 
+/// What a fetch reports to its own observer (`GDTFileTransfer.fetch(_:systemFormat:observer:)`), on the session queue.
+/// Exactly one of `done` / `failed` ends it.
+public enum GDTFetchUpdate: Sendable, Equatable {
+    case group([ClipboardFileEntry])
+    /// Bytes of file `index` written so far.
+    case progress(index: Int, bytes: Int)
+    case file(index: Int, url: URL, bytes: Int)
+    case fileFailed(index: Int, why: String)
+    case done(files: Int)
+    case failed(String)
+}
+
+/// What a fetch does after the host's FILEGROUPDESCRIPTORW.
+public enum GDTFetchMode: Sendable {
+    /// Every file (at most `maxFiles`, each at most `maxFileSize`) as `<directory>/<last path component>`, 0600
+    /// (icactl cliptest-files).
+    case flat(URL)
+    /// Nothing: the descriptor is the result (the host list arrived; the contents come at the paste).
+    case descriptor
+    /// The files of `targets` (entry index → a new file's URL; its folder must exist). With `expect`, the descriptor
+    /// must list the same names and sizes, else the fetch fails (the host clipboard changed since).
+    case files(targets: [Int: URL], expect: [ClipboardFileEntry]?)
+}
+
 /// The file protocol of CTXGDT on top of `GDTEngine` (docs/76 §7.17). Mac → session: answers the host's GetData
-/// (FileGroupDescriptorW), OpenStream, Seek, Read and Release from `source`. Session → Mac: `fetch` asks for the
-/// host's descriptor, then opens, reads and releases one stream per file and writes the files into a directory.
-/// Call everything on the session queue.
+/// (FileGroupDescriptorW), OpenStream, Seek, Read and Release from `source`; a Read's data goes out in slices while
+/// the transport backlog is low (`backlog`), and host requests that arrive meanwhile wait their turn. Session → Mac:
+/// `fetch` asks for the host's descriptor, then opens, reads and releases one stream per file, written to disk as it
+/// arrives. A fetch with no host answer for `stallTimeout` fails (needs `scheduleAfter`). Call everything on the
+/// session queue.
 public final class GDTFileTransfer {
     var send: ([UInt8], String) -> Void = { _, _ in }
     var takeSeq: () -> UInt32 = { 1 }
     var emit: (GDTFileEvent) -> Void = { _ in }
 
+    /// Runs a block on the session queue after a delay (stall timeout, output pacing). Without it nothing times out
+    /// and output is never paced.
+    public var scheduleAfter: ((TimeInterval, @escaping () -> Void) -> Void)?
+    /// Unacknowledged bytes in the transport; served file data waits while it is above `backlogLimit`.
+    public var backlog: (() -> Int)?
+    public var backlogLimit = 2 << 20
     /// Largest message we write (each fits one WD virtual write at the default 1460-byte out buffer).
     public var maxMessage = 1400
+    /// File bytes read from disk per slice when serving a host Read.
+    public var serveSlice = 60 << 10
     /// Read count per request when reading the host's files. The stock client asked the file size [B].
     public var readSize = 65536
-    /// Bytes accepted per host file (larger ones are dropped).
+    /// Bytes accepted per host file (larger ones are skipped in `.flat`, fail in `.files`).
     public var maxFileSize = 64 << 20
     public var maxFiles = 16
+    /// A fetch fails when the host has not answered for this long [P].
+    public var stallTimeout: TimeInterval = 20
     /// OpenStream's file-index offset, parsing and building.
     public var indexOffset: Int? = GDTWire.openStreamIndexOffset
+    /// Received files (`.files` mode): permissions and the quarantine agent (nil: no quarantine attribute).
+    public var filePermissions: mode_t = 0o644
+    public var quarantineAgent: String? = "ICAViewer"
 
     // Mac → session
     public private(set) var source: GDTFileSource?
@@ -311,49 +364,84 @@ public final class GDTFileTransfer {
     private var opens = 0
     /// File indices whose bytes went out completely at least once.
     public private(set) var servedFiles: Set<Int> = []
+    /// A host Read being answered in slices; host requests wait in `held` meanwhile.
+    private struct Serve { var seq: UInt32; var stream: UInt64; var index: Int; var requested: UInt32; var left: Int; var position: UInt64; var sent: Int }
+    private var serving: Serve?
+    private var held: [GDTMessage] = []
+    private var pumpScheduled = false
+    public var isServing: Bool { serving != nil }
 
     // Session → Mac
     private enum Step: Equatable { case descriptor, open(Int), read(Int), release(Int) }
     private struct Fetch {
+        var id: Int
+        var mode: GDTFetchMode
+        var observer: ((GDTFetchUpdate) -> Void)?
         var systemFormat: UInt32
-        var directory: URL
         var dataObj: UInt64
         var seq: UInt32 = 0
         var step = Step.descriptor
         var entries: [ClipboardFileEntry] = []
         var chunk: [UInt8] = []
         var expected = 0
+        var requested: UInt32 = 0
         var stream: UInt64 = 0
-        var file: [UInt8] = []
+        var output: FileHandle?
+        var outputURL: URL?
+        var written = 0
+        /// Why the current file is given up (its stream is released, the file is not kept).
+        var abandon: String?
         var lastCount: UInt32 = 0
         var received = 0
     }
     private var fetch: Fetch?
+    private var fetchCount = 0
+    /// Host activity for our fetch (the stall watchdog compares it).
+    private var activity = 0
+    /// Seqs of requests whose fetch ended: their replies are dropped quietly (an OpenStream that still succeeds is
+    /// released).
+    private var abandonedSeqs: Set<UInt32> = []
     public var isFetching: Bool { fetch != nil }
     public private(set) var receivedFiles: [URL] = []
 
     public init() {}
 
-    /// The Mac clipboard's files (nil: none; GetData is then refused).
+    /// The Mac clipboard's files (nil: none; GetData is then refused). A Read being served for the old files ends with
+    /// a failure status.
     public func offer(_ source: GDTFileSource?) {
         self.source = source
         streams = [:]
         opens = 0
         servedFiles = []
+        // The requests that waited behind it then meet the new files (their old streams are unknown now).
+        if serving != nil { finishServe(status: GDTWire.statusFail, why: "the Mac clipboard changed") }
     }
 
     public func receive(_ m: GDTMessage) {
+        typealias C = GDTWire.Command
+        switch m.command {
+        case C.getData, C.openStream, C.seek, C.read, C.release:
+            // One host request at a time: those behind a Read in progress wait for its end message.
+            if serving != nil {
+                guard held.count < 256 else { return emit(.unexpected(m, why: "too many host requests waiting")) }
+                return held.append(m)
+            }
+            hostRequest(m)
+        case C.getDataBegin, C.getDataData, C.getDataEnd, C.openStreamReply, C.readBegin, C.readData, C.readEnd, C.releaseReply:
+            reply(m)
+        case C.open, C.openReply, C.openAck: break
+        default: emit(.unexpected(m, why: "unknown command"))
+        }
+    }
+
+    private func hostRequest(_ m: GDTMessage) {
         typealias C = GDTWire.Command
         switch m.command {
         case C.getData: hostGetData(m)
         case C.openStream: hostOpenStream(m)
         case C.seek: hostSeek(m)
         case C.read: hostRead(m)
-        case C.release: hostRelease(m)
-        case C.getDataBegin, C.getDataData, C.getDataEnd, C.openStreamReply, C.readBegin, C.readData, C.readEnd, C.releaseReply:
-            reply(m)
-        case C.open, C.openReply, C.openAck: break
-        default: emit(.unexpected(m, why: "unknown command"))
+        default: hostRelease(m)
         }
     }
 
@@ -374,14 +462,21 @@ public final class GDTFileTransfer {
     private func hostOpenStream(_ m: GDTMessage) {
         let found = GDTWire.openStreamIndex(m.body, indexOffset: indexOffset)
         var stream: UInt64?
+        var status = GDTWire.statusInvalid
         if let found, let source, Int(found.index) < source.entries.count, !source.entries[Int(found.index)].isDirectory {
-            nextStream &+= 0x10
-            streams[nextStream] = Stream(index: Int(found.index), position: 0)
-            stream = nextStream
+            if source.check?(Int(found.index)) ?? true {
+                nextStream &+= 0x10
+                streams[nextStream] = Stream(index: Int(found.index), position: 0)
+                stream = nextStream
+                status = GDTWire.statusOK
+            } else {
+                status = GDTWire.statusAccessDenied
+                emit(.serveFailed(index: Int(found.index), why: "not readable any more"))
+            }
         }
         opens += 1
         emit(.hostOpenStream(seq: m.seq, index: found?.index, indexOffset: found?.offset, stream: stream, body: m.body))
-        send(GDTWire.openStreamReply(seq: m.seq, status: stream == nil ? GDTWire.statusInvalid : GDTWire.statusOK, stream: stream ?? 0), "OpenStream reply")
+        send(GDTWire.openStreamReply(seq: m.seq, status: status, stream: stream ?? 0), "OpenStream reply")
     }
 
     private func hostSeek(_ m: GDTMessage) {
@@ -404,28 +499,92 @@ public final class GDTFileTransfer {
         send(GDTWire.seekReply(seq: m.seq, stream: s, status: position == nil ? GDTWire.statusInvalid : GDTWire.statusOK, position: position ?? 0), "Seek reply")
     }
 
+    /// Read: begin (the length: what is left of the file, at most `count`), the data in slices, end. The first slice is
+    /// read before the begin goes out, so a file that cannot be read is refused with an error status and no length.
     private func hostRead(_ m: GDTMessage) {
         guard m.body.count >= 12 else { return emit(.unexpected(m, why: "Read body \(m.body.count) B")) }
         let s = m.handle
         let count = LEBytes.u32(m.body, 8)
-        guard var stream = streams[s], let source else {
+        guard let stream = streams[s], let source else {
             emit(.hostRead(stream: s, index: nil, requested: count, returned: 0, position: 0))
             for r in GDTWire.readReply(seq: m.seq, stream: s, data: [], status: GDTWire.statusInvalid, maxMessage: maxMessage) { send(r, "Read reply") }
             return
         }
         let entry = source.entries[stream.index]
-        let want = Int(min(UInt64(count), entry.size &- min(stream.position, entry.size), UInt64(maxFileSize)))
-        let data = want > 0 ? source.read(stream.index, stream.position, want).map { [UInt8]($0) } : []
-        let before = stream.position
-        stream.position += UInt64(data?.count ?? 0)
-        streams[s] = stream
-        emit(.hostRead(stream: s, index: stream.index, requested: count, returned: data?.count ?? 0, position: stream.position))
-        for r in GDTWire.readReply(seq: m.seq, stream: s, data: data ?? [], status: data == nil ? GDTWire.statusInvalid : GDTWire.statusOK,
-                                   maxMessage: maxMessage) { send(r, "Read reply") }
-        if let data, !data.isEmpty, before < entry.size, stream.position >= entry.size, !servedFiles.contains(stream.index) {
-            servedFiles.insert(stream.index)
-            emit(.servedFile(index: stream.index, name: entry.name, bytes: Int(entry.size)))
+        let want = Int(min(UInt64(count), entry.size &- min(stream.position, entry.size)))
+        guard want > 0 else {
+            emit(.hostRead(stream: s, index: stream.index, requested: count, returned: 0, position: stream.position))
+            for r in GDTWire.readReply(seq: m.seq, stream: s, data: [], maxMessage: maxMessage) { send(r, "Read reply") }
+            return
         }
+        guard let first = source.read(stream.index, stream.position, min(want, serveSlice)), !first.isEmpty else {
+            emit(.hostRead(stream: s, index: stream.index, requested: count, returned: 0, position: stream.position))
+            emit(.serveFailed(index: stream.index, why: "not readable"))
+            for r in GDTWire.readReply(seq: m.seq, stream: s, data: [], status: GDTWire.statusAccessDenied, maxMessage: maxMessage) { send(r, "Read reply") }
+            return
+        }
+        var begin = LEBytes(); begin.u64(s); begin.u32(UInt32(want))
+        send(GDTWire.message(GDTWire.Command.readBegin, seq: m.seq, begin.bytes), "Read reply")
+        serving = Serve(seq: m.seq, stream: s, index: stream.index, requested: count, left: want, position: stream.position, sent: 0)
+        sendSlice([UInt8](first))
+        pumpServe()
+    }
+
+    private func sendSlice(_ bytes: [UInt8]) {
+        guard var job = serving else { return }
+        let part = bytes.count > job.left ? Array(bytes.prefix(job.left)) : bytes
+        for piece in GDTWire.chunks(part, room: maxMessage - GDTWire.headerSize - 10) {
+            var c = LEBytes(); c.u64(job.stream); c.u16(UInt16(piece.count))
+            send(GDTWire.message(GDTWire.Command.readData, seq: job.seq, c.bytes + piece), "Read reply")
+        }
+        job.left -= part.count
+        job.position += UInt64(part.count)
+        job.sent += part.count
+        serving = job
+    }
+
+    private var backlogHigh: Bool {
+        guard let backlog, scheduleAfter != nil else { return false }
+        return backlog() > backlogLimit
+    }
+
+    private func pumpServe() {
+        while let job = serving {
+            if job.left == 0 { return finishServe(status: GDTWire.statusOK, why: nil) }
+            if backlogHigh { return schedulePump() }
+            guard let data = source?.read(job.index, job.position, min(job.left, serveSlice)), !data.isEmpty else {
+                return finishServe(status: GDTWire.statusFail, why: "the file ended after \(job.position) B or could not be read")
+            }
+            sendSlice([UInt8](data))
+        }
+    }
+
+    private func schedulePump() {
+        guard !pumpScheduled, let scheduleAfter else { return }
+        pumpScheduled = true
+        scheduleAfter(0.05) { [weak self] in
+            self?.pumpScheduled = false
+            self?.pumpServe()
+        }
+    }
+
+    /// The end message of the Read being served; then the host requests that waited.
+    private func finishServe(status: UInt32, why: String?) {
+        guard let job = serving else { return }
+        serving = nil
+        var end = LEBytes(); end.u64(job.stream); end.u32(status)
+        send(GDTWire.message(GDTWire.Command.readEnd, seq: job.seq, end.bytes), "Read reply")
+        if var stream = streams[job.stream] {
+            stream.position = job.position
+            streams[job.stream] = stream
+        }
+        emit(.hostRead(stream: job.stream, index: job.index, requested: job.requested, returned: job.sent, position: job.position))
+        if let why { emit(.serveFailed(index: job.index, why: why)) }
+        if status == GDTWire.statusOK, let entry = source?.entries[safe: job.index], job.position >= entry.size, !servedFiles.contains(job.index) {
+            servedFiles.insert(job.index)
+            emit(.servedFile(index: job.index, name: entry.name, bytes: Int(entry.size)))
+        }
+        while serving == nil, !held.isEmpty { hostRequest(held.removeFirst()) }
     }
 
     private func hostRelease(_ m: GDTMessage) {
@@ -445,32 +604,89 @@ public final class GDTFileTransfer {
         } catch {
             return emit(.fetchFailed("cannot create \(directory.path): \(error)"))
         }
+        fetch(.flat(directory), systemFormat: systemFormat)
+    }
+
+    /// Starts a fetch (see `GDTFetchMode`); `observer` hears its progress and exactly one `done` or `failed`. A fetch
+    /// in progress fails ("replaced") and its stream is released.
+    public func fetch(_ mode: GDTFetchMode, systemFormat: UInt32, observer: ((GDTFetchUpdate) -> Void)? = nil) {
+        if fetch != nil { fail("replaced by a newer fetch") }
+        fetchCount += 1
         // The stock client's dataObj values look random [B]; ours are too.
-        var f = Fetch(systemFormat: systemFormat, directory: directory, dataObj: UInt64.random(in: 1...UInt64.max))
+        var f = Fetch(id: fetchCount, mode: mode, observer: observer, systemFormat: systemFormat, dataObj: UInt64.random(in: 1...UInt64.max))
         f.seq = takeSeq()
         fetch = f
         receivedFiles = []
         emit(.fetchStarted(systemFormat: systemFormat))
         send(GDTWire.getData(seq: f.seq, GDTGetData(dataObj: f.dataObj, ctxFormat: GDTWire.fileGroupFormat, systemFormat: systemFormat)), "GetData")
+        arm()
     }
 
-    public func cancelFetch() { fetch = nil }
+    /// Ends the fetch in progress (its observer hears `failed(why)`); an open stream is released.
+    public func cancelFetch(_ why: String = "cancelled") {
+        guard fetch != nil else { return }
+        fail(why)
+    }
 
     private func fail(_ why: String) {
+        guard let f = fetch else { return }
         fetch = nil
+        abandonedSeqs.insert(f.seq)
+        discardOutput(f)
+        // Reading: release the stream we hold (its answer and the late answer to the Read are dropped). Opening: a late
+        // successful OpenStream reply is released when it comes (`reply`). Releasing: already on its way.
+        if case .read = f.step, f.stream != 0 {
+            let seq = takeSeq()
+            abandonedSeqs.insert(seq)
+            send(GDTWire.release(seq: seq, stream: f.stream), "Release (fetch ended)")
+        }
+        if abandonedSeqs.count > 64 { abandonedSeqs = Set(abandonedSeqs.sorted().suffix(32)) }
         emit(.fetchFailed(why))
+        f.observer?(.failed(why))
+    }
+
+    private func discardOutput(_ f: Fetch) {
+        try? f.output?.close()
+        if let url = f.outputURL { try? FileManager.default.removeItem(at: url) }
+    }
+
+    /// Stall watchdog: fails the fetch when no host answer came within `stallTimeout`; re-arms while answers come.
+    private func arm() {
+        guard let scheduleAfter, let f = fetch else { return }
+        let id = f.id, mark = activity
+        scheduleAfter(stallTimeout) { [weak self] in
+            guard let self, let f = self.fetch, f.id == id else { return }
+            if self.activity == mark { return self.fail("no answer from the host within \(Int(self.stallTimeout)) s") }
+            self.arm()
+        }
     }
 
     private func reply(_ m: GDTMessage) {
         typealias C = GDTWire.Command
-        guard var f = fetch, m.seq == f.seq else { return emit(.unexpected(m, why: "no request of ours with this seq")) }
+        guard var f = fetch, m.seq == f.seq else {
+            if abandonedSeqs.contains(m.seq) {
+                // A stream opened for a fetch that has ended: give it back.
+                if m.command == C.openStreamReply, m.body.count >= 12, LEBytes.u32(m.body, 0) == GDTWire.statusOK {
+                    let seq = takeSeq()
+                    abandonedSeqs.insert(seq)
+                    send(GDTWire.release(seq: seq, stream: LEBytes.u64(m.body, 4)), "Release (fetch ended)")
+                }
+                return
+            }
+            return emit(.unexpected(m, why: "no request of ours with this seq"))
+        }
+        activity &+= 1
         let b = m.body
         switch (f.step, m.command) {
         case (.descriptor, C.getDataBegin), (.read, C.readBegin):
             guard b.count >= 12 else { return fail("begin body \(b.count) B") }
             f.expected = Int(LEBytes.u32(b, 8))
             f.chunk = []
-            guard f.expected <= maxFileSize else { return fail("\(f.expected) B announced, over the cap") }
+            if case .descriptor = f.step {
+                guard f.expected <= 4 + 1000 * ClipboardFileGroup.entrySize + 4096 else { return fail("descriptor of \(f.expected) B") }
+            } else {
+                guard f.expected <= Int(f.requested) else { return fail("the host sends \(f.expected) B for a read of \(f.requested)") }
+            }
             fetch = f
         case (.descriptor, C.getDataData), (.read, C.readData):
             guard b.count >= 10 else { return fail("data body \(b.count) B") }
@@ -484,67 +700,171 @@ public final class GDTFileTransfer {
             do { f.entries = try ClipboardFileGroup.parse(Data(f.chunk), maxEntries: 1000) } catch {
                 return fail("FILEGROUPDESCRIPTORW not usable: \(error)")
             }
+            f.chunk = []
+            if case .files(_, let expect?) = f.mode, !Self.sameGroup(expect, f.entries) {
+                fetch = f
+                return fail("the host clipboard changed (another file group)")
+            }
             fetch = f
             emit(.fileGroup(f.entries))
+            f.observer?(.group(f.entries))
             openNext(after: -1)
         case (.open(let i), C.openStreamReply):
             guard b.count >= 12 else { return fail("OpenStream reply \(b.count) B") }
             let status = LEBytes.u32(b, 0)
             guard status == GDTWire.statusOK else {
-                emit(.fetchFailed(String(format: "OpenStream file %d status 0x%08x", i, status)))
+                discardOutput(f)
+                f.output = nil; f.outputURL = nil
+                fetch = f
+                fileFailed(i, String(format: "OpenStream status 0x%08x", status))
                 return openNext(after: i)
             }
             f.stream = LEBytes.u64(b, 4)
-            f.file = []
             fetch = f
             readNext(i)
         case (.read(let i), C.readEnd):
             let status = b.count >= 12 ? LEBytes.u32(b, 8) : 0xFFFF_FFFF
             let got = f.chunk
             guard got.count == f.expected else { return fail("Read: \(got.count) of \(f.expected) B") }
-            f.file += got
-            guard f.file.count <= maxFileSize else { return fail("file \(i) over the cap") }
-            fetch = f
-            // The end of the stream: a read with no bytes (the host says S_FALSE there [B]) or a failure.
+            f.chunk = []
+            if status >= 0x8000_0000 {
+                f.abandon = String(format: "Read status 0x%08x", status)
+                fetch = f
+                return releaseCurrent(i)
+            }
+            let entry = f.entries[i]
+            let known = entry.flags & ClipboardFileGroup.fdFileSize != 0
+            if f.written + got.count > maxFileSize || (known && UInt64(f.written + got.count) > entry.size) {
+                f.abandon = known && UInt64(f.written + got.count) > entry.size
+                    ? "the host sends more than the \(entry.size) B it announced" : "over the \(maxFileSize) B cap"
+                fetch = f
+                return releaseCurrent(i)
+            }
+            if !got.isEmpty {
+                do { try f.output?.write(contentsOf: Data(got)) } catch {
+                    f.abandon = "cannot write: \(error.localizedDescription)"
+                    fetch = f
+                    return releaseCurrent(i)
+                }
+                f.written += got.count
+                fetch = f
+                f.observer?(.progress(index: i, bytes: f.written))
+            }
+            // The end of the stream: a read with no bytes (the host says S_FALSE there [B]).
             if got.isEmpty || status != GDTWire.statusOK {
+                if known, UInt64(f.written) != entry.size {
+                    f.abandon = "\(f.written) of the \(entry.size) B the host announced"
+                    fetch = f
+                }
                 releaseCurrent(i)
             } else {
                 readNext(i)
             }
         case (.release(let i), C.releaseReply):
-            store(i)
+            if let why = f.abandon {
+                discardOutput(f)
+                f.output = nil; f.outputURL = nil; f.abandon = nil
+                fetch = f
+                fileFailed(i, why)
+            } else {
+                store(i)
+            }
             openNext(after: i)
         default:
             emit(.unexpected(m, why: "not expected now"))
         }
     }
 
+    /// Same names and sizes (and kinds) in the same order.
+    static func sameGroup(_ a: [ClipboardFileEntry], _ b: [ClipboardFileEntry]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { $0.name == $1.name && $0.size == $1.size && $0.isDirectory == $1.isDirectory }
+    }
+
+    private func fileFailed(_ i: Int, _ why: String) {
+        guard let f = fetch else { return }
+        emit(.fileFailed(index: i, why: why))
+        f.observer?(.fileFailed(index: i, why: why))
+    }
+
+    /// The next file to read after `i`, its output file created first (a file that cannot be created fails alone).
     private func openNext(after i: Int) {
         guard var f = fetch else { return }
-        let limit = min(f.entries.count, maxFiles)
-        guard let next = (i + 1..<max(i + 1, limit)).first(where: { !f.entries[$0].isDirectory && f.entries[$0].size <= UInt64(maxFileSize) }) else {
-            fetch = nil
-            return emit(.fetchDone(files: f.received))
-        }
-        f.seq = takeSeq()
-        f.step = .open(next)
+        f.output = nil; f.outputURL = nil; f.written = 0; f.abandon = nil; f.stream = 0; f.lastCount = 0
         fetch = f
-        send(GDTWire.openStream(seq: f.seq, index: UInt32(next), indexOffset: indexOffset), "OpenStream file \(next)")
+        var candidates: [Int]
+        switch f.mode {
+        case .descriptor: candidates = []
+        case .flat:
+            candidates = Array(0..<min(f.entries.count, maxFiles)).filter { !f.entries[$0].isDirectory && f.entries[$0].size <= UInt64(maxFileSize) }
+        case .files(let targets, _):
+            candidates = targets.keys.sorted().filter { $0 < f.entries.count && !f.entries[$0].isDirectory }
+        }
+        for next in candidates where next > i {
+            if case .files = f.mode, f.entries[next].size > UInt64(maxFileSize) {
+                fileFailed(next, "\(f.entries[next].size) B is over the \(maxFileSize) B cap")
+                continue
+            }
+            guard let (handle, url) = createOutput(next, f) else { continue }
+            f.output = handle
+            f.outputURL = url
+            f.seq = takeSeq()
+            f.step = .open(next)
+            fetch = f
+            send(GDTWire.openStream(seq: f.seq, index: UInt32(next), indexOffset: indexOffset), "OpenStream file \(next)")
+            return arm()
+        }
+        fetch = nil
+        emit(.fetchDone(files: f.received))
+        f.observer?(.done(files: f.received))
+    }
+
+    private func createOutput(_ i: Int, _ f: Fetch) -> (FileHandle, URL)? {
+        var url: URL
+        var permissions: mode_t = filePermissions
+        switch f.mode {
+        case .descriptor: return nil
+        case .flat(let directory):
+            let name = Self.localName(f.entries[i].name, index: i)
+            url = directory.appendingPathComponent(name)
+            var n = 1
+            while FileManager.default.fileExists(atPath: url.path) {
+                n += 1
+                url = directory.appendingPathComponent("\(n)-\(name)")
+            }
+            permissions = 0o600
+        case .files(let targets, _):
+            guard let target = targets[i] else { return nil }
+            url = target
+        }
+        let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, permissions)
+        guard fd >= 0 else {
+            fileFailed(i, "cannot create the file: \(String(cString: strerror(errno)))")
+            return nil
+        }
+        if case .files = f.mode, let agent = quarantineAgent { CDMPOSIXFileSystem.setQuarantine(fd: fd, agent: agent) }
+        return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), url)
     }
 
     private func readNext(_ i: Int) {
         guard var f = fetch else { return }
-        let size = f.entries[i].size
-        let remaining = size > UInt64(f.file.count) ? size - UInt64(f.file.count) : 0
-        // The stock client asked the file size, then the same count again for the end of the stream [B].
-        let count = remaining > 0 ? UInt32(min(remaining, UInt64(readSize))) : max(1, f.lastCount)
+        let entry = f.entries[i]
+        let count: UInt32
+        if entry.flags & ClipboardFileGroup.fdFileSize != 0 {
+            let remaining = entry.size > UInt64(f.written) ? entry.size - UInt64(f.written) : 0
+            // The stock client asked the file size, then the same count again for the end of the stream [B].
+            count = remaining > 0 ? UInt32(min(remaining, UInt64(readSize))) : max(1, f.lastCount)
+        } else {
+            count = UInt32(readSize)
+        }
         f.lastCount = count
+        f.requested = count
         f.seq = takeSeq()
         f.step = .read(i)
         f.chunk = []
         f.expected = 0
         fetch = f
         send(GDTWire.read(seq: f.seq, stream: f.stream, count: count), "Read file \(i)")
+        arm()
     }
 
     private func releaseCurrent(_ i: Int) {
@@ -553,25 +873,25 @@ public final class GDTFileTransfer {
         f.step = .release(i)
         fetch = f
         send(GDTWire.release(seq: f.seq, stream: f.stream), "Release file \(i)")
+        arm()
     }
 
     private func store(_ i: Int) {
-        guard var f = fetch else { return }
-        let name = Self.localName(f.entries[i].name, index: i)
-        var url = f.directory.appendingPathComponent(name)
-        var n = 1
-        while FileManager.default.fileExists(atPath: url.path) {
-            n += 1
-            url = f.directory.appendingPathComponent("\(n)-\(name)")
-        }
-        guard FileManager.default.createFile(atPath: url.path, contents: Data(f.file), attributes: [.posixPermissions: 0o600]) else {
-            return emit(.fetchFailed("cannot write \(url.path)"))
-        }
-        if let t = f.entries[i].writeTime { try? FileManager.default.setAttributes([.modificationDate: t], ofItemAtPath: url.path) }
+        guard var f = fetch, let url = f.outputURL else { return }
+        try? f.output?.close()
+        f.output = nil
+        let entry = f.entries[i]
+        var attributes: [FileAttributeKey: Any] = [:]
+        if let t = entry.writeTime { attributes[.modificationDate] = t }
+        if case .files = f.mode, entry.attributes & 0x1 != 0 { attributes[.posixPermissions] = NSNumber(value: 0o444) }   // FILE_ATTRIBUTE_READONLY
+        if !attributes.isEmpty { try? FileManager.default.setAttributes(attributes, ofItemAtPath: url.path) }
+        if case .files = f.mode, entry.attributes & ClipboardFileGroup.attributeHidden != 0 { _ = chflags(url.path, UInt32(UF_HIDDEN)) }
         f.received += 1
+        f.outputURL = nil
         fetch = f
         receivedFiles.append(url)
-        emit(.receivedFile(index: i, name: f.entries[i].name, url: url, bytes: f.file.count))
+        emit(.receivedFile(index: i, name: entry.name, url: url, bytes: f.written))
+        f.observer?(.file(index: i, url: url, bytes: f.written))
     }
 
     /// The last path component of a Windows relative name, safe as a Mac file name ("/" and ":" → "_", no "."/"..").
@@ -580,4 +900,8 @@ public final class GDTFileTransfer {
         let clean = last.replacingOccurrences(of: ":", with: "_").filter { $0 != "\0" }
         return clean.isEmpty || clean == "." || clean == ".." ? "file-\(index)" : clean
     }
+}
+
+extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }

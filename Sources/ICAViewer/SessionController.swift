@@ -127,7 +127,8 @@ final class SessionController: NSObject {
         self.name = name
         appNames = [name]
         shareKey = SessionShareKey(ica: ica)
-        awaitingApps = [AwaitedLaunch(resource: name, hint: AppNaming.launchHint(initialProgram: ica["InitialProgram"] ?? ""), ownLaunch: true)]
+        awaitingApps = [AwaitedLaunch(resource: name, hint: AppNaming.launchHint(initialProgram: ica["InitialProgram"] ?? ""),
+                                      alias: AppNaming.launchAlias(initialProgram: ica["InitialProgram"] ?? ""), ownLaunch: true)]
         scalingSettings = ScalingSettings.load()
         layout = ScalingLayout.resolve(screens: Self.currentScreens(), settings: scalingSettings, limit: ScalingLimits.sessionLimit())
         var config = WinstationDriver.Configuration()
@@ -149,7 +150,8 @@ final class SessionController: NSObject {
         config.expanderPowerOffer = CompressionSetting.expanderPower(environment: ProcessInfo.processInfo.environment)
         session = try ICASession(ica: ica, configuration: config, clipboard: Self.clipboardConfig(), cdm: Self.driveMappingConfig(),
                                  printing: Self.printingConfig(), audio: Self.audioConfig(),
-                                 webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless))
+                                 webcam: Self.webcamConfig(), control: Self.controlConfig(ica: ica, seamless: config.logon.seamless),
+                                 gdt: Self.gdtConfig())
         super.init()
         keyboard.controller = self
         setUpClipboard()
@@ -654,7 +656,8 @@ final class SessionController: NSObject {
                 if HelperManager.enabled { HelperManager.shared.identityChanged(self, appKey: app.key) }
             } else if awaitingApps.contains(where: { !$0.known.contains(app.key) }) {
                 vlog("session sharing: TWI app \(logName(app.key)) is not taken for the pending launch"
-                     + (AppNaming.isSystemProcess(exe) ? " (logon or system process)" : " (launch not started yet, or another app)"))
+                     + (AppNaming.isSystemProcess(exe) ? " (logon or system process)"
+                        : app.publishedName.map { $0.isEmpty ? "" : " (it names itself \(logName($0)))" } ?? " (launch not started yet, or another app)"))
             }
             DockIcon.shared.scheduleRefresh()
         case .appChanged(let app):
@@ -984,6 +987,7 @@ final class SessionController: NSObject {
         clipboardTimer?.invalidate()
         clipboardTimer = nil
         clipboardSync?.channelClosed()
+        hostFiles?.sessionEnded()
         setParked(false)
         vlog("session \(logName(name)) closed: \(reason)")
         if relaunchAfterClose, onRelaunch != nil {
@@ -1263,7 +1267,8 @@ final class SessionController: NSObject {
         if appWindowProcesses == nil {
             appWindowProcesses = Set(windows.values.filter(\.isApp).compactMap(\.info.processId)).union(lastAppWindows.values.compactMap(\.processId))
         }
-        let entry = AwaitedLaunch(resource: resource, known: Set(apps.keys), hint: AppNaming.launchHint(initialProgram: launch.initialProgram))
+        let entry = AwaitedLaunch(resource: resource, known: Set(apps.keys), hint: AppNaming.launchHint(initialProgram: launch.initialProgram),
+                                  alias: AppNaming.launchAlias(initialProgram: launch.initialProgram))
         // A single-app session's one app is the launched resource only if it is that resource's own app (an
         // Explorer window may be the only app so far, docs/99 §12.15).
         if apps.count == 1, let only = apps.keys.first, appResources[only] == nil, AppNaming.isOwnApp(key: only, resource: name) {
@@ -1330,9 +1335,13 @@ final class SessionController: NSObject {
 
     private var clipboardSync: ClipboardSync?
     private var clipboardTimer: Timer?
+    /// File copy through the clipboard (D90), when CTXGDT carries files in this session.
+    private var hostFiles: HostFilesBridge?
 
     /// ICA_CLIPBOARD: unset/on = both ways; 0/off = no CTXCLIP module at all; to-mac / to-host = one
-    /// direction only (§5.7). ICA_CLIP_IMAGES=0: text and HTML/RTF only.
+    /// direction only (§5.7). ICA_CLIP_IMAGES=0: text and HTML/RTF only. With file copy on (Settings, `ICA_GDT`,
+    /// D90) the file formats are on and CTXCLIP answers version 4, as the stock client does (docs/75 §4.1);
+    /// ICA_CLIP_VERSION=1…4 overrides the version.
     static func clipboardConfig(_ env: [String: String] = ProcessInfo.processInfo.environment) -> ClipboardEngine.Config? {
         var config = ClipboardEngine.Config()
         switch env["ICA_CLIPBOARD"]?.lowercased() {
@@ -1342,18 +1351,51 @@ final class SessionController: NSObject {
         default: break
         }
         if env["ICA_CLIP_IMAGES"] == "0" { config.images = false }
+        if let files = ClipboardFilesSetting.gdtConfig(env), files.fileTransfer {
+            config.files = true
+            config.maxVersion = ClipboardWire.filesVersion
+        }
+        if let v = env["ICA_CLIP_VERSION"].flatMap(UInt16.init), (1...4).contains(v) { config.maxVersion = v }
         return config
+    }
+
+    /// CTXGDT (channel 29) for clipboard files, only with a clipboard channel (D90).
+    static func gdtConfig(_ env: [String: String] = ProcessInfo.processInfo.environment) -> GDTEngine.Config? {
+        guard clipboardConfig(env) != nil else { return nil }
+        return ClipboardFilesSetting.gdtConfig(env)
     }
 
     private func setUpClipboard() {
         guard let engine = session.clipboard else { return vlog("clipboard: off (ICA_CLIPBOARD)") }
         // Read no image (main thread work) unless it can go to the host; read nothing if Mac → host is off.
-        let sync = ClipboardSync(pasteboard: SystemPasteboard(readImages: engine.config.images && engine.config.macToHost))
+        let gdt = engine.config.files ? session.gdt.flatMap { $0.config.fileTransfer ? $0 : nil } : nil
+        let pasteboard = SystemPasteboard(readImages: engine.config.images && engine.config.macToHost,
+                                          readFiles: gdt != nil && engine.config.macToHost)
+        let sync = ClipboardSync(pasteboard: pasteboard)
         sync.readsContent = engine.config.macToHost
         let session = self.session
         sync.announce = { session.clipboardAnnounce($0) }
         sync.log = { vlog("clipboard: " + $0) }
         clipboardSync = sync
+        if let gdt {
+            // Files over CTXGDT both ways (D90); CTXCLIP fetches nothing for a host list with a file group.
+            engine.filesOverGDT = true
+            let bridge = HostFilesBridge(session: session, gdt: gdt, sync: sync) { [weak self] in self?.ended ?? true }
+            hostFiles = bridge
+            pasteboard.onFiles = { [weak bridge] snapshot, change in bridge?.macSnapshot(snapshot, changeCount: change) }
+            // Session queue; names and bytes stay out of the log.
+            gdt.onEvent = { event in
+                switch event {
+                case .module(let bytes): vlog("clipboard files: CTXGDT module \(bytes.count) B")
+                case .log(let text): vlog("clipboard files: " + text)
+                case .file(let e): if let line = ClipboardFilesBridge.logLine(e) { vlog("clipboard files: " + line) }
+                case .hostWrite, .sent: break
+                }
+            }
+            vlog("clipboard files: on (CTXGDT, CTXCLIP version \(engine.config.maxVersion))")
+        } else {
+            vlog("clipboard files: off")
+        }
         // Session queue. Descriptions carry ids and sizes only, never contents.
         engine.onEvent = { [weak self] event in
             vlog("clipboard: \(event)")
@@ -1362,6 +1404,14 @@ final class SessionController: NSObject {
                 DispatchQueue.main.async { self?.clipboardReady() }
             case .hostClipboard(let content, _, let echo):
                 DispatchQueue.main.async { self?.clipboardSync?.hostContent(content, echo: echo) }
+            case .hostFormats, .hostEmpty(_, false):
+                // A new host clipboard: a file fetch for the previous one ends (a group in this list starts anew).
+                if let gdt, gdt.files.isFetching { gdt.files.cancelFetch("the host clipboard changed") }
+            case .hostFileGroupListed(let format):
+                guard let gdt else { break }
+                HostFilesBridge.hostListed(format: format, gdt: gdt) { entries in
+                    self?.hostFiles?.hostGroup(entries, format: format)
+                }
             default:
                 break
             }
@@ -1675,8 +1725,15 @@ final class TWICapture: @unchecked Sendable {
 final class SystemPasteboard: ClipboardPasteboard {
     private let board = NSPasteboard.general
     private let readImages: Bool
+    /// Finder's file URLs become `content.files` (D90); never our own promised files from a session.
+    private let readFiles: Bool
+    /// Every snapshot of Mac files, with the change count it was read at.
+    var onFiles: ((ClipboardFileSnapshot, Int) -> Void)?
 
-    init(readImages: Bool) { self.readImages = readImages }
+    init(readImages: Bool, readFiles: Bool = false) {
+        self.readImages = readImages
+        self.readFiles = readFiles
+    }
     private static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
     private static let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
 
@@ -1689,6 +1746,16 @@ final class SystemPasteboard: ClipboardPasteboard {
         content.text = board.string(forType: .string)
         content.html = board.string(forType: .html)
         content.rtf = board.data(forType: .rtf)
+        if readFiles, !types.contains(HostFileOffer.markerType), types.contains(.fileURL),
+           let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            let snapshot = ClipboardFileSnapshot.make(urls: urls)
+            onFiles?(snapshot, board.changeCount)
+            if snapshot.refused == nil, !snapshot.files.isEmpty {
+                // Finder's copy also carries the names as text (kept, as the stock client does) and icons (left out).
+                content.files = snapshot.files
+                return content
+            }
+        }
         if readImages, let data = board.data(forType: .png) ?? board.data(forType: .tiff),
            let source = CGImageSourceCreateWithData(data as CFData, nil),
            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {

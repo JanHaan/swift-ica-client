@@ -103,6 +103,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
         case hostFileGroup([ClipboardFileEntry])
         /// FileContents for one index (test only: the data is for comparison, never logged).
         case hostFileContents(index: UInt32, name: String?, data: Data)
+        /// The host list holds FileGroupDescriptorW (registered id `format`) and `filesOverGDT` is on: nothing is
+        /// fetched over CTXCLIP for this list; the descriptor and the contents come over CTXGDT (docs/76 §7.17).
+        case hostFileGroupListed(format: UInt16)
         /// Discovery trace line (`Config.traceWire`); may contain payload bytes of test data.
         case trace(String)
 
@@ -135,6 +138,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
                     "\"\($0.name)\" \($0.isDirectory ? "dir" : "\($0.size) B") attrs 0x\(String($0.attributes, radix: 16)) flags 0x\(String($0.flags, radix: 16))"
                 }.joined(separator: ", ")
             case .hostFileContents(let i, let name, let data): return "← FileContents index \(i) \(name.map { "\"\($0)\"" } ?? "?"): \(data.count) B"
+            case .hostFileGroupListed(let f): return String(format: "host list has a file group (0x%04X): over CTXGDT, nothing fetched on CTXCLIP", f)
             case .trace(let line): return "trace " + line
             }
         }
@@ -185,6 +189,11 @@ public final class ClipboardEngine: VirtualChannelEngine {
     /// Fetch a host FileGroupDescriptorW over CTXCLIP at all (`Config.files`). Off when CTXGDT carries the files
     /// (docs/76 §7.17): the stock client asks for the descriptor there, not on CTXCLIP [B].
     public var fetchFileGroup = true
+    /// Files travel over CTXGDT (ICAViewer, docs/75 §6): a host list with FileGroupDescriptorW fetches nothing on
+    /// CTXCLIP (the stock client sends no CTXCLIP request then [B]) and emits `.hostFileGroupListed` instead.
+    public var filesOverGDT = false
+    /// The Mac files of each announce (empty: none), on the session queue; CTXGDT serves them (`GDTFileTransfer.offer`).
+    public var localFilesChanged: (([ClipboardLocalFile]) -> Void)?
     private var fetched = ClipboardContent()
     private var fetchedFormats: [UInt16] = []
     private var echoCandidate = false
@@ -394,6 +403,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
 
     private func startFetch() {
         guard config.hostToMac, !hostFormats.isEmpty else { return }
+        if config.files, filesOverGDT, let id = registeredId(ClipboardFileFormat.groupDescriptorName), hostFormats.contains(id) {
+            return emit(.hostFileGroupListed(format: id))
+        }
         var want: [UInt16] = []
         if hostFormats.contains(ClipboardFormat.unicodeText) { want.append(ClipboardFormat.unicodeText) }
         if config.html, let id = registeredId(ClipboardFormat.htmlName), hostFormats.contains(id) { want.append(id) }
@@ -600,6 +612,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
         localFormats = formats
         localData = data
         localFiles = files
+        localFilesChanged?(files)
         localText = content.text
         localOwns = true
         lastAnnouncedEmpty = false
@@ -611,6 +624,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private func announceEmpty() {
         localFormats = []
         localData = [:]
+        if !localFiles.isEmpty { localFilesChanged?([]) }
         localFiles = []
         localText = nil
         localOwns = false

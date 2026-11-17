@@ -468,7 +468,10 @@ final class HelperApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenu
             .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.secondaryLabelColor,
         ])
         NSApp.activate()
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: appName, .credits: credits])
+        // The icon shown in the Dock (the remote app's, set at runtime), not the template bundle's generic one.
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [.applicationName: appName, .credits: credits]
+        if let icon = NSApp.applicationIconImage { options[.applicationIcon] = icon }
+        NSApp.orderFrontStandardAboutPanel(options: options)
     }
 
     /// Chosen by mouse: the host sends Ctrl+letter to the remote app (and syncs the clipboard before Paste),

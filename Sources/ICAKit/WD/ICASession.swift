@@ -216,6 +216,18 @@ public final class ICASession: @unchecked Sendable {
             // Launch timeouts (the response and the wait for the capability commit).
             engine.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
         }
+        if let engine = self.gdt, engine.config.fileTransfer {
+            let queue = self.queue
+            // The fetch's stall timeout; served file data waits while the CGP retransmit queue is long (docs/76 §7.17).
+            engine.files.scheduleAfter = { delay, block in queue.asyncAfter(deadline: .now() + delay, execute: block) }
+            engine.files.backlog = { [weak self] in self?.transport.status.queuedBytes ?? 0 }
+            // The files CTXCLIP announces are the ones CTXGDT serves (Mac → session).
+            if let clipboard = self.clipboard, clipboard.config.files {
+                clipboard.localFilesChanged = { [weak engine] files in
+                    engine?.files.offer(files.isEmpty ? nil : GDTFileSource(files: files))
+                }
+            }
+        }
         // After every Thinwire INIT: TWI PAUSE + RESUME, as the reference client does (docs/50 §7.1).
         thinwire.onInit = { [weak self] info in
             guard let self else { return }

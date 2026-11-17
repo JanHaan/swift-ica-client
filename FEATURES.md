@@ -11,7 +11,8 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
   network drops, Thinwire graphics, several monitors, Retina scaling, text and image clipboard,
   audio playback and microphone.
 - **Built, not yet verified live:** client drive (one shared folder), printing to PDF, H.264,
-  formatted text (HTML, RTF) on the clipboard, webcam with a real camera.
+  formatted text (HTML, RTF) on the clipboard, webcam with a real camera, copying files through the
+  clipboard in the app (both ways; the protocol is verified live in the headless test, D88, D90).
 - **Main gaps:** file transfer, links opening on the Mac, automatic reconnect after longer drops,
   UDP transport (EDT), Teams optimisation, smart cards, USB devices.
 
@@ -133,7 +134,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 |---|---|---|---|---|---|---|---|---|---|
 | Clipboard: plain text | Likely | Yes | Yes | Yes | ? | ? | ? | Yes | |
 | Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Partly | Web: HTML confirmed, images not. Ours: images verified both ways (D85); HTML and RTF built, not verified live |
-| Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | No | Ours: under investigation |
+| Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | Built | Ours: both ways over CTXGDT, Finder ⇄ Explorer, folders included; protocol verified live headless (D88), app built, live check pending (D90) |
 | Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: one shared folder; the test site maps no drives |
 | File transfer (upload, download) | Likely | Likely | Likely | Likely | Likely | ? | ? | No | Not a matrix row. Ours: under investigation |
 | Open a local file in a remote app | Yes | Partly | Yes | No | Yes | Yes | Yes | No | Mac: matrix no, but Mac 2411 added file type association |
@@ -210,7 +211,7 @@ the main viewer, not plug-ins. Where the feature column says "probably", the nam
 | `CTXCAM` (`ICAClientAudioController`) | Audio out, microphone | Yes |
 | `CTXCLIP` (`ICAClipboardController`) | Clipboard | Partly |
 | `CTXCDM` (`ICAClientDriveController`) | Client drive mapping | Partly |
-| `CTXGDT` (`ICAClientGDTController`) | File transfer (generic data transfer) | No (under investigation, docs/76-gdt.md) |
+| `CTXGDT` (`ICAClientGDTController`) | File transfer (generic data transfer) | Partly: clipboard files (docs/76-gdt.md §7.17, D90) |
 | `CTXCPM` (`ICACPMVirtualChannel`) | Printing | Partly |
 | `CTXCTL` (`ICAControlChannelController`) | Control channel (launch into a running session) | Yes |
 | `CTXMM` (`ICAClientMultimediaController`) | Multimedia; ICAViewer's webcam uses this channel | Partly (webcam only) |
@@ -249,7 +250,8 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 3. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
    optimisation is a separate, larger piece).
 4. **Full-desktop launch.** Only seamless apps are exercised.
-5. **General file transfer and clipboard files.** Only the shared folder exists.
+5. **General file transfer.** Clipboard files are built both ways (D90, live check in the app
+   pending); beyond that only the shared folder exists.
 6. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,

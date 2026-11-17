@@ -14,7 +14,7 @@ import ICAKit
 /// Dock apps (docs/99 §12.2, D63): "One Dock entry per app" (default on; applies at the next start of ICA Viewer;
 /// ICA_HELPER_APPS=0/1 overrides it) and the launcher's global shortcut (⌃⌥⌘L, two other letters, or off;
 /// applies at once). After a connection drop (docs/90 §9.6, D86): reconnect automatically (default) or ask; applies at
-/// the next drop.
+/// the next drop. "Copy files through the clipboard" (D90, docs/75): default on; applies at the next connect.
 @MainActor
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let service: StoreService
@@ -50,6 +50,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let compressTitle = Text(en: "Compress screen data", de: "Bildschirmdaten komprimieren")
     static let compressHint = Text(en: "The server sends about a quarter of the data; useful on slow connections. Applies at the next connect.",
                                    de: "Der Server sendet etwa ein Viertel der Daten; hilfreich bei langsamen Verbindungen. Gilt ab der nächsten Verbindung.")
+    static let clipFilesTitle = Text(en: "Copy files through the clipboard", de: "Dateien über die Zwischenablage kopieren")
+    static let clipFilesHint = Text(en: "Copy in Finder and paste in the session, or the other way round. Applies at the next connect.",
+                                    de: "Im Finder kopieren und in der Sitzung einsetzen, oder umgekehrt. Gilt ab der nächsten Verbindung.")
     static let dropAutomatic = Text(en: "Reconnect automatically", de: "Automatisch neu verbinden")
     static let dropAsk = Text(en: "Ask", de: "Fragen")
     static let dropHint = Text(en: "After a longer network drop, ICA Viewer reconnects your session through the store, waiting up to 10 minutes for the network. Short drops always resume by themselves.",
@@ -74,6 +77,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         "audio": Text(en: "Audio:", de: "Audio:"), "camera": Text(en: "Camera:", de: "Kamera:"),
         "dock": Text(en: "Dock:", de: "Dock:"), "shortcut": Text(en: "Launcher:", de: "Launcher:"),
         "network": Text(en: "Network:", de: "Netzwerk:"),
+        "clipboard": Text(en: "Clipboard:", de: "Zwischenablage:"),
         "drop": Text(en: "Connection drop:", de: "Verbindungsabbruch:"),
     ]
 
@@ -106,6 +110,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let cameraBox = NSButton(checkboxWithTitle: T.cameraTitle.shown, target: nil, action: nil)
     private let cameraPopup = NSPopUpButton()
     private let compressBox = NSButton(checkboxWithTitle: T.compressTitle.shown, target: nil, action: nil)
+    private let clipFilesBox = NSButton(checkboxWithTitle: T.clipFilesTitle.shown, target: nil, action: nil)
     private let dropPopup = NSPopUpButton()
     private let dockBox = NSButton(checkboxWithTitle: T.dockTitle.shown, target: nil, action: nil)
     private let dockHint = NSTextField(wrappingLabelWithString: "")
@@ -295,6 +300,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, cameraAccessNote],
             [label("network"), compressBox],
             [NSGridCell.emptyContentView, hint(T.compressHint)],
+            [label("clipboard"), clipFilesBox],
+            [NSGridCell.emptyContentView, hint(T.clipFilesHint)],
             [label("drop"), dropPopup],
             [NSGridCell.emptyContentView, hint(T.dropHint)],
             [label("dock"), dockBox],
@@ -324,10 +331,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         grid.row(at: 25).isHidden = true   // shown only when the camera list needs an access hint
         grid.row(at: 26).topPadding = 12
         grid.row(at: 27).topPadding = 0
-        grid.row(at: 28).topPadding = 8
+        grid.row(at: 28).topPadding = 12
         grid.row(at: 29).topPadding = 0
-        grid.row(at: 30).topPadding = 12
+        grid.row(at: 30).topPadding = 8
         grid.row(at: 31).topPadding = 0
+        grid.row(at: 32).topPadding = 12
+        grid.row(at: 33).topPadding = 0
         cameraGrid = grid
 
         let forget = NSButton(title: loc("Forget All Saved Credentials", "Alle gespeicherten Anmeldedaten vergessen"),
@@ -361,7 +370,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     /// popup (at least 360 pt), each measured in English and German. Logged in demo mode.
     static func columnWidths(popups: [NSPopUpButton]) -> (column0: CGFloat, column1: CGFloat) {
         let labels = rowLabels.values.flatMap(\.both).map { ($0, NSTextField(labelWithString: $0).fittingSize.width) }
-        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle, compressTitle, dockTitle].flatMap(\.both)
+        let boxes = [protectTitle, shareTitle, readOnlyTitle, printTitle, audioTitle, micTitle, cameraTitle, compressTitle, clipFilesTitle, dockTitle].flatMap(\.both)
             .map { ($0, NSButton(checkboxWithTitle: $0, target: nil, action: nil).fittingSize.width) }
         let radios = [promptTitle, totpTitle].flatMap(\.both)
             .map { ($0, NSButton(radioButtonWithTitle: $0, target: nil, action: nil).fittingSize.width) }
@@ -517,6 +526,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let stored = demo ? nil : UserDefaults.standard.object(forKey: HelperAppsSwitch.defaultsKey) as? Bool
         dockBox.state = (stored ?? HelperAppsSwitch.defaultOn) ? .on : .off
         compressBox.state = (demo ? CompressionSetting.defaultOn : CompressionSetting.stored) ? .on : .off
+        clipFilesBox.state = (demo ? ClipboardFilesSetting.defaultOn : ClipboardFilesSetting.stored) ? .on : .off
         let drop = demo ? AutoReconnect.Mode.defaultMode : AutoReconnectSetting.stored
         dropPopup.selectItem(at: AutoReconnect.Mode.allCases.firstIndex(of: drop) ?? 0)
         let overridden = !demo && HelperManager.setting.source == .environment
@@ -532,6 +542,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         if CompressionSetting.stored != compress {
             CompressionSetting.stored = compress
             vlog("compression: saved \(compress ? "on" : "off"); applies at the next connect")
+        }
+        let clipFiles = clipFilesBox.state == .on
+        if ClipboardFilesSetting.stored != clipFiles {
+            ClipboardFilesSetting.stored = clipFiles
+            vlog("clipboard files: saved \(clipFiles ? "on" : "off"); applies at the next connect")
         }
         let modes = AutoReconnect.Mode.allCases
         if modes.indices.contains(dropPopup.indexOfSelectedItem), AutoReconnectSetting.stored != modes[dropPopup.indexOfSelectedItem] {

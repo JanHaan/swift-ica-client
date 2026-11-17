@@ -65,14 +65,26 @@ public enum AppNaming {
         return executableName(key: "exe:" + p, executablePath: nil).flatMap { $0.hasSuffix(".exe") ? $0 : nil }
     }
 
+    /// The published app name `InitialProgram` carries as `#<name>`: the farm's internal application name, which the
+    /// host also reports as the TWI published name and which can differ from the store's display name (live: store
+    /// "Edge Browser ABC", host "Edge Browser EKO_1"). nil = no such name.
+    public static func launchAlias(initialProgram: String) -> String? {
+        let p = initialProgram.trimmingCharacters(in: .whitespaces)
+        guard p.hasPrefix("#") else { return nil }
+        let name = String(p.dropFirst()).trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
+    }
+
     /// Whether an app that appeared while a launch of `resource` was pending may be taken for it: only once the launch
     /// counts as started (a shared launch: the host reported status 0; the session's own launch: the logon phase is
     /// over); an app with a published name only if it is that resource; with an executable hint only that
     /// executable; never a logon or system process (unless the hint names it).
     public static func mayBeLaunchedApp(executable: String?, publishedName: String?, resource: String, hint: String?,
-                                        launchStarted: Bool) -> Bool {
+                                        alias: String? = nil, launchStarted: Bool) -> Bool {
         guard launchStarted else { return false }
-        if let published = publishedName, !published.isEmpty { return normalized(published) == normalized(resource) }
+        if let published = publishedName, !published.isEmpty {
+            return normalized(published) == normalized(resource) || alias.map { normalized(published) == normalized($0) } == true
+        }
         if let hint { return executable == hint }
         return !isSystemProcess(executable)
     }
@@ -83,7 +95,7 @@ public enum AppNaming {
         pending.firstIndex { entry in
             !entry.known.contains(key)
                 && mayBeLaunchedApp(executable: executable, publishedName: publishedName, resource: entry.resource,
-                                    hint: entry.hint, launchStarted: entry.eligible(at: now))
+                                    hint: entry.hint, alias: entry.alias, launchStarted: entry.eligible(at: now))
         }
     }
 
@@ -139,12 +151,16 @@ public struct AwaitedLaunch: Equatable, Sendable {
     public var known: Set<String>
     /// The executable `InitialProgram` names, if any (`AppNaming.launchHint`).
     public var hint: String?
+    /// The published name `InitialProgram` gives as `#<name>` (`AppNaming.launchAlias`), if any.
+    public var alias: String?
     /// Shared launch: when the host reported status 0; own launch: when the logon phase ended. nil = not yet.
     public var startedAt: Date?
     public var ownLaunch: Bool
 
-    public init(resource: String, known: Set<String> = [], hint: String? = nil, startedAt: Date? = nil, ownLaunch: Bool = false) {
-        self.resource = resource; self.known = known; self.hint = hint; self.startedAt = startedAt; self.ownLaunch = ownLaunch
+    public init(resource: String, known: Set<String> = [], hint: String? = nil, alias: String? = nil, startedAt: Date? = nil,
+                ownLaunch: Bool = false) {
+        self.resource = resource; self.known = known; self.hint = hint; self.alias = alias; self.startedAt = startedAt
+        self.ownLaunch = ownLaunch
     }
 
     public func eligible(at now: Date) -> Bool {

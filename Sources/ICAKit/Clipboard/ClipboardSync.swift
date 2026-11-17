@@ -62,6 +62,13 @@ public final class ClipboardSync {
     /// announce (the pasteboard already holds it). Returns true if written.
     @discardableResult
     public func hostContent(_ content: ClipboardContent, echo: Bool = false) -> Bool {
+        hostWrite(summary: content.summary, echo: echo) { pasteboard.writeContent(content) }
+    }
+
+    /// Any host data for the pasteboard (e.g. the host's files as promised file URLs): the same rules as
+    /// `hostContent`; `write` replaces the contents and returns the change count after it. Returns true if written.
+    @discardableResult
+    public func hostWrite(summary: String, echo: Bool = false, _ write: () -> Int) -> Bool {
         let count = pasteboard.changeCount
         if isReady, count != lastSeen, count != ownWrite {
             log("Mac pasteboard changed during the host fetch: keeping the Mac copy")
@@ -72,10 +79,10 @@ public final class ClipboardSync {
             log("host list echoes our own announce: pasteboard left as it is")
             return false
         }
-        let after = pasteboard.writeContent(content)
+        let after = write()
         ownWrite = after
         lastSeen = after
-        log("host clipboard written to the Mac pasteboard (change \(after)): \(content.summary)")
+        log("host clipboard written to the Mac pasteboard (change \(after)): \(summary)")
         return true
     }
 }

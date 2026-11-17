@@ -71,6 +71,8 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         public var initMaxSize = 128
         /// Payload bytes per write in the hex log.
         public var logLimit = GDTHexLog.defaultLimit
+        /// Host writes kept in `history` (discovery). The app keeps none: they would hold file contents.
+        public var historyLimit = GDTEngine.historyCap
 
         public init() {}
 
@@ -195,7 +197,7 @@ public final class GDTEngine: VirtualChannelEngine, VirtualChannelModule {
         let write = GDTHostWrite(index: hostIndex, elapsed: now().timeIntervalSince(start), wdType: pendingWDType, bytes: [UInt8](data))
         pendingWDType = nil
         statistics.add(write.bytes)
-        if history.count < Self.historyCap { history.append(write) }
+        if history.count < config.historyLimit { history.append(write) }
         onEvent(.hostWrite(write))
         for responder in responders {
             if let reply = responder.reply(write, history) {
