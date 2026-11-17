@@ -818,3 +818,42 @@ private final class FakePasteboard: ClipboardPasteboard {
     sync.channelReady()
     #expect(board.reads == 0 && sent.count == 1 && sent[0].content == nil)
 }
+
+@Test func clipboardRepeatedHostListKeepsTheFetch() {
+    // D130: Windows announced PowerShell's Set-Clipboard twice within 0.1 s; restarting the fetch paired the host's
+    // single answer with the cancelled request. Now the fetch continues and the list is fetched once more after it.
+    let h = Harness()
+    h.ready()
+    h.feed(Host.list([13]))
+    #expect(h.take() == ClipboardWire.dataRequest(format: 13))
+    h.clock += 100_000_000
+    h.feed(Host.list([13]))
+    #expect(h.take().isEmpty)                                   // no cancel, no second request yet
+    #expect(h.events.contains { if case .hostListRepeated([13]) = $0 { return true }; return false })
+    h.feed(Host.response(13, ClipboardText.encodeForHost("first")))
+    #expect(h.hostClipboard == nil)                             // not delivered: fetched again
+    #expect(h.take() == ClipboardWire.dataRequest(format: 13))
+    h.feed(Host.response(13, ClipboardText.encodeForHost("newest")))
+    #expect(h.hostClipboard?.0.text == "newest")
+    // The same list after the fetch ended is a new clipboard: fetched normally.
+    h.clock += 100_000_000
+    h.feed(Host.list([13]))
+    #expect(h.take() == ClipboardWire.dataRequest(format: 13))
+    // A repeat after the window is a new list too (cancel and restart, as before).
+    h.clock += 2_000_000_000
+    h.feed(Host.list([13]))
+    #expect(h.take() == ClipboardWire.dataRequest(format: 13))
+}
+
+@Test func clipboardFormatNamesReplyEchoesNamesOnRequest() {
+    // D130: the stock Mac client echoes each name (capture ref-c); the reference form has length 0.
+    var config = ClipboardEngine.Config()
+    config.echoFormatNames = true
+    let h = Harness(config)
+    h.feed(Host.initRequest(version: 3))
+    _ = h.take()
+    h.feed(Host.names([(0xC086, "HTML Format")]))
+    let name = Data("HTML Format".utf8) + Data([0])
+    #expect(h.take().prefix(4 + 6 + name.count) == Data([9, 0, 0, 0, 0x86, 0xC0]) + Data([UInt8(name.count), 0, 0, 0]) + name)
+    #expect(ClipboardWire.formatNamesReply(ids: [0xC086]) == Data([9, 0, 0, 0, 0x86, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+}

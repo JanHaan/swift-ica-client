@@ -57,12 +57,19 @@ public enum ClipboardWire {
 
     /// FORMAT_NAMES_REPLY: every id the host named, in order, with length 0, then the zero terminator entry.
     public static func formatNamesReply(ids: [UInt16]) -> Data {
+        formatNamesReply(entries: ids.map { ($0, Data()) })
+    }
+
+    /// FORMAT_NAMES_REPLY with the names echoed as the host sent them (`u16 id, u32 length, name bytes`), as the
+    /// stock Mac client answers (D130, capture ref-c); an empty name gives the reference's form above.
+    public static func formatNamesReply(entries: [(id: UInt16, name: Data)]) -> Data {
         var w = ByteWriter()
         w.u16(Command.formatNamesReply.rawValue)
         w.u16(0)
-        for id in ids {
-            w.u16(id)
-            w.u32(0)
+        for e in entries {
+            w.u16(e.id)
+            w.u32(UInt32(e.name.count))
+            w.raw(e.name)
         }
         w.u16(0)
         w.u32(0)

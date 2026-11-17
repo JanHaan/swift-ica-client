@@ -393,6 +393,28 @@ case "cdmtest-explorer":
         fail("\(error)")
     }
 
+case "edtprobe":
+    // icactl edtprobe <vda-ipv4> [port] [seconds] — EDT handshake only (D130, EDTProbe.swift); needs ICA_EDT=1.
+    guard EDTFeature.enabled() else { fail("edtprobe needs ICA_EDT=1 (EDT is experimental)") }
+    guard let host = args.first else { fail("usage: icactl edtprobe <vda-ipv4> [port, default 2598] [seconds, default 3]") }
+    runEDTProbe(host: host, port: args.count > 1 ? UInt16(args[1]) ?? 2598 : 2598, seconds: args.count > 2 ? Double(args[2]) ?? 3 : 3)
+
+case "htmlprobe":
+    // icactl htmlprobe [resource] — does "HTML Format" cross CTXCLIP (D130, HTMLClipProbe.swift): PowerShell in the lab's
+    // Command Prompt sets and reads HTML on the session clipboard; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1).
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("htmlprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let htmlApp = testApp(args.first ?? "Command Prompt", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "htmlprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == htmlApp.resource }) else { fail("no resource named \(htmlApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runHTMLClipProbe(ica: ica, app: htmlApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "policyprobe":
     // icactl policyprobe [resource] — which redirections the host opens for this user (backlog 1.9, PolicyProbe.swift):
     // clipboard, drives (empty read-only folder), printers, audio playback announced; no input; logoff. Lab only

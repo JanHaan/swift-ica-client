@@ -37,6 +37,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
         /// Offer Mac data (§5.7: off = only the "empty" list, every request fails).
         public var macToHost = true
         public var html = true
+        /// FORMAT_NAMES_REPLY echoes each name with its id, as the stock Mac client does (D130); off: ids with
+        /// empty names, as the HTML5 reference (docs/70 §3.2.4).
+        public var echoFormatNames = false
         public var rtf = true
         public var images = true
         /// Pictures in rich text (with `images`): Mac RTFD attachments are served as RTF `\pict` groups, host RTF
@@ -109,6 +112,9 @@ public final class ClipboardEngine: VirtualChannelEngine {
         /// The host list holds FileGroupDescriptorW (registered id `format`) and `filesOverGDT` is on: nothing is
         /// fetched over CTXCLIP for this list; the descriptor and the contents come over CTXGDT (docs/76 §7.17).
         case hostFileGroupListed(format: UInt16)
+        /// The same host list again while its fetch runs (Windows announces some clipboard changes twice, live with
+        /// PowerShell's Set-Clipboard, D130): the running fetch continues and the list is fetched once more after it.
+        case hostListRepeated([UInt16])
         /// Discovery trace line (`Config.traceWire`); may contain payload bytes of test data.
         case trace(String)
 
@@ -119,6 +125,7 @@ public final class ClipboardEngine: VirtualChannelEngine {
             case .formatNames(let e): return "← FORMAT_NAMES \(e.count) entries → FORMAT_NAMES_REPLY: " + e.map { String(format: "0x%04X \"%@\" (%ld B)", $0.id, $0.name, $0.raw.count) }.joined(separator: ", ")
             case .ready(let v): return "ready (version \(v)); → FORMAT_LIST empty"
             case .hostFormats(let ids): return "← FORMAT_LIST \(list(ids))"
+            case .hostListRepeated(let ids): return "← FORMAT_LIST \(list(ids)) again during the fetch (fetched once more after it)"
             case .hostEmpty(let flags, let ignored): return String(format: "← FORMAT_LIST no entries, flags 0x%04x%@", flags, ignored ? " (ignored)" : " (host clipboard empty)")
             case .fetchStarted(let ids): return "fetching \(list(ids))"
             case .fetched(let f, let n): return "← DATA_RESPONSE \(ClipboardFormat.label(f)) \(n) B"
@@ -184,6 +191,8 @@ public final class ClipboardEngine: VirtualChannelEngine {
     private var lastInboundAt: UInt64 = 0
     private var token = 0
     private var fetching = false
+    /// A repeated host list arrived during the fetch: fetch the list again when this one ends (D130).
+    private var refetchAfterCurrent = false
     private var fetchQueue: [Request] = []
     /// The host's file group of the current fetch (FileContents results are matched to it by index).
     private var hostFileEntries: [ClipboardFileEntry] = []
@@ -319,7 +328,8 @@ public final class ClipboardEngine: VirtualChannelEngine {
                 if let index = formatNames.firstIndex(where: { $0.id == entry.id }) { formatNames[index].name = entry.name }
                 else { formatNames.append((entry.id, entry.name)) }
             }
-            write(ClipboardWire.formatNamesReply(ids: entries.map(\.id)))
+            write(config.echoFormatNames ? ClipboardWire.formatNamesReply(entries: entries.map { ($0.id, $0.raw) })
+                                         : ClipboardWire.formatNamesReply(ids: entries.map(\.id)))
             emit(.formatNames(entries))
             if phase == .awaitingNames { becomeReady() }
         case .formatList(let flags, let formats):
@@ -373,6 +383,17 @@ public final class ClipboardEngine: VirtualChannelEngine {
             // 0x0004 without 0x0008: the reference does nothing (§3.2.5).
             return emit(.hostEmpty(flags: flags, ignored: true))
         }
+        var list = formats.filter { $0 != 0 && !ClipboardWire.privateRange.contains($0) }
+        if list.count > ClipboardWire.hostListCapacity { list = Array(list.prefix(ClipboardWire.hostListCapacity)) }
+        // The same list again while its fetch still runs (no own announce in between, within `repeatWindow`):
+        // restarting would pair the host's single answer with the cancelled request and leave the new one unanswered
+        // (live, D130). The running fetch continues; its result is discarded and the list fetched once more, so a
+        // genuine new copy with the same formats still wins.
+        if fetching, flags & ClipboardWire.flagNone == 0, !localOwns, hostListSeen, !list.isEmpty, list == hostFormats,
+           now() &- hostListAt < Self.repeatWindow {
+            refetchAfterCurrent = true
+            return emit(.hostListRepeated(list))
+        }
         lastAnnouncedEmpty = false
         echoCandidate = localOwns && !localFormats.isEmpty
         localOwns = false
@@ -388,14 +409,16 @@ public final class ClipboardEngine: VirtualChannelEngine {
             hostFormats = []
             return emit(.hostEmpty(flags: flags, ignored: false))
         }
-        var list = formats.filter { $0 != 0 && !ClipboardWire.privateRange.contains($0) }
-        if list.count > ClipboardWire.hostListCapacity { list = Array(list.prefix(ClipboardWire.hostListCapacity)) }
         hostFormats = list
         emit(.hostFormats(list))
         if phase == .ready { startFetch() }
     }
 
+    /// Two identical host lists closer than this count as one (live: the same millisecond, D130).
+    static let repeatWindow: UInt64 = 1_000_000_000
+
     private func cancelFetch() {
+        refetchAfterCurrent = false
         pending = nil
         token += 1
         fetching = false
@@ -547,6 +570,12 @@ public final class ClipboardEngine: VirtualChannelEngine {
 
     private func finishFetch() {
         fetching = false
+        if refetchAfterCurrent {
+            refetchAfterCurrent = false
+            fetched = ClipboardContent()
+            fetchedFormats = []
+            return startFetch()
+        }
         let content = fetched
         let formats = fetchedFormats
         fetched = ClipboardContent()
