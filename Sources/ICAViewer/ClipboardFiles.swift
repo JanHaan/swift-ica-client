@@ -10,7 +10,9 @@ import ICAKit
 // - Session → Mac: a host list with FileGroupDescriptorW fetches only the descriptor (as the stock client does); the
 //   pasteboard gets one item per top-level file or folder whose `public.file-url` is promised (`HostFileOffer`). The
 //   first time a consumer (Finder's Paste) asks for one, the whole group is fetched over CTXGDT into a staging folder
-//   while the main thread waits, bounded, with a progress panel (`ClipboardFilesHUD`).
+//   while the main thread waits, bounded, with a progress panel (`ClipboardFilesHUD`). Groups over 50 MB are fetched
+//   in the background at copy time instead (`HostFileDownload`, a progress window with Cancel; above the soft limit
+//   the user confirms first) and reach the pasteboard as plain file URLs once complete (docs/75 §11.5).
 
 /// Settings › Clipboard › "Copy files through the clipboard" (D90): on by default, applies at the next connect.
 /// `ICA_GDT` overrides it for one run (1 = on, anything else = off); the other `ICA_GDT_*` switches apply either way.
@@ -38,10 +40,43 @@ enum ClipboardFilesSetting {
         return config
     }
 
-    /// Caps for one paste from the session (docs/75 §6.4): entries, total bytes, the longest main-thread wait.
+    /// Caps for one paste from the session (docs/75 §6.4, §11.5): entries and the longest main-thread wait. There is
+    /// no fixed byte cap: the free space decides, and above the soft limit the user is asked.
     static let maxEntries = 1000
-    static let maxTotal: UInt64 = 200 << 20
     static func maxWait(total: UInt64) -> TimeInterval { min(180, 30 + Double(total) / Double(1 << 20)) }
+
+    /// Settings › Clipboard › "Ask before copying more than": the soft limit in GB (0 = never ask), default 10.
+    static let softLimitKey = "clipboardFilesSoftLimitGB"
+    static let softLimitChoices = [1, 5, 10, 50, 0]
+    static let defaultSoftLimitGB = 10
+    static var softLimitGB: Int {
+        get { UserDefaults.standard.object(forKey: softLimitKey) as? Int ?? defaultSoftLimitGB }
+        set { UserDefaults.standard.set(newValue, forKey: softLimitKey) }
+    }
+
+    /// Lazy up to 50 MB (the paste waits), background above, confirm above the soft limit.
+    static var policy: ClipboardTransferPolicy {
+        let gb = softLimitGB
+        return ClipboardTransferPolicy(lazyMax: 50 << 20, softLimit: gb > 0 ? UInt64(gb) * 1_000_000_000 : nil)
+    }
+
+    /// Mac → session: the snapshot's total follows the soft limit (no limit: 1 TB); Reads are served from the files in
+    /// slices, never whole.
+    static var snapshotLimits: ClipboardFileSnapshot.Limits {
+        var limits = ClipboardFileSnapshot.Limits()
+        let gb = softLimitGB
+        limits.maxTotal = gb > 0 ? UInt64(gb) * 1_000_000_000 : 1_000_000_000_000
+        return limits
+    }
+
+    /// Session → Mac read tuning (session queue): no per-file cap; 1 MiB Reads (1 MiB was read live from a host with
+    /// icactl fetch-file, the stock client asks the whole file [B]); 2 Reads in flight (offline-measured, docs/76
+    /// §7.17; [H] live). `ICA_GDT_READSIZE` / `ICA_GDT_READAHEAD` override.
+    static func tune(_ files: GDTFileTransfer, env: [String: String] = ProcessInfo.processInfo.environment) {
+        files.maxFileSize = .max
+        files.readSize = env["ICA_GDT_READSIZE"].flatMap(Int.init).flatMap { (1...(16 << 20)).contains($0) ? $0 : nil } ?? 1 << 20
+        files.readAhead = env["ICA_GDT_READAHEAD"].flatMap(Int.init).flatMap { (1...8).contains($0) ? $0 : nil } ?? 2
+    }
 }
 
 /// The shared staging area of this process and the quit flag.
@@ -50,12 +85,28 @@ enum ClipboardFilesBridge {
     /// Set once the app is quitting: promised files are not fetched any more.
     static var quitting = false
 
+    /// Free bytes on the staging volume (nil: unknown).
+    static func freeSpace() -> Int64? {
+        let url = staging.base.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+    }
+
+    /// A background download is running (read on the session queue: host lists then do not cancel it).
+    private static let activeLock = NSLock()
+    private static var activeFlag = false
+    static var downloadActive: Bool {
+        get { activeLock.lock(); defer { activeLock.unlock() }; return activeFlag }
+        set { activeLock.lock(); activeFlag = newValue; activeLock.unlock() }
+    }
+
     /// Launch: folders of earlier runs that are gone.
     static func launchCleanup() { staging.removeStale() }
 
     /// Quit: our promised files leave the pasteboard (their folders go now), then the folders.
     static func quitCleanup() {
         quitting = true
+        HostFileDownload.current?.cancel(reason: "quit")
         HostFileOffer.withdraw()
         staging.removeOwn()
     }
@@ -157,10 +208,9 @@ final class HostFileOffer: NSObject, NSPasteboardItemDataProvider {
         if let existing = wait {
             w = existing
         } else {
-            if let free = (try? ClipboardFilesBridge.staging.base.deletingLastPathComponent()
-                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage,
-               free < Int64(plan.totalBytes) + (1 << 30) {
-                vlog("clipboard files: not enough free disk space (\(free >> 20) MB free, \(plan.totalBytes >> 20) MB + 1 GB needed)")
+            let free = ClipboardFilesBridge.freeSpace()
+            if !ClipboardTransferPolicy.enoughSpace(free: free, total: plan.totalBytes) {
+                vlog("clipboard files: not enough free disk space (\((free ?? 0) >> 20) MB free, \(plan.totalBytes >> 20) MB + 10 % needed)")
                 return ClipboardFilesHUD.shared.notice(loc("Not enough free disk space for the files from the session.",
                                                            "Nicht genug freier Speicher für die Dateien aus der Sitzung."))
             }
@@ -269,13 +319,13 @@ final class HostFilesBridge {
         }
         let plan: ClipboardStagingPlan
         do {
-            plan = try ClipboardStagingPlan.make(entries, maxEntries: ClipboardFilesSetting.maxEntries, maxTotal: ClipboardFilesSetting.maxTotal)
+            plan = try ClipboardStagingPlan.make(entries, maxEntries: ClipboardFilesSetting.maxEntries)
         } catch let failure as ClipboardStagingPlan.Failure {
             vlog("clipboard files: host files not offered on the Mac: \(failure)")
             switch failure {
             case .tooLarge, .tooMany:
-                ClipboardFilesHUD.shared.notice(loc("The files copied in the session are too large for the clipboard (limit \(ClipboardFilesSetting.maxTotal >> 20) MB, \(ClipboardFilesSetting.maxEntries) items).",
-                                                    "Die in der Sitzung kopierten Dateien sind zu groß für die Zwischenablage (Grenze \(ClipboardFilesSetting.maxTotal >> 20) MB, \(ClipboardFilesSetting.maxEntries) Objekte)."))
+                ClipboardFilesHUD.shared.notice(loc("Too many files copied in the session for the clipboard (limit \(ClipboardFilesSetting.maxEntries) items).",
+                                                    "Zu viele in der Sitzung kopierte Dateien für die Zwischenablage (Grenze \(ClipboardFilesSetting.maxEntries) Objekte)."))
             default:
                 ClipboardFilesHUD.shared.notice(loc("The files copied in the session cannot be offered on the Mac.",
                                                     "Die in der Sitzung kopierten Dateien können auf dem Mac nicht angeboten werden."))
@@ -284,8 +334,18 @@ final class HostFilesBridge {
         } catch {
             return vlog("clipboard files: host files not offered on the Mac: \(error)")
         }
+        // The same group as the download just published (the host re-sent its list): nothing new.
+        if let done = published, done.entries == entries, NSPasteboard.general.changeCount == done.changeCount {
+            return vlog("clipboard files: the host's file list is the one already on the pasteboard")
+        }
+        let decision = ClipboardFilesSetting.policy.decide(total: plan.totalBytes)
+        if decision != .lazy {
+            return startDownload(plan: plan, entries: entries, format: format, confirm: decision == .confirm)
+        }
         // The next copy: earlier transfer folders of this process go.
+        HostFileDownload.current?.cancel(reason: "a new copy in the session")
         ClipboardFilesBridge.staging.removeOwn()
+        published = nil
         let session = self.session, gdt = self.gdt
         let next = HostFileOffer(plan: plan, entries: entries, usable: { [weak self] in self.map { !$0.isEnded() } ?? false }) { wait in
             let targets = wait.targets
@@ -307,8 +367,85 @@ final class HostFilesBridge {
         }
     }
 
+    /// The last background download that reached the pasteboard (its files stay until the next copy).
+    private var published: (entries: [ClipboardFileEntry], changeCount: Int)?
+    /// A host list with a file group that came during a download (session queue → main); read after it ends.
+    private var deferredFormat: UInt16?
+
+    /// Main thread: a host list with a file group arrived while a download runs; its descriptor is read afterwards.
+    func deferHostList(format: UInt16) {
+        deferredFormat = format
+        vlog("clipboard files: a host file list came during the download; read after it")
+    }
+
+    /// A group over the lazy limit: fetched now, in the background, with the progress window.
+    private func startDownload(plan: ClipboardStagingPlan, entries: [ClipboardFileEntry], format: UInt16, confirm: Bool) {
+        HostFileDownload.current?.cancel(reason: "a new copy in the session")
+        // An older lazy offer leaves the pasteboard (a paste of it would replace this fetch); its files go.
+        offer?.invalidate()
+        offer = nil
+        HostFileOffer.withdraw()
+        ClipboardFilesBridge.staging.removeOwn()
+        published = nil
+        let session = self.session, gdt = self.gdt
+        let download = HostFileDownload(plan: plan, entries: entries, startCount: NSPasteboard.general.changeCount) { wait in
+            ClipboardFilesBridge.downloadActive = true
+            let targets = wait.targets
+            session.perform {
+                gdt.files.fetch(.files(targets: targets, expect: entries), systemFormat: UInt32(format)) { update in
+                    wait.update(update)
+                }
+            }
+        } cancelFetch: {
+            session.perform { if gdt.files.isFetching { gdt.files.cancelFetch("cancelled on the Mac") } }
+        } publish: { [weak self] urls, startCount in
+            self?.publish(urls, entries: entries, startCount: startCount) ?? false
+        } ended: { [weak self] in
+            ClipboardFilesBridge.downloadActive = false
+            self?.downloadEnded()
+        }
+        vlog("clipboard files: \(plan.files.count) files (\(plan.totalBytes) B) over the lazy limit: background download" +
+             (confirm ? ", asking first (over the soft limit)" : ""))
+        download.begin(confirm: confirm)
+    }
+
+    /// The finished download's URLs on the pasteboard, unless the Mac pasteboard changed since the copy began.
+    private func publish(_ urls: [URL], entries: [ClipboardFileEntry], startCount: Int) -> Bool {
+        guard !isEnded(), let sync else { return false }
+        let board = NSPasteboard.general
+        guard board.changeCount == startCount || board.changeCount == published?.changeCount else {
+            vlog("clipboard files: the Mac clipboard changed during the download: files kept, not put on the clipboard")
+            return false
+        }
+        var after = 0
+        let ok = sync.hostWrite(summary: "files: \(urls.count) items, downloaded in the background") {
+            board.clearContents()
+            let items = urls.map { url -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                item.setString(url.absoluteString, forType: .fileURL)
+                item.setString("download", forType: HostFileOffer.markerType)
+                return item
+            }
+            board.writeObjects(items)
+            after = board.changeCount
+            return after
+        }
+        if ok { published = (entries, after); offer = nil }
+        return ok
+    }
+
+    private func downloadEnded() {
+        guard let format = deferredFormat, !isEnded() else { return }
+        deferredFormat = nil
+        let gdt = self.gdt
+        session.perform {
+            HostFilesBridge.hostListed(format: format, gdt: gdt) { [weak self] entries in self?.hostGroup(entries, format: format) }
+        }
+    }
+
     /// The session ended (main thread).
     func sessionEnded() {
+        HostFileDownload.current?.sessionEnded()
         offer?.sessionEnded()
         let gdt = self.gdt
         session.perform { gdt.files.offer(nil) }
@@ -417,5 +554,282 @@ final class ClipboardFilesHUD {
         }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+}
+
+/// One session → Mac group over the lazy limit (docs/75 §11.5), fetched in the background into a staging folder while
+/// the main thread stays free (remote windows keep drawing). Progress window with Cancel; above the soft limit it asks
+/// first. Complete: plain file URLs go on the pasteboard (unless the Mac clipboard changed since the copy; then the
+/// window offers the folder). Cancel, failure, session end or a new copy: the fetch stops (stream released), the
+/// staging folder goes, the pasteboard is left as it was. Main thread.
+final class HostFileDownload {
+    private(set) static var current: HostFileDownload?
+
+    let plan: ClipboardStagingPlan
+    let entries: [ClipboardFileEntry]
+    let startCount: Int
+    private let startFetch: (ClipboardFileWait) -> Void
+    private let cancelFetch: () -> Void
+    private let publish: ([URL], Int) -> Bool
+    private let ended: () -> Void
+    private var wait: ClipboardFileWait?
+    private var timer: Timer?
+    private var finished = false
+    private var started = Date()
+    private var window: ClipboardDownloadWindow?
+
+    init(plan: ClipboardStagingPlan, entries: [ClipboardFileEntry], startCount: Int, start: @escaping (ClipboardFileWait) -> Void,
+         cancelFetch: @escaping () -> Void, publish: @escaping ([URL], Int) -> Bool, ended: @escaping () -> Void) {
+        self.plan = plan
+        self.entries = entries
+        self.startCount = startCount
+        self.startFetch = start
+        self.cancelFetch = cancelFetch
+        self.publish = publish
+        self.ended = ended
+    }
+
+    func begin(confirm: Bool) {
+        Self.current = self
+        let free = ClipboardFilesBridge.freeSpace()
+        guard ClipboardTransferPolicy.enoughSpace(free: free, total: plan.totalBytes) else {
+            vlog("clipboard files: not enough free disk space (\((free ?? 0) >> 20) MB free, \(plan.totalBytes >> 20) MB + 10 % needed)")
+            ClipboardFilesHUD.shared.notice(loc("Not enough free disk space for the files from the session (\(Self.size(plan.totalBytes)) + 10 %).",
+                                                "Nicht genug freier Speicher für die Dateien aus der Sitzung (\(Self.size(plan.totalBytes)) + 10 %)."))
+            return end()
+        }
+        let w = ClipboardDownloadWindow()
+        window = w
+        w.onCancel = { [weak self] in self?.cancel(reason: "cancelled on the Mac") }
+        if confirm {
+            vlog("clipboard files: asking before copying \(plan.totalBytes) B")
+            w.ask(loc("Copy \(Self.size(plan.totalBytes)) (\(plan.files.count) files) from the session to this Mac?",
+                      "\(Self.size(plan.totalBytes)) (\(plan.files.count) Dateien) aus der Sitzung auf diesen Mac kopieren?")) { [weak self] in self?.start() }
+        } else {
+            start()
+        }
+    }
+
+    private func start() {
+        guard !finished else { return }
+        let folder: URL
+        do { folder = try ClipboardFilesBridge.staging.newFolder(for: plan) } catch {
+            vlog("clipboard files: staging folder: \(error)")
+            window?.finish(loc("The files from the session could not be stored.", "Die Dateien aus der Sitzung konnten nicht gespeichert werden."))
+            return end()
+        }
+        let w = ClipboardFileWait(plan: plan, folder: folder, deadline: .distantFuture)
+        wait = w
+        started = Date()
+        startFetch(w)
+        window?.progress(bytes: 0, total: plan.totalBytes, detail: "")
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        vlog("clipboard files: background download of \(plan.files.count) files (\(plan.totalBytes) B) started")
+    }
+
+    private func tick() {
+        guard let wait, !finished else { return }
+        if let outcomes = wait.outcomes { return complete(outcomes) }
+        let p = wait.progress
+        let elapsed = Date().timeIntervalSince(started)
+        let rate = elapsed > 1 ? Double(p.bytes) / elapsed : 0
+        var detail = rate > 0 ? String(format: "%.1f MB/s", rate / 1_000_000) : ""
+        if rate > 0, p.total > p.bytes {
+            let left = Double(p.total - p.bytes) / rate
+            detail += " · " + loc("about \(Self.duration(left)) left", "noch etwa \(Self.duration(left))")
+        }
+        window?.progress(bytes: p.bytes, total: p.total, detail: detail)
+    }
+
+    private func complete(_ outcomes: [ClipboardFileWait.Outcome]) {
+        finished = true
+        timer?.invalidate()
+        var urls: [URL] = []
+        var missing = 0
+        for o in outcomes {
+            switch o {
+            case .ready(let url): urls.append(url)
+            case .partial(let url, let failed): urls.append(url); missing += failed
+            case .failed, .timedOut: missing += 1
+            }
+        }
+        let seconds = Date().timeIntervalSince(started)
+        guard !urls.isEmpty, let folder = wait?.folder else {
+            vlog("clipboard files: background download failed: \(wait?.failureReason ?? "no file received")")
+            if let folder = wait?.folder { try? FileManager.default.removeItem(at: folder) }
+            window?.finish(loc("Copying files from the session failed.", "Das Kopieren der Dateien aus der Sitzung ist fehlgeschlagen."))
+            return end()
+        }
+        vlog(String(format: "clipboard files: background download done in %.0f s, %d items, %d missing", seconds, urls.count, missing))
+        let missingNote = missing > 0 ? " " + loc("\(missing) files could not be copied.", "\(missing) Dateien konnten nicht kopiert werden.") : ""
+        if publish(urls, startCount) {
+            window?.finish(loc("The files are ready: paste them in Finder.", "Die Dateien sind bereit: im Finder einsetzen.") + missingNote, closeAfter: missing > 0 ? nil : 4)
+        } else {
+            window?.finish(loc("The files are ready, but the Mac clipboard changed meanwhile.", "Die Dateien sind bereit, aber die Mac-Zwischenablage hat sich inzwischen geändert.") + missingNote,
+                           reveal: folder)
+        }
+        end()
+    }
+
+    /// Stops a download that has not completed: fetch cancelled, staging folder removed, pasteboard untouched.
+    func cancel(reason: String) {
+        guard !finished else { window?.close(); return }
+        finished = true
+        timer?.invalidate()
+        cancelFetch()
+        wait?.update(.failed(reason))
+        if let folder = wait?.folder { try? FileManager.default.removeItem(at: folder) }
+        vlog("clipboard files: background download stopped: \(reason)")
+        window?.close()
+        end()
+    }
+
+    func sessionEnded() {
+        guard !finished else { return }
+        let w = window
+        cancel(reason: "the session ended")
+        w?.finish(loc("The session ended before the files were copied.", "Die Sitzung wurde beendet, bevor die Dateien kopiert waren."))
+    }
+
+    private func end() {
+        if Self.current === self { Self.current = nil }
+        ended()
+    }
+
+    static func size(_ bytes: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file) }
+
+    static func duration(_ seconds: Double) -> String {
+        let f = DateComponentsFormatter()
+        f.allowedUnits = seconds >= 3600 ? [.hour, .minute] : seconds >= 60 ? [.minute] : [.second]
+        f.unitsStyle = .short
+        return f.string(from: max(1, seconds)) ?? "\(Int(seconds)) s"
+    }
+}
+
+/// The background download's window: a question (Copy / Cancel), then progress with Cancel, then a result with OK
+/// (and "Show in Finder" when the files could not go on the clipboard). A floating utility panel outside the window
+/// cycle; closing it while the copy runs cancels it.
+final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
+    var onCancel: () -> Void = {}
+    private let panel: NSPanel
+    private let label = NSTextField(wrappingLabelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let bar = NSProgressIndicator()
+    private let primary = NSButton(title: "", target: nil, action: nil)
+    private let secondary = NSButton(title: "", target: nil, action: nil)
+    private var primaryAction: () -> Void = {}
+    private var secondaryAction: () -> Void = {}
+    private var running = false
+
+    override init() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 130),
+                        styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel], backing: .buffered, defer: true)
+        super.init()
+        panel.title = loc("Files from the session", "Dateien aus der Sitzung")
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+        label.preferredMaxLayoutWidth = 388
+        detail.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        detail.textColor = .secondaryLabelColor
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 1
+        for b in [primary, secondary] { b.bezelStyle = .rounded; b.target = self }
+        primary.action = #selector(primaryClicked)
+        secondary.action = #selector(secondaryClicked)
+        primary.keyEquivalent = "\r"
+        let buttons = NSStackView(views: [secondary, primary])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        let stack = NSStackView(views: [label, bar, detail, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor), stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor), stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            bar.widthAnchor.constraint(equalToConstant: 388),
+            buttons.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
+        ])
+        panel.contentView = content
+    }
+
+    private func show() {
+        if !panel.isVisible {
+            panel.contentView?.layoutSubtreeIfNeeded()
+            panel.setContentSize(panel.contentView?.fittingSize ?? NSSize(width: 420, height: 130))
+            panel.center()
+        }
+        panel.orderFrontRegardless()
+    }
+
+    private func buttons(primary p: String?, _ pa: @escaping () -> Void = {}, secondary s: String?, _ sa: @escaping () -> Void = {}) {
+        primary.isHidden = p == nil
+        primary.title = p ?? ""
+        primaryAction = pa
+        secondary.isHidden = s == nil
+        secondary.title = s ?? ""
+        secondaryAction = sa
+    }
+
+    func ask(_ question: String, onCopy: @escaping () -> Void) {
+        label.stringValue = question
+        bar.isHidden = true
+        detail.isHidden = true
+        buttons(primary: loc("Copy", "Kopieren"), onCopy, secondary: loc("Cancel", "Abbrechen"), { [weak self] in self?.onCancel() })
+        show()
+    }
+
+    func progress(bytes: UInt64, total: UInt64, detail text: String) {
+        running = true
+        label.stringValue = loc("Copying files from the session… \(HostFileDownload.size(bytes)) of \(HostFileDownload.size(total))",
+                                "Dateien werden aus der Sitzung kopiert … \(HostFileDownload.size(bytes)) von \(HostFileDownload.size(total))")
+        bar.isHidden = false
+        bar.doubleValue = total > 0 ? Double(bytes) / Double(total) : 0
+        detail.isHidden = false
+        detail.stringValue = text
+        if primary.title != loc("Cancel", "Abbrechen") || !secondary.isHidden {
+            buttons(primary: loc("Cancel", "Abbrechen"), { [weak self] in self?.onCancel() }, secondary: nil)
+            primary.keyEquivalent = "\u{1b}"
+        }
+        show()
+    }
+
+    func finish(_ text: String, reveal: URL? = nil, closeAfter: TimeInterval? = nil) {
+        running = false
+        label.stringValue = text
+        bar.isHidden = true
+        detail.isHidden = true
+        primary.keyEquivalent = "\r"
+        buttons(primary: "OK", { [weak self] in self?.close() },
+                secondary: reveal == nil ? nil : loc("Show in Finder", "Im Finder zeigen"), {
+                    if let reveal { NSWorkspace.shared.activateFileViewerSelecting([reveal]) }
+                })
+        show()
+        if let closeAfter { DispatchQueue.main.asyncAfter(deadline: .now() + closeAfter) { [weak self] in if self?.running == false { self?.close() } } }
+    }
+
+    func close() {
+        running = false
+        panel.orderOut(nil)
+    }
+
+    @objc private func primaryClicked() { primaryAction() }
+    @objc private func secondaryClicked() { secondaryAction() }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if running || !secondary.isHidden && primary.title == loc("Copy", "Kopieren") { onCancel() }
+        panel.orderOut(nil)
+        return false
     }
 }

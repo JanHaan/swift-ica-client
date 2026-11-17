@@ -72,7 +72,7 @@ public struct ClipboardStagingPlan: Equatable, Sendable {
     /// The plan for `entries` (descriptor order). Names that collide (case-insensitively, as on APFS) get " 2", " 3"
     /// before the extension, as Finder names copies; a folder listed twice is one folder. A file's folder that has no
     /// entry of its own is created anyway. A path below a file is refused.
-    public static func make(_ entries: [ClipboardFileEntry], maxEntries: Int = 1000, maxTotal: UInt64 = 200 << 20) throws -> ClipboardStagingPlan {
+    public static func make(_ entries: [ClipboardFileEntry], maxEntries: Int = 1000, maxTotal: UInt64 = .max) throws -> ClipboardStagingPlan {
         guard !entries.isEmpty else { throw Failure.empty }
         guard entries.count <= maxEntries else { throw Failure.tooMany(maxEntries) }
         var plan = ClipboardStagingPlan()
@@ -321,5 +321,44 @@ public final class ClipboardFileWait: @unchecked Sendable {
             if let result { return result }
             tick()
         }
+    }
+}
+
+/// How a session → Mac file group reaches the Mac pasteboard (docs/75 §11.5): small groups stay lazy (promised file
+/// URLs, fetched while the paste waits, bounded); larger ones are fetched in the background at copy time with a
+/// progress window and published as plain file URLs when complete; above the soft limit the user confirms first.
+public struct ClipboardTransferPolicy: Equatable, Sendable {
+    public enum Decision: Equatable, Sendable { case lazy, background, confirm }
+
+    /// Largest total fetched while a paste waits on the main thread.
+    public var lazyMax: UInt64 = 50 << 20
+    /// Above this the user is asked first (nil: never).
+    public var softLimit: UInt64? = 10_000_000_000
+
+    public init(lazyMax: UInt64 = 50 << 20, softLimit: UInt64? = 10_000_000_000) {
+        self.lazyMax = lazyMax
+        self.softLimit = softLimit
+    }
+
+    public func decide(total: UInt64) -> Decision {
+        if let softLimit, total > softLimit { return .confirm }
+        return total > lazyMax ? .background : .lazy
+    }
+
+    /// Free space needed on the staging volume: the files plus 10 % headroom.
+    public static func needed(total: UInt64) -> UInt64 { total + total / 10 }
+
+    /// False only when the free space is known and short (nil free space: unknown, the write fails if it must).
+    public static func enoughSpace(free: Int64?, total: UInt64) -> Bool {
+        guard let free, free >= 0 else { return true }
+        return UInt64(free) >= needed(total: total)
+    }
+}
+
+extension ClipboardFileWait {
+    /// Every item's outcome once the transfer has ended (nil while it runs); never blocks.
+    public var outcomes: [Outcome]? {
+        guard isFinished else { return nil }
+        return plan.items.indices.map { wait(item: $0) }
     }
 }

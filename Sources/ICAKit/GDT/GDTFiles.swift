@@ -345,6 +345,10 @@ public final class GDTFileTransfer {
     public var serveSlice = 60 << 10
     /// Read count per request when reading the host's files. The stock client asked the file size [B].
     public var readSize = 65536
+    /// Reads kept outstanding per stream for a file of known size (1 = strict request/response, as recorded). Read has
+    /// no offset: more than one relies on the host answering one request at a time, in order (docs/76 §7.17 [B]);
+    /// replies are matched to the oldest outstanding Read by seq [H for more than 1].
+    public var readAhead = 1
     /// Bytes accepted per host file (larger ones are skipped in `.flat`, fail in `.files`).
     public var maxFileSize = 64 << 20
     public var maxFiles = 16
@@ -384,7 +388,13 @@ public final class GDTFileTransfer {
         var entries: [ClipboardFileEntry] = []
         var chunk: [UInt8] = []
         var expected = 0
-        var requested: UInt32 = 0
+        /// Outstanding Reads of the current file, oldest first (`end`: the read past the announced size).
+        var pending: [(seq: UInt32, count: UInt32, end: Bool)] = []
+        /// Bytes of the Read being answered so far, and why its bytes are not kept (checked at its end).
+        var got = 0
+        var skip: String?
+        /// A Read returned the end of the stream; the rest of `pending` drains, then the stream is released.
+        var ending = false
         var stream: UInt64 = 0
         var output: FileHandle?
         var outputURL: URL?
@@ -632,6 +642,7 @@ public final class GDTFileTransfer {
         guard let f = fetch else { return }
         fetch = nil
         abandonedSeqs.insert(f.seq)
+        for p in f.pending { abandonedSeqs.insert(p.seq) }
         discardOutput(f)
         // Reading: release the stream we hold (its answer and the late answer to the Read are dropped). Opening: a late
         // successful OpenStream reply is released when it comes (`reply`). Releasing: already on its way.
@@ -663,7 +674,7 @@ public final class GDTFileTransfer {
 
     private func reply(_ m: GDTMessage) {
         typealias C = GDTWire.Command
-        guard var f = fetch, m.seq == f.seq else {
+        guard var f = fetch, m.seq == f.seq || m.seq == f.pending.first?.seq else {
             if abandonedSeqs.contains(m.seq) {
                 // A stream opened for a fetch that has ended: give it back.
                 if m.command == C.openStreamReply, m.body.count >= 12, LEBytes.u32(m.body, 0) == GDTWire.statusOK {
@@ -678,21 +689,41 @@ public final class GDTFileTransfer {
         activity &+= 1
         let b = m.body
         switch (f.step, m.command) {
-        case (.descriptor, C.getDataBegin), (.read, C.readBegin):
+        case (.descriptor, C.getDataBegin):
             guard b.count >= 12 else { return fail("begin body \(b.count) B") }
             f.expected = Int(LEBytes.u32(b, 8))
             f.chunk = []
-            if case .descriptor = f.step {
-                guard f.expected <= 4 + 1000 * ClipboardFileGroup.entrySize + 4096 else { return fail("descriptor of \(f.expected) B") }
-            } else {
-                guard f.expected <= Int(f.requested) else { return fail("the host sends \(f.expected) B for a read of \(f.requested)") }
-            }
+            guard f.expected <= 4 + 1000 * ClipboardFileGroup.entrySize + 4096 else { return fail("descriptor of \(f.expected) B") }
             fetch = f
-        case (.descriptor, C.getDataData), (.read, C.readData):
+        case (.descriptor, C.getDataData):
             guard b.count >= 10 else { return fail("data body \(b.count) B") }
             let n = Int(LEBytes.u16(b, 8))
             guard b.count >= 10 + n, f.chunk.count + n <= max(f.expected, 0) else { return fail("data chunk \(n) B does not fit") }
             f.chunk += b[10..<(10 + n)]
+            fetch = f
+        case (.read(let i), C.readBegin):
+            guard b.count >= 12, let head = f.pending.first else { return fail("begin body \(b.count) B") }
+            f.expected = Int(LEBytes.u32(b, 8))
+            f.got = 0
+            guard f.expected <= Int(head.count) else { return fail("the host sends \(f.expected) B for a read of \(head.count)") }
+            // Checked before any byte is written; the bytes of such a read are dropped and the file given up at its end.
+            let entry = f.entries[i]
+            let known = entry.flags & ClipboardFileGroup.fdFileSize != 0
+            let after = f.written + f.expected
+            f.skip = after > maxFileSize ? "over the \(maxFileSize) B cap"
+                : known && UInt64(after) > entry.size ? "the host sends more than the \(entry.size) B it announced" : nil
+            fetch = f
+        case (.read, C.readData):
+            guard b.count >= 10 else { return fail("data body \(b.count) B") }
+            let n = Int(LEBytes.u16(b, 8))
+            guard b.count >= 10 + n, f.got + n <= max(f.expected, 0) else { return fail("data chunk \(n) B does not fit") }
+            // Straight to disk: nothing of a file is held in memory beyond one message.
+            if n > 0, f.skip == nil, f.abandon == nil {
+                do { try f.output?.write(contentsOf: Data(b[10..<(10 + n)])) } catch {
+                    f.skip = "cannot write: \(error.localizedDescription)"
+                }
+            }
+            f.got += n
             fetch = f
         case (.descriptor, C.getDataEnd):
             let status = b.count >= 12 ? LEBytes.u32(b, 8) : 0xFFFF_FFFF
@@ -720,45 +751,42 @@ public final class GDTFileTransfer {
                 return openNext(after: i)
             }
             f.stream = LEBytes.u64(b, 4)
+            f.pending = []
+            f.ending = false
+            f.skip = nil
             fetch = f
-            readNext(i)
+            fillReads(i)
         case (.read(let i), C.readEnd):
             let status = b.count >= 12 ? LEBytes.u32(b, 8) : 0xFFFF_FFFF
-            let got = f.chunk
-            guard got.count == f.expected else { return fail("Read: \(got.count) of \(f.expected) B") }
-            f.chunk = []
-            if status >= 0x8000_0000 {
-                f.abandon = String(format: "Read status 0x%08x", status)
+            guard f.got == f.expected else { return fail("Read: \(f.got) of \(f.expected) B") }
+            f.pending.removeFirst()
+            if let head = f.pending.first { f.seq = head.seq }
+            let got = f.got
+            f.got = 0
+            if status >= 0x8000_0000 { f.abandon = f.abandon ?? String(format: "Read status 0x%08x", status) }
+            if let skip = f.skip { f.abandon = f.abandon ?? skip; f.skip = nil }
+            if f.abandon != nil {
+                // Replies still due for this stream are dropped; the Release reply comes after them.
+                for p in f.pending { abandonedSeqs.insert(p.seq) }
+                f.pending = []
                 fetch = f
                 return releaseCurrent(i)
             }
-            let entry = f.entries[i]
-            let known = entry.flags & ClipboardFileGroup.fdFileSize != 0
-            if f.written + got.count > maxFileSize || (known && UInt64(f.written + got.count) > entry.size) {
-                f.abandon = known && UInt64(f.written + got.count) > entry.size
-                    ? "the host sends more than the \(entry.size) B it announced" : "over the \(maxFileSize) B cap"
-                fetch = f
-                return releaseCurrent(i)
-            }
-            if !got.isEmpty {
-                do { try f.output?.write(contentsOf: Data(got)) } catch {
-                    f.abandon = "cannot write: \(error.localizedDescription)"
-                    fetch = f
-                    return releaseCurrent(i)
-                }
-                f.written += got.count
-                fetch = f
-                f.observer?(.progress(index: i, bytes: f.written))
-            }
+            f.written += got
+            fetch = f
+            if got > 0 { f.observer?(.progress(index: i, bytes: f.written)) }
             // The end of the stream: a read with no bytes (the host says S_FALSE there [B]).
-            if got.isEmpty || status != GDTWire.statusOK {
-                if known, UInt64(f.written) != entry.size {
+            if got == 0 || status != GDTWire.statusOK { f.ending = true; fetch = f }
+            if f.ending {
+                guard f.pending.isEmpty else { return }
+                let entry = f.entries[i]
+                if entry.flags & ClipboardFileGroup.fdFileSize != 0, UInt64(f.written) != entry.size {
                     f.abandon = "\(f.written) of the \(entry.size) B the host announced"
                     fetch = f
                 }
                 releaseCurrent(i)
             } else {
-                readNext(i)
+                fillReads(i)
             }
         case (.release(let i), C.releaseReply):
             if let why = f.abandon {
@@ -790,6 +818,7 @@ public final class GDTFileTransfer {
     private func openNext(after i: Int) {
         guard var f = fetch else { return }
         f.output = nil; f.outputURL = nil; f.written = 0; f.abandon = nil; f.stream = 0; f.lastCount = 0
+        f.pending = []; f.ending = false; f.skip = nil; f.got = 0
         fetch = f
         var candidates: [Int]
         switch f.mode {
@@ -845,26 +874,40 @@ public final class GDTFileTransfer {
         return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), url)
     }
 
-    private func readNext(_ i: Int) {
+    /// Keeps up to `readAhead` Reads outstanding (one for a file of unknown size): the remaining bytes in `readSize`
+    /// counts, then one more Read for the end of the stream (the stock client asked the same count again there [B]).
+    private func fillReads(_ i: Int) {
         guard var f = fetch else { return }
         let entry = f.entries[i]
-        let count: UInt32
-        if entry.flags & ClipboardFileGroup.fdFileSize != 0 {
-            let remaining = entry.size > UInt64(f.written) ? entry.size - UInt64(f.written) : 0
-            // The stock client asked the file size, then the same count again for the end of the stream [B].
-            count = remaining > 0 ? UInt32(min(remaining, UInt64(readSize))) : max(1, f.lastCount)
-        } else {
-            count = UInt32(readSize)
+        let known = entry.flags & ClipboardFileGroup.fdFileSize != 0
+        let depth = known ? max(1, readAhead) : 1
+        var sent = false
+        while f.pending.count < depth, !f.ending, !f.pending.contains(where: \.end) {
+            let count: UInt32
+            var end = false
+            if known {
+                let asked = f.pending.reduce(UInt64(0)) { $0 + UInt64($1.count) }
+                let covered = UInt64(f.written) + asked
+                if covered < entry.size {
+                    count = UInt32(min(entry.size - covered, UInt64(readSize)))
+                } else {
+                    count = max(1, f.lastCount)
+                    end = true
+                }
+            } else {
+                count = UInt32(readSize)
+            }
+            f.lastCount = count
+            let seq = takeSeq()
+            f.pending.append((seq, count, end))
+            f.step = .read(i)
+            fetch = f
+            send(GDTWire.read(seq: seq, stream: f.stream, count: count), "Read file \(i)")
+            sent = true
         }
-        f.lastCount = count
-        f.requested = count
-        f.seq = takeSeq()
-        f.step = .read(i)
-        f.chunk = []
-        f.expected = 0
+        if let head = f.pending.first { f.seq = head.seq }
         fetch = f
-        send(GDTWire.read(seq: f.seq, stream: f.stream, count: count), "Read file \(i)")
-        arm()
+        if sent { arm() }
     }
 
     private func releaseCurrent(_ i: Int) {

@@ -53,6 +53,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     static let clipFilesTitle = Text(en: "Copy files through the clipboard", de: "Dateien über die Zwischenablage kopieren")
     static let clipFilesHint = Text(en: "Copy in Finder and paste in the session, or the other way round. Applies at the next connect.",
                                     de: "Im Finder kopieren und in der Sitzung einsetzen, oder umgekehrt. Gilt ab der nächsten Verbindung.")
+    static let clipLimitHint = Text(en: "Larger copies from the session are fetched in the background with a progress window; above this size ICA Viewer asks first. Copies from the Mac to the session stop at this size.",
+                                    de: "Größere Kopien aus der Sitzung werden im Hintergrund mit Fortschrittsfenster geholt; ab dieser Größe fragt ICA Viewer vorher. Kopien vom Mac in die Sitzung enden bei dieser Größe.")
     static let dropAutomatic = Text(en: "Reconnect automatically", de: "Automatisch neu verbinden")
     static let dropAsk = Text(en: "Ask", de: "Fragen")
     static let dropHint = Text(en: "After a longer network drop, ICA Viewer reconnects your session through the store, waiting up to 10 minutes for the network. Short drops always resume by themselves.",
@@ -112,6 +114,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let compressBox = NSButton(checkboxWithTitle: T.compressTitle.shown, target: nil, action: nil)
     private let clipFilesBox = NSButton(checkboxWithTitle: T.clipFilesTitle.shown, target: nil, action: nil)
     private let dropPopup = NSPopUpButton()
+    private let clipLimitPopup = NSPopUpButton()
     private let dockBox = NSButton(checkboxWithTitle: T.dockTitle.shown, target: nil, action: nil)
     private let dockHint = NSTextField(wrappingLabelWithString: "")
     private let shortcutPopup = NSPopUpButton()
@@ -232,6 +235,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
                                                loc("Open in Preview first", "Zuerst in Vorschau öffnen")])
         // Same order as `AutoReconnect.Mode.allCases`.
         dropPopup.addItems(withTitles: [T.dropAutomatic.shown, T.dropAsk.shown])
+        clipLimitPopup.addItems(withTitles: ClipboardFilesSetting.softLimitChoices.map { gb in
+            gb > 0 ? loc("Ask above \(gb) GB", "Ab \(gb) GB fragen") : loc("Never ask", "Nie fragen")
+        })
         for choice in LauncherHotKey.choices { shortcutPopup.addItem(withTitle: choice.shortcut == nil ? T.shortcutOff.shown : choice.title) }
         folderPath.lineBreakMode = .byTruncatingMiddle
         folderPath.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
@@ -243,7 +249,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             l.alignment = .right
             return l
         }
-        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup, shortcutPopup, dropPopup])
+        let widths = Self.columnWidths(popups: [windowsScalingPopup, clientScalingPopup, printActionPopup, shortcutPopup, dropPopup, clipLimitPopup])
         func hint(_ text: Text) -> NSTextField {
             let l = NSTextField(wrappingLabelWithString: text.shown)
             l.textColor = .secondaryLabelColor
@@ -302,6 +308,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [NSGridCell.emptyContentView, hint(T.compressHint)],
             [label("clipboard"), clipFilesBox],
             [NSGridCell.emptyContentView, hint(T.clipFilesHint)],
+            [NSGridCell.emptyContentView, clipLimitPopup],
+            [NSGridCell.emptyContentView, hint(T.clipLimitHint)],
             [label("drop"), dropPopup],
             [NSGridCell.emptyContentView, hint(T.dropHint)],
             [label("dock"), dockBox],
@@ -527,6 +535,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         dockBox.state = (stored ?? HelperAppsSwitch.defaultOn) ? .on : .off
         compressBox.state = (demo ? CompressionSetting.defaultOn : CompressionSetting.stored) ? .on : .off
         clipFilesBox.state = (demo ? ClipboardFilesSetting.defaultOn : ClipboardFilesSetting.stored) ? .on : .off
+        let limit = demo ? ClipboardFilesSetting.defaultSoftLimitGB : ClipboardFilesSetting.softLimitGB
+        clipLimitPopup.selectItem(at: ClipboardFilesSetting.softLimitChoices.firstIndex(of: limit) ?? 2)
         let drop = demo ? AutoReconnect.Mode.defaultMode : AutoReconnectSetting.stored
         dropPopup.selectItem(at: AutoReconnect.Mode.allCases.firstIndex(of: drop) ?? 0)
         let overridden = !demo && HelperManager.setting.source == .environment
@@ -547,6 +557,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         if ClipboardFilesSetting.stored != clipFiles {
             ClipboardFilesSetting.stored = clipFiles
             vlog("clipboard files: saved \(clipFiles ? "on" : "off"); applies at the next connect")
+        }
+        let choices = ClipboardFilesSetting.softLimitChoices
+        if choices.indices.contains(clipLimitPopup.indexOfSelectedItem), ClipboardFilesSetting.softLimitGB != choices[clipLimitPopup.indexOfSelectedItem] {
+            ClipboardFilesSetting.softLimitGB = choices[clipLimitPopup.indexOfSelectedItem]
+            vlog("clipboard files: soft limit saved: \(ClipboardFilesSetting.softLimitGB) GB (0 = never ask)")
         }
         let modes = AutoReconnect.Mode.allCases
         if modes.indices.contains(dropPopup.indexOfSelectedItem), AutoReconnectSetting.stored != modes[dropPopup.indexOfSelectedItem] {

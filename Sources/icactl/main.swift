@@ -293,6 +293,11 @@ case "cliptest-files":
         fail("\(error)")
     }
 
+case "fetch-file":
+    // icactl fetch-file "Explorer Citrix ABC" 'H:\path\file' [destDir] — one named file, session → Mac over CTXGDT
+    // (FetchFile.swift). Fresh logon only; input: Ctrl+L, folder, Enter, file name, Ctrl+C; then logoff.
+    await fetchFileCommand(args, store: storeClient())
+
 case "cdmtest":
     // icactl cdmtest [resource] — client drive mapping test, Notepad only (docs/95 "To verify live"): maps a
     // fresh temp folder as drive M and records what the host sends. In a session this run logged on itself:
@@ -527,6 +532,12 @@ default:
                                          out, compare; fresh logon only, never saves (ICA_CLIPRICH_START_KEYS=…)
       icactl cliptest-word [cases]       "Microsoft Word ABC", one blank document: text, rtf, image (RTFD → RTF \\pict and
                                          back as RTFD), html-image (data URI, informational); Ctrl+A/V/C only, logoff
+      icactl fetch-file "Explorer Citrix ABC" 'H:\\dir\\file' [destDir] [--max-mb N] [--stall S]
+                                         [--select-all: Ctrl+A in the folder instead of typing the name]
+                                         copy one file from the session to destDir (default ~/Downloads/citrix-lab)
+                                         over CTXGDT: fresh logon only (refused while an ABC session exists), input
+                                         Ctrl+L, folder, Enter, file name, Ctrl+C only; exactly that one file or
+                                         nothing; size + SHA-256; logoff (ICA_GDT_READSIZE=N)
       icactl cliptest-files              clipboard files in "Explorer Citrix ABC": paste 2 files into a new %TEMP% folder,
                                          copy them back (SHA-256), delete only that folder, log off (fresh logon only)
                                          (ICA_GDT=1: also announce CTXGDT, log host GDT writes to .session/gdt/;
@@ -1982,7 +1993,9 @@ func sessionsCommand(_ args: [String]) async {
             // can't name its apps.
             let emptyOurs = sub == "logoff" && ProcessInfo.processInfo.environment["ICA_LOGOFF_EMPTY_OURS"] == "1"
                 && target.applications.isEmpty && target.connectionState == .disconnected
-                && (list.deviceId.map { !$0.isEmpty && target.deviceId == $0 } ?? false)
+                && ((list.deviceId.map { !$0.isEmpty && target.deviceId == $0 } ?? false)
+                    // The user named this exact disconnected, empty session for logoff (e.g. one their stock client left).
+                    || ProcessInfo.processInfo.environment["ICA_LOGOFF_USER_APPROVED"]?.lowercased() == target.shortId.lowercased())
             guard emptyOurs || TestSessionGate.allows(target, allowed: allowed, resources: resources) else {
                 fail("refused: session \(target.shortId) has apps [\(TestSessionGate.resolvedNames(target, resources: resources).joined(separator: ", "))]; "
                      + "only sessions whose apps are all in ICA_TEST_RESOURCES (\(allowed.joined(separator: ","))) may be touched")

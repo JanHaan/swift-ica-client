@@ -1380,6 +1380,7 @@ final class SessionController: NSObject {
         if let gdt {
             // Files over CTXGDT both ways (D90); CTXCLIP fetches nothing for a host list with a file group.
             engine.filesOverGDT = true
+            session.perform { ClipboardFilesSetting.tune(gdt.files) }
             let bridge = HostFilesBridge(session: session, gdt: gdt, sync: sync) { [weak self] in self?.ended ?? true }
             hostFiles = bridge
             pasteboard.onFiles = { [weak bridge] snapshot, change in bridge?.macSnapshot(snapshot, changeCount: change) }
@@ -1404,11 +1405,22 @@ final class SessionController: NSObject {
                 DispatchQueue.main.async { self?.clipboardReady() }
             case .hostClipboard(let content, _, let echo):
                 DispatchQueue.main.async { self?.clipboardSync?.hostContent(content, echo: echo) }
-            case .hostFormats, .hostEmpty(_, false):
-                // A new host clipboard: a file fetch for the previous one ends (a group in this list starts anew).
+            case .hostFormats(let ids):
+                // A new host clipboard: a file fetch for the previous one ends (a group in this list starts anew). A
+                // background download goes on while the host lists files again (it re-sends its list); the new
+                // list's descriptor is read after it (docs/75 §11.5).
+                let files = engine.registeredId(ClipboardFileFormat.groupDescriptorName).map(ids.contains) ?? false
+                if let gdt, gdt.files.isFetching, !(files && ClipboardFilesBridge.downloadActive) {
+                    gdt.files.cancelFetch("the host clipboard changed")
+                }
+            case .hostEmpty(_, false):
                 if let gdt, gdt.files.isFetching { gdt.files.cancelFetch("the host clipboard changed") }
             case .hostFileGroupListed(let format):
                 guard let gdt else { break }
+                if ClipboardFilesBridge.downloadActive {
+                    DispatchQueue.main.async { self?.hostFiles?.deferHostList(format: format) }
+                    break
+                }
                 HostFilesBridge.hostListed(format: format, gdt: gdt) { entries in
                     self?.hostFiles?.hostGroup(entries, format: format)
                 }
@@ -1751,7 +1763,7 @@ final class SystemPasteboard: ClipboardPasteboard {
         if readImages, types.contains(.rtfd) { content.rtfd = board.data(forType: .rtfd) }
         if readFiles, !types.contains(HostFileOffer.markerType), types.contains(.fileURL),
            let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-            let snapshot = ClipboardFileSnapshot.make(urls: urls)
+            let snapshot = ClipboardFileSnapshot.make(urls: urls, limits: ClipboardFilesSetting.snapshotLimits)
             onFiles?(snapshot, board.changeCount)
             if snapshot.refused == nil, !snapshot.files.isEmpty {
                 // Finder's copy also carries the names as text (kept, as the stock client does) and icons (left out).
