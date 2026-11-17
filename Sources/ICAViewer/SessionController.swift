@@ -1485,6 +1485,8 @@ final class SessionController: NSObject {
             case .hostClipboard(let content, _, let echo):
                 DispatchQueue.main.async { self?.clipboardSync?.hostContent(content, echo: echo) }
             case .hostFormats(let ids):
+                // Before this list's data is written (main is FIFO): fixes which side copied last (ClipboardSync).
+                DispatchQueue.main.async { self?.clipboardSync?.hostListed() }
                 // A new host clipboard: a file fetch for the previous one ends (a group in this list starts anew). A
                 // background download goes on while the host lists files again (it re-sends its list); the new
                 // list's descriptor is read after it (docs/75 §11.5).

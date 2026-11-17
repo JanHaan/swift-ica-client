@@ -30,6 +30,9 @@ public final class ClipboardSync {
     /// The change count our own write produced; never announced (loop prevention).
     public private(set) var ownWrite: Int?
     public private(set) var isReady = false
+    /// The pasteboard's change count when the host's latest format list arrived (`hostListed`): a Mac change the
+    /// poll had not seen by then is older than the host's copy.
+    public private(set) var countAtHostList: Int?
 
     public init(pasteboard: ClipboardPasteboard) { self.pasteboard = pasteboard }
 
@@ -41,6 +44,11 @@ public final class ClipboardSync {
     }
 
     public func channelClosed() { isReady = false }
+
+    /// The host announced a new clipboard (its FORMAT_LIST arrived). Call before that list's data is written. The poll
+    /// runs only every 500 ms and only while the viewer is frontmost, so a Mac copy it has not seen yet may well
+    /// predate the remote copy; the change count now tells the two apart at write time.
+    public func hostListed() { countAtHostList = pasteboard.changeCount }
 
     /// Trigger point (app active, window key, poll, paste key). Returns true if a snapshot was sent.
     @discardableResult
@@ -57,9 +65,9 @@ public final class ClipboardSync {
         return true
     }
 
-    /// Host data for the pasteboard. Not written when the Mac changed since our last look (that
-    /// change is announced instead: the newer Mac copy wins), or when it is an echo of our own
-    /// announce (the pasteboard already holds it). Returns true if written.
+    /// Host data for the pasteboard. Not written when the Mac changed after the host's list arrived (that change is
+    /// announced instead: the newer Mac copy wins), or when it is an echo of our own announce (the pasteboard already
+    /// holds it). A Mac change from before the host's list loses to the host copy. Returns true if written.
     @discardableResult
     public func hostContent(_ content: ClipboardContent, echo: Bool = false) -> Bool {
         hostWrite(summary: content.summary, echo: echo) { pasteboard.writeContent(content) }
@@ -71,9 +79,14 @@ public final class ClipboardSync {
     public func hostWrite(summary: String, echo: Bool = false, _ write: () -> Int) -> Bool {
         let count = pasteboard.changeCount
         if isReady, count != lastSeen, count != ownWrite {
-            log("Mac pasteboard changed during the host fetch: keeping the Mac copy")
-            check("change during host fetch")
-            return false
+            if let listed = countAtHostList, count == listed {
+                // Unseen, but already there when the host's list arrived: the remote copy is the newer one.
+                log("Mac pasteboard change \(count) predates the host's copy: the host copy wins")
+            } else {
+                log("Mac pasteboard changed during the host fetch: keeping the Mac copy")
+                check("change during host fetch")
+                return false
+            }
         }
         if echo {
             log("host list echoes our own announce: pasteboard left as it is")
