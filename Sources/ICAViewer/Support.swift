@@ -435,6 +435,15 @@ final class StoreService: @unchecked Sendable {
         return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    /// D110: does the store's Sessions/List list no session at all for this user? nil when it cannot be read.
+    func listsNoSession() async -> Bool? {
+        guard let store else { return nil }
+        do { return try await store.sessions.list().sessions.isEmpty } catch {
+            vlog("store check: Sessions/List failed (\(error))")
+            return nil
+        }
+    }
+
     func launch(_ resource: StoreClient.Resource) async throws -> ICAFile {
         guard let store else { throw Failure.config("no gateway") }
         let text = try await store.launchICA(resource)

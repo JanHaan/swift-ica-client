@@ -229,6 +229,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !launchQueue.isEmpty { launch(launchQueue.removeFirst(), interactive: true) }
             }
             do {
+                // D110: automated launches (hold, self test, ICAVIEWER_LAUNCH) check the store first; with no session
+                // listed, nothing can be reconnected, so the logon UI means a fresh logon (logged off at the end).
+                var noPriorSession = false
+                if automated, autoAttempt == nil {
+                    noPriorSession = await store.listsNoSession() ?? false
+                    vlog("store check: " + (noPriorSession ? "no session listed before the launch" : "a session is listed (or the list failed): the timing rule decides"))
+                }
                 let ica: ICAFile
                 do {
                     ica = try await store.launch(resource)
@@ -270,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     sharedFallbacks.remove(resource.name)
                 }
                 // No CTXCAM omission on relaunch any more: its premise did not hold (notes/early-drop-analysis.md §4.2).
-                let controller = try SessionController(name: resource.name, ica: ica)
+                let controller = try SessionController(name: resource.name, ica: ica, noPriorSession: noPriorSession)
                 clientNames[ObjectIdentifier(controller)] = WDLogon(ica: ica).clientName
                 controller.onEnded = { [weak self] c in
                     guard let self else { return }

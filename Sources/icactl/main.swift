@@ -76,7 +76,13 @@ if let storeFront {
 /// A direct store keeps its own cookie jar and device id next to the gateway's (D107): `cookies-<host>.plist`,
 /// `device-id-<host>.plist`. The gateway files keep their names.
 let hostSuffix = storeFront?.host.map { "-" + $0 } ?? ""
-let cookiePath = sessionDir.appendingPathComponent("cookies\(hostSuffix).plist").path
+/// A direct store's jar is also per user (`cookies-<host>-<user>.plist`, D111): two lab users (labuser1, labuser2)
+/// must not share a store session. The device id stays per host: it is one client device.
+let userSuffix: String = {
+    guard storeFront != nil, let user = env["CITRIX_USERNAME"], !user.isEmpty else { return "" }
+    return "-" + String(user.lowercased().map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" ? $0 : "_" })
+}()
+let cookiePath = sessionDir.appendingPathComponent("cookies\(hostSuffix)\(userSuffix).plist").path
 try? http.loadCookies(from: cookiePath)
 // The store's device id cookie survives the empty-jar gateway logon (docs/90 §8.6); ICA_NO_DEVICE_ID=1
 // turns that off (§11 item 7: is the id new after an empty-jar logon?).

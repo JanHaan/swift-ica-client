@@ -48,10 +48,20 @@ final class SessionController: NSObject {
     /// Evidence that this run logged the session on itself: the logon UI (logonui.exe) appeared and the
     /// post-logon TWI host init came ≥ 5 s later (live fresh logons: 10–16 s; a reconnect after the
     /// logon UI: 1.7 s; a plain reconnect shows no logon UI at all). Anything else counts as a
-    /// reconnect to an existing, possibly the user's own, session.
-    private var logon = FreshLogonDetector()
+    /// reconnect to an existing, possibly the user's own, session. Automated launches also check the store first
+    /// (D110): with no session listed before the launch, the logon UI and the post-logon INIT mean a fresh logon
+    /// whatever the gap (the lab logs on in 1–4 s).
+    private var logon: FreshLogonDetector
     var sawLogonUI: Bool { logon.sawLogonUI }
     var freshLogon: Bool { logon.isFresh }
+
+    private func logonVerdict(_ gap: TimeInterval, _ what: String) -> String {
+        switch logon.basis {
+        case .timing?: "fresh logon (logon UI, then \(what) after \(Int(gap)) s)"
+        case .store?: String(format: "fresh logon (logon UI, then \(what) %.1f s later; the store listed no session before the launch)", gap)
+        case nil: String(format: "reconnect pattern (\(what) %.1f s after the logon UI)", gap)
+        }
+    }
 
     private(set) var surface: IOSurfaceRef?
     private(set) var surfaceSize = CGSize.zero
@@ -123,7 +133,8 @@ final class SessionController: NSObject {
     /// windows are over by then); with several apps all must have ended before a last-window logoff. nil before.
     private var appWindowProcesses: Set<UInt32>?
 
-    init(name: String, ica: ICAFile) throws {
+    init(name: String, ica: ICAFile, noPriorSession: Bool = false) throws {
+        logon = FreshLogonDetector(noPriorSession: noPriorSession)
         self.name = name
         appNames = [name]
         shareKey = SessionShareKey(ica: ica)
@@ -454,8 +465,7 @@ final class SessionController: NSObject {
         // The post-logon Thinwire INIT is the most reliable logon marker: our PAUSE/RESUME after it
         // makes the host answer with CLOSE/OPEN instead of a second TWI host init.
         if let gap = logon.thinwireInit() {
-            vlog(freshLogon ? "fresh logon (logon UI, then Thinwire INIT after \(Int(gap)) s)"
-                            : String(format: "reconnect pattern (Thinwire INIT %.1f s after the logon UI)", gap))
+            vlog(logonVerdict(gap, "Thinwire INIT"))
             endLogonPhase()
         }
         // The engine sent its configured limit right after INIT.
@@ -564,8 +574,7 @@ final class SessionController: NSObject {
         case .channelReady(let host):
             reachedSeamless = true
             if let gap = logon.hostInit() {
-                vlog(freshLogon ? "fresh logon (logon UI, then host init after \(Int(gap)) s)"
-                                : "reconnect pattern (host init \(String(format: "%.1f", gap)) s after the logon UI)")
+                vlog(logonVerdict(gap, "host init"))
                 endLogonPhase()
             } else if !logon.sawLogonUI {
                 // No logon UI within 3 s of the host init: a plain reconnect, no logon phase to wait for.
