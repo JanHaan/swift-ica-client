@@ -386,10 +386,13 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 info.lineBreakMode = .byTruncatingTail
                 for t in [name, info] { t.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
                 var labelViews: [NSView] = [name, info]
-                if !row.refused.isEmpty {
-                    let blocked = NSTextField(labelWithString: row.refused.joined(separator: "\n"))
+                // One label per line: VoiceOver reads each on its own, and UI scripts find each value (a joined label
+                // held them all in one multi-line value).
+                for line in row.refused {
+                    let blocked = NSTextField(labelWithString: line)
                     blocked.textColor = .secondaryText
                     blocked.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                    blocked.lineBreakMode = .byTruncatingTail
                     blocked.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
                     labelViews.append(blocked)
                 }
