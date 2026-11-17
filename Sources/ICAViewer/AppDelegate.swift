@@ -164,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let list = try await store.resources(forceLogon: forceLogon)
                 resourceList = list
                 launcher.setResources(list)
-                launcher.setStatus("\(list.count) resources")
+                launcher.setStatus("")
                 vlog("resource list: \(list.count) resources")
                 if let name = autoLaunch {
                     guard let r = list.first(where: { $0.name == name }) else {
@@ -181,11 +181,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } catch is LoginCancelled {
                 vlog("sign-in cancelled")
-                launcher.setStatus(loc("Not signed in. Choose Sign In… from the menu.", "Nicht angemeldet. Menü „Anmelden…“ wählen."))
+                launcher.setStatus(loc("Not signed in. Choose File > Sign In… to sign in.", "Nicht angemeldet. Zum Anmelden Ablage > Anmelden … wählen."))
                 launcher.showWindow(nil)
             } catch {
                 vlog("sign-in failed: \(error)")
-                launcher.setStatus("Sign-in failed: \(error)")
+                launcher.setStatus(loc("Sign-in failed. ", "Anmeldung fehlgeschlagen. ") + UserMessage.text(for: error))
                 launcher.showWindow(nil)
                 if StoreService.autofill { AppQuit.request("autofill sign-in failed") }
             }
@@ -221,7 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         launching = true
-        launcher?.setStatus("Launching \(displayName(resource.name))…")
+        launcher?.setStatus(LauncherWindowController.opening(resource.name))
         Task { @MainActor in
             defer {
                 launching = false
@@ -349,7 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 controller.onParkedChanged = { [weak self] c in
                     self?.refreshSessionRows()
-                    if c.isParked { self?.launcher?.showWindow(nil) }
+                    // No visible window left: the Connection Center lists the session with Show.
+                    if c.isParked { MainActor.assumeIsolated { self?.showConnectionCenter() } }
                 }
                 sessions.append(controller)
                 refreshSessionRows()
@@ -391,11 +392,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         SessionController.timerQueue.asyncAfter(deadline: .now() + hold, execute: work)
                     }
                 }
-                launcher?.setStatus("\(displayName(resource.name)): connecting…")
+                launcher?.setStatus(LauncherWindowController.opening(resource.name))
                 if autoLaunch == nil { launcher?.window?.orderOut(nil) }
             } catch {
                 vlog("launch failed: \(error)")
-                launcher?.setStatus("Launch failed: \(error)")
+                launcher?.setStatus(String(format: loc("%@ could not be opened. ", "%@ konnte nicht geöffnet werden. "), displayName(resource.name))
+                                    + UserMessage.text(for: error))
                 if let c = created, sessions.contains(where: { $0 === c }) {
                     sessions.removeAll { $0 === c }
                     clientNames[ObjectIdentifier(c)] = nil
@@ -559,14 +561,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// Our sessions changed: the Connection Center and the menu-bar extra show them (the launcher lists apps only).
     private func refreshSessionRows() {
-        launcher?.setSessions(sessions.filter { !$0.ended }.map { c in
-            LauncherWindowController.SessionRow(
-                title: c.appNames.map(displayName).joined(separator: ", "), detail: c.isParked ? "no visible windows" : "running", canShow: c.isParked,
-                show: { [weak c] in c?.showParkedWindows() },
-                disconnect: { [weak self, weak c] in if let c { self?.disconnect(c) } },
-                logoff: { [weak c] in vlog("launcher: log off \(logName(c?.name ?? ""))"); c?.logoff() })
-        })
         connectionCenter?.localChanged()
         MainActor.assumeIsolated { menuBarHost?.update() }
     }
@@ -654,7 +650,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clientNames[ObjectIdentifier(controller)] = nil
         let byUser = userDisconnected.remove(ObjectIdentifier(controller)) != nil
         refreshSessionRows()
-        launcher?.setStatus("\(displayName(controller.name)): \(byUser ? "disconnected" : "session ended")")
+        launcher?.setStatus(String(format: byUser ? loc("%@: disconnected", "%@: getrennt") : loc("%@: session ended", "%@: Sitzung beendet"),
+                                   displayName(controller.name)))
         guard sessions.isEmpty else { return }
         if terminating {
             AppQuit.reply("last session ended")

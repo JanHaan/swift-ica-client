@@ -174,6 +174,7 @@ enum FeatureNotice {
         p.setFrameOrigin(NSPoint(x: area.midX - p.frame.width / 2, y: area.minY + 24))
         p.orderFrontRegardless()
         panel = p
+        Access.announce(text)   // it never takes focus, so VoiceOver would not read it otherwise
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak p] in
             guard let p, p.isVisible else { return }
             NSAnimationContext.runAnimationGroup({ $0.duration = 0.4; p.animator().alphaValue = 0 }, completionHandler: { p.close() })

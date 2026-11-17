@@ -390,8 +390,14 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 labels.orientation = .vertical
                 labels.alignment = .leading
                 labels.spacing = 1
+                icon.setAccessibilityElement(false)   // decorative: the row's name follows
                 var views: [NSView] = [icon, labels, NSView()]
-                views += rowButtons(row).map { button($0.0, $0.1) }
+                // VoiceOver: "Disconnect Notepad", not the same "Disconnect" in every row.
+                views += rowButtons(row).map { title, action in
+                    let b = button(title, action)
+                    b.setAccessibilityLabel("\(title) \(row.title)")
+                    return b
+                }
                 let line = NSStackView(views: views)
                 line.orientation = .horizontal
                 line.spacing = 6
@@ -549,7 +555,8 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 }
             } catch {
                 vlog("connection center: action failed: \(error)")
-                setStatus("\(error)")
+                vlog("connection center: \(action == .disconnect ? "disconnect" : "log off") failed: \(error)")
+                setStatus(UserMessage.text(for: error))
             }
             refresh()
         }
@@ -607,9 +614,11 @@ enum QuitPrompt {
         let alert = NSAlert()
         alert.messageText = loc("Quit ICA Viewer?", "ICA Viewer beenden?")
         let list = apps.map(displayName).joined(separator: ", ")
-        alert.informativeText = String(format: loc("%d session(s) with %@ are open. Disconnect keeps the apps running so you can reconnect later; Log Off ends them.",
-                                                   "%d Sitzung(en) mit %@ sind offen. Trennen lässt die Apps weiterlaufen; Abmelden beendet sie."),
-                                       count, list)
+        alert.informativeText = count == 1
+            ? String(format: loc("%@ is open. Disconnect keeps it running so you can reconnect later; Log Off ends it.",
+                                 "%@ ist offen. Trennen lässt die Sitzung weiterlaufen; Abmelden beendet sie."), list)
+            : String(format: loc("%d sessions with %@ are open. Disconnect keeps the apps running so you can reconnect later; Log Off ends them.",
+                                 "%d Sitzungen mit %@ sind offen. Trennen lässt die Apps weiterlaufen; Abmelden beendet sie."), count, list)
         alert.addButton(withTitle: loc("Disconnect", "Trennen"))
         let logoff = alert.addButton(withTitle: loc("Log Off", "Abmelden"))
         logoff.hasDestructiveAction = true

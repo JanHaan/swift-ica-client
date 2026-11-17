@@ -80,6 +80,8 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         gatewayField.action = #selector(gatewayEdited)
         gatewayField.delegate = self
         gatewayField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        gatewayField.setAccessibilityLabel(loc("Gateway or store address", "Gateway- oder Store-Adresse"))
+        spinner.setAccessibilityLabel(loc("Signing in", "Anmeldung läuft"))
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -150,10 +152,10 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
                 guard let self, !Task.isCancelled else { return }
                 vlog("login: cannot start: \(error)")
                 self.busy = false
-                let what = service.accountKind == .storeFront ? loc("Cannot reach the store: ", "Store nicht erreichbar: ")
-                    : service.accountKind == .gateway ? loc("Cannot reach the gateway: ", "Gateway nicht erreichbar: ")
-                    : loc("Cannot sign in here: ", "Anmeldung hier nicht möglich: ")
-                self.message = what + (error is URLError ? error.localizedDescription : "\(error)")
+                let what = service.accountKind == .storeFront ? loc("Cannot reach the store. ", "Store nicht erreichbar. ")
+                    : service.accountKind == .gateway ? loc("Cannot reach the gateway. ", "Gateway nicht erreichbar. ")
+                    : loc("Cannot sign in at this address. ", "Anmeldung unter dieser Adresse nicht möglich. ")
+                self.message = what + UserMessage.text(for: error)
                 self.render()
             }
         }
@@ -277,7 +279,8 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
                 }
             } catch {
                 guard let self, !Task.isCancelled else { return }
-                self.failed(error.localizedDescription)
+                vlog("login: submit failed: \(error)")
+                self.failed(UserMessage.text(for: error))
             }
         }
     }
@@ -475,6 +478,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
             if let g = grid, g.numberOfColumns == 2 {
                 g.column(at: 0).xPlacement = .trailing
                 g.column(at: 1).width = 240
+                Access.labelControls(in: g)
             }
             grid = nil
         }
@@ -630,6 +634,17 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         updateSubmitState()
         if demo { submitButton?.isEnabled = true; return }
         focusFirstEmpty()
+        announceErrors()
+    }
+
+    /// The error shown now (ours or the gateway's), spoken once when it appears.
+    private var announced: String?
+    private func announceErrors() {
+        let errors = ([message] + (form?.fields.filter { $0.kind == .error }.map(\.label) ?? [])).compactMap { $0 }
+        let text = errors.joined(separator: " ")
+        guard text != announced else { return }
+        announced = text
+        Access.announce(text)
     }
 
     private func rememberCheckbox() -> NSButton {

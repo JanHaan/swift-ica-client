@@ -1,29 +1,24 @@
 import AppKit
 import ICAKit
 
-/// Launcher: resource list with a search field; double-click launches.
+/// Launcher: the store's apps with a search field. Typing filters, Up/Down move the selection, Return or a
+/// double-click opens the selected app. Running sessions are in the Connection Center and the menu-bar extra,
+/// not here (docs/ux/audit.md, U4).
 final class LauncherWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     var onLaunch: ((StoreClient.Resource) -> Void)?
     var onConnectionCenter: (() -> Void)?
     private var all: [StoreClient.Resource] = []
     private var shown: [StoreClient.Resource] = []
-    private let table = NSTableView()
+    private let table = LauncherTable()
     private let scroll = NSScrollView()
     private var sized = false
     private let search = NSSearchField()
     private let status = NSTextField(labelWithString: "")
-    private let sessionsStack = NSStackView()
 
-    /// One running session in the launcher.
-    struct SessionRow {
-        var title: String
-        var detail: String
-        var canShow: Bool
-        var show: () -> Void
-        var disconnect: () -> Void
-        var logoff: () -> Void
+    /// The status line while an app opens.
+    static func opening(_ name: String) -> String {
+        String(format: loc("Opening %@…", "%@ wird geöffnet …"), displayName(name))
     }
-    private var rowActions: [Int: () -> Void] = [:]
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
@@ -33,21 +28,23 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         super.init(window: window)
 
         let column = NSTableColumn(identifier: .init("name"))
-        column.title = "Resource"
+        column.title = loc("Apps", "Apps")
         table.addTableColumn(column)
         table.headerView = nil
+        table.style = .inset
         table.dataSource = self
         table.delegate = self
         table.target = self
         table.doubleAction = #selector(launchClicked)
-        table.usesAlternatingRowBackgroundColors = true
+        table.onReturn = { [weak self] in self?.launchSelected() }
+        table.setAccessibilityLabel(loc("Apps", "Apps"))
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 6, right: 0)   // the last row is not flush
         table.rowHeight = 24
 
-        search.placeholderString = "Search"
+        search.placeholderString = loc("Search", "Suchen")
         // Typing only filters. NSSearchField sends its action on every change, so it has none; Return
         // (insertNewline, below) launches the first match.
         search.delegate = self
@@ -56,22 +53,20 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
 
-        sessionsStack.orientation = .vertical
-        sessionsStack.alignment = .leading
-        sessionsStack.spacing = 4
-        let centerButton = NSButton(title: loc("Connection Center…", "Verbindungscenter…"), target: self, action: #selector(openConnectionCenter))
+        // Opens a window and asks nothing: no ellipsis (HIG, Menus).
+        let centerButton = NSButton(title: loc("Connection Center", "Verbindungscenter"), target: self, action: #selector(openConnectionCenter))
         centerButton.bezelStyle = .rounded
         centerButton.controlSize = .small
         let footer = NSStackView(views: [status, centerButton])
         footer.orientation = .horizontal
         footer.spacing = 8
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [search, scroll, sessionsStack, footer])
+        let stack = NSStackView(views: [search, scroll, footer])
         stack.orientation = .vertical
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.spacing = 8
         stack.alignment = .leading
-        for v in [search, scroll, sessionsStack, footer] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [search, scroll, footer] { v.translatesAutoresizingMaskIntoConstraints = false }
         window.contentView = stack
         NSLayoutConstraint.activate([
             search.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
@@ -87,36 +82,6 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     required init?(coder: NSCoder) { fatalError() }
 
     func setStatus(_ text: String) { status.stringValue = text }
-
-    /// Running sessions, each with Show (when it has no visible window) and Log off.
-    func setSessions(_ rows: [SessionRow]) {
-        sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        rowActions.removeAll()
-        var tag = 0
-        func button(_ title: String, _ action: @escaping () -> Void) -> NSButton {
-            tag += 1
-            rowActions[tag] = action
-            let b = NSButton(title: title, target: self, action: #selector(rowButton(_:)))
-            b.tag = tag
-            b.bezelStyle = .rounded
-            b.controlSize = .small
-            return b
-        }
-        for row in rows {
-            let label = NSTextField(labelWithString: "\(row.title): \(row.detail)")
-            label.lineBreakMode = .byTruncatingTail
-            var views: [NSView] = [label]
-            if row.canShow { views.append(button("Show", row.show)) }
-            views.append(button("Disconnect", row.disconnect))
-            views.append(button("Log off", row.logoff))
-            let line = NSStackView(views: views)
-            line.orientation = .horizontal
-            line.spacing = 6
-            sessionsStack.addArrangedSubview(line)
-        }
-    }
-
-    @objc private func rowButton(_ sender: NSButton) { rowActions[sender.tag]?() }
 
     @objc private func openConnectionCenter() { onConnectionCenter?() }
 
@@ -165,11 +130,28 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
 
     func controlTextDidChange(_ obj: Notification) { applyFilter() }
 
-    /// Return in the search field launches the first visible match; other keys keep their meaning.
+    /// In the search field: Return opens the selected app (the first match unless Up/Down chose another);
+    /// Up and Down move the selection in the list. Other keys keep their meaning.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        guard control === search, selector == #selector(NSResponder.insertNewline(_:)) else { return false }
-        if let first = shown.first { start(first) }
+        guard control === search else { return false }
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            launchSelected()
+        case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):
+            guard !shown.isEmpty else { return true }
+            let step = selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1
+            let row = min(max(table.selectedRow + step, 0), shown.count - 1)
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            table.scrollRowToVisible(row)
+        default:
+            return false
+        }
         return true
+    }
+
+    private func launchSelected() {
+        let row = table.selectedRow
+        if row >= 0, row < shown.count { start(shown[row]) } else if let first = shown.first { start(first) }
     }
 
     /// Double-click: the clicked row.
@@ -185,11 +167,11 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
     private func start(_ resource: StoreClient.Resource) {
         if let starting {
             vlog("launcher: \(logName(resource.name)) not launched; \(logName(starting)) is still starting")
-            setStatus("Starting \(displayName(starting))…")
+            setStatus(Self.opening(starting))
             return
         }
         starting = resource.name
-        setStatus("Starting \(displayName(resource.name))…")
+        setStatus(Self.opening(resource.name))
         onLaunch?(resource)
     }
 
@@ -201,7 +183,8 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         guard let window else { return }
         showWindow(nil)
         let alert = NSAlert()
-        alert.messageText = String(format: loc("%d disconnected session(s)", "%d getrennte Sitzung(en)"), apps.count)
+        alert.messageText = apps.count == 1 ? loc("A disconnected session", "Eine getrennte Sitzung")
+            : String(format: loc("%d disconnected sessions", "%d getrennte Sitzungen"), apps.count)
         alert.informativeText = apps.joined(separator: "\n") + "\n\n"
             + loc("Reconnect brings their windows back to this Mac.", "„Erneut verbinden“ holt ihre Fenster auf diesen Mac zurück.")
         alert.addButton(withTitle: loc("Reconnect", "Erneut verbinden"))
@@ -258,6 +241,7 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
             text.translatesAutoresizingMaskIntoConstraints = false
             let icon = NSImageView(image: Self.genericIcon)
             icon.translatesAutoresizingMaskIntoConstraints = false
+            icon.setAccessibilityElement(false)   // decorative: the row reads the app's name
             c.addSubview(icon)
             c.addSubview(text)
             c.imageView = icon
@@ -276,5 +260,18 @@ final class LauncherWindowController: NSWindowController, NSTableViewDataSource,
         cell.textField?.stringValue = displayName(shown[row].name)
         cell.imageView?.image = rowIcon(for: shown[row]) ?? Self.genericIcon
         return cell
+    }
+}
+
+/// The launcher's list: Return or Enter opens the selected app (NSTableView itself does nothing on Return).
+final class LauncherTable: NSTableView {
+    var onReturn: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
+            onReturn?()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
