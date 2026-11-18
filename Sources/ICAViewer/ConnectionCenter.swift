@@ -106,8 +106,8 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
     private var listFailed: String?
     private var busy = false
     private var timer: Timer?
-    /// Our connections the user just disconnected, kept 30 s so they do not flicker away (§9.3).
-    private var recentlyDisconnected: [(apps: [String], at: Date)] = []
+    /// Our connections the user just disconnected, shown until the store has caught up (§9.3; RecentDisconnects).
+    private var recentlyDisconnected = RecentDisconnects()
 
     private let stack = NSStackView()
     private let status = NSTextField(labelWithString: "")
@@ -225,6 +225,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
     func refresh(keepAlive: Bool = false) {
         guard demoRows == nil, let store = service?.store, !busy else { return }
         busy = true
+        let requested = Date()
         setStatus(loc("Refreshing…", "Aktualisiere…"))
         Task { @MainActor in
             defer { busy = false }
@@ -253,6 +254,8 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             }
             let names = Set(localConnections().map(\.clientName) + [SessionDirectory.defaultClientName])
             storeRows = SessionDirectory.merge(list: list, available: available, excludingActive: safe, clientNames: names)
+            // A list requested well after a disconnect shows the truth: its placeholder goes (mac-C's stale row).
+            if list != nil, listFailed == nil { recentlyDisconnected.listed(requestedAt: requested) }
             let counts = Dictionary(grouping: storeRows, by: { "\($0.state)".split(separator: "(").first.map(String.init) ?? "" })
                 .map { "\($0.key) \($0.value.count)" }.sorted().joined(separator: ", ")
             vlog("connection center: \(storeRows.count) store session(s) (\(counts)), \(storeRows.filter { $0.reconnect != nil }.count) reconnectable")
@@ -277,7 +280,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             s.apps.map { app in app.id.flatMap { id in resources.first { $0.id == id }?.name } ?? app.name }
         }
         var result: [Row] = []
-        recentlyDisconnected.removeAll { Date().timeIntervalSince($0.at) > 30 }
+        let placeholders = recentlyDisconnected.visible(at: Date(), connectedApps: locals.flatMap(\.apps))
         for s in storeRows {
             switch s.state {
             case .connectedHere:
@@ -303,7 +306,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         for local in locals {
             result.append(Row(group: .here, title: title(local.apps), detail: stateText(local), local: local))
         }
-        for gone in recentlyDisconnected where !result.contains(where: { $0.group == .disconnected && $0.title == title(gone.apps) }) {
+        for gone in placeholders where !result.contains(where: { $0.group == .disconnected && $0.title == title(gone.apps) }) {
             result.append(Row(group: .disconnected, title: title(gone.apps), detail: loc("Disconnected", "Getrennt")))
         }
         // Not in a `defer`: Swift evaluates `return result` before a defer block runs, so lines added there never
@@ -429,13 +432,14 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             list.append((loc("Disconnect", "Trennen"), { [weak self] in
                 guard !isDemo else { return }
                 vlog("connection center: disconnect our connection \(logName(local.name))")
-                self?.recentlyDisconnected.append((local.apps, Date()))
+                self?.recentlyDisconnected.disconnected(local.apps, at: Date())
                 local.disconnect()
             }))
             list.append((loc("Log Off", "Abmelden"), { [weak self] in
                 guard !isDemo else { return }
                 self?.confirmLogoff(row.title) {
                     vlog("connection center: log off our connection \(logName(local.name))")
+                    self?.recentlyDisconnected.loggedOff(local.apps)
                     local.logoff()
                 }
             }))
@@ -496,7 +500,10 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         }
         list.append((loc("Log Off", "Abmelden"), { [weak self] in
             guard !isDemo else { return }
-            self?.confirmLogoff(row.title) { self?.byId(.logoff, id, row.title) }
+            self?.confirmLogoff(row.title) {
+                self?.recentlyDisconnected.loggedOff(s.appNames)
+                self?.byId(.logoff, id, row.title)
+            }
         }))
         return list
     }
