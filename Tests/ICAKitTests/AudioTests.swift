@@ -34,10 +34,11 @@ private final class AudioHarness {
     var timers: [(delay: TimeInterval, block: () -> Void)] = []
 
     init(opus: Set<UInt16> = Set(AudioFormatCode.opusSubformats), codecs: Set<AudioCodecKind> = Set(AudioCodecKind.allCases),
-         idleTimer: Bool = true) {
+         idleTimer: Bool = true, enumeration: Bool = false) {
         var config = AudioEngine.Config()
         config.opusSubformats = opus
         config.codecs = codecs
+        config.enumeration = enumeration
         engine = AudioEngine(config: config)
         engine.output = { [unowned self] out in
             guard case .channel(let d) = out else { Issue.record("unexpected WD packet"); return }
@@ -274,6 +275,25 @@ private func pcmWrite(_ bytes: [UInt8], device: UInt8 = 1) -> AudioHostCommand {
         #expect(h.sink.calls.isEmpty)
         #expect(h.engine.diagnostics.recentOpens.map(\.decoder) == [false])
         #expect(h.engine.diagnostics.openCount == 1 && h.engine.diagnostics.decodableOpenCount == 0)
+    }
+
+    @Test func version4CreditsWritesAndCapInfoPerDevice() {
+        // D158: in version 4 the host keeps a buffer pool per device; without `80 02 <dev> n` it stopped after 256
+        // WRITEs of dev 1 (lab). The stock client credits CAPINFO with `80 02 <dev> 01 00` too.
+        let h = AudioHarness(enumeration: true)
+        h.feed(hex("00 04 01 11 00 00 00"))
+        #expect(h.feed(hex("05 01 06 00 01 00 01 00 10 01")) == [hex("82 01 06 00 01 00 01 00 10 01"), credit1, buffer1, hex("80 02 01 01 00")])
+        h.feed(hex("01 01 01 00 10 01 00 00 00 00"))   // PCM 8 kHz stereo 16-bit
+        var out: [[UInt8]] = []
+        for _ in 0..<32 { out += h.feed(pcmWrite([0, 0, 0, 0])) }
+        #expect(out == [hex("80 01 00 20 00"), hex("80 02 00 20 00"), hex("80 02 01 20 00")])
+        h.feed(pcmWrite([0, 0, 0, 0]))
+        #expect(h.fireTimers() == [credit1, buffer1, hex("80 02 01 01 00")])
+        h.feed(pcmWrite([0, 0, 0, 0]))
+        #expect(h.feed(hex("02 01")) == [credit1, buffer1, hex("80 02 01 01 00"), credit1])
+        // A legacy INIT afterwards: channel-wide credits only again.
+        h.feed(hex("00 02 00"))
+        #expect(h.feed(hex("05 01 06 00 01 00 01 00 10 01")).suffix(2) == [credit1, buffer1])
     }
 
     @Test func writeCreditsBatchAt32AndIdleFlush() {

@@ -236,6 +236,10 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     /// Per open playback device: WRITEs, bytes and frames since OPEN, and the last WRITE_V2 sequence.
     private var streamStats: [UInt8: (writes: Int, bytes: Int, frames: Int, lastSequence: UInt16?)] = [:]
     private var uncreditedWrites = 0
+    /// Version 4 (enumeration active): the host keeps a buffer credit pool per device, so WRITE and CAPINFO credits
+    /// also go out per device (§4.2, §6.3); without them the host stops after the initial 256 WRITEs of a device (D158).
+    private var enumerated = false
+    private var uncreditedWritesByDevice: [UInt8: Int] = [:]
     private var flushGeneration = 0
     private var ended = false
 
@@ -351,10 +355,12 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             decoders.removeAll()
             stopCapture(to: .closed)
             uncreditedWrites = 0
+            uncreditedWritesByDevice = [:]
             flushGeneration += 1
             diagnostics.readWriteV2 = version >= 3 && (caps ?? 0) & AudioWire.Caps.readWriteV2 != 0
                 && config.capabilities & AudioWire.Caps.readWriteV2 != 0
             let enumerate = config.enumeration && version >= 4
+            enumerated = enumerate
             if enumerate {
                 var devices: [UInt8] = [AudioWire.playbackDevice]
                 send(AudioReply.addDevice(AudioWire.playbackDevice, capture: false, name: "Mac"))
@@ -389,6 +395,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             send(AudioReply.capInfo(device: device, formats: accepted))
             send(AudioReply.credit(.command, count: 1))
             send(AudioReply.credit(.buffer, count: 1))
+            if enumerated { send(AudioReply.credit(.buffer, device: device, count: 1)) }
             log("REQUEST_CAPINFO dev \(device) offset \(listOffset): host [\(formats.map(\.description).joined(separator: ", "))] → "
                 + "reply [\(accepted.map(\.description).joined(separator: ", "))]")
 
@@ -481,6 +488,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             send(AudioReply.resetDevice(device, reason: AudioWire.ResetReason.wrongDeviceType))
             send(AudioReply.credit(.command, count: 1))
             send(AudioReply.credit(.buffer, count: 1))
+            if enumerated { send(AudioReply.credit(.buffer, device: device, count: 1)) }
             log("WRITE to capture dev \(device) (\(data.count) B) → RESET_DEVICE 3")
             return
         }
@@ -506,6 +514,7 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             log("WRITE dev \(device) (\(data.count) B) without a decoder → dropped")
         }
         uncreditedWrites += 1
+        if enumerated { uncreditedWritesByDevice[device, default: 0] += 1 }
         if uncreditedWrites >= config.creditBatch {
             flushWriteCredits()
         } else if uncreditedWrites == 1, let scheduleAfter {
@@ -518,7 +527,8 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         }
     }
 
-    /// Returns the credits of the WRITEs since the last batch: `80 01 00 n`, `80 02 00 n` (§6.3).
+    /// Returns the credits of the WRITEs since the last batch: `80 01 00 n`, `80 02 00 n`, and in version 4 also
+    /// `80 02 <dev> n_dev` per device (§6.3).
     private func flushWriteCredits() {
         flushGeneration += 1
         guard uncreditedWrites > 0 else { return }
@@ -526,6 +536,10 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         uncreditedWrites = 0
         send(AudioReply.credit(.command, count: n))
         send(AudioReply.credit(.buffer, count: n))
+        for (device, count) in uncreditedWritesByDevice.sorted(by: { $0.key < $1.key }) {
+            send(AudioReply.credit(.buffer, device: device, count: UInt16(count)))
+        }
+        uncreditedWritesByDevice = [:]
     }
 
     // MARK: Capture (§7)

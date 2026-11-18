@@ -8,8 +8,8 @@ import ICAKit
 /// - Playback: PowerShell in the session writes a 1 s, 1000 Hz sine WAV to %TEMP% and plays it (Media.SoundPlayer);
 ///   our decoded audio goes to `.session/audioprobe.wav` and is checked for the 1000 Hz tone (Goertzel against the
 ///   neighbouring bands).
-/// - Microphone: the client announces a capture device fed by a 440 Hz sine (`AudioToneSource`); PowerShell records
-///   3 s through winmm (`mciSendString`), saves and plays the recording; the played-back audio must hold 440 Hz.
+/// - Microphone: the client announces a capture device fed by a 440 Hz sine (`AudioToneSource`); the VDA's waveIn
+///   recorder (scripts/vda/mic-wavein.ps1) records 3 s, and the recording is played back; it must hold 440 Hz.
 /// The PowerShell is passed as `-EncodedCommand` (no quoting); it touches only two files in %TEMP%. Logs off at the end.
 func runAudioProbe(ica: ICAFile, app: TestApp) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
@@ -95,7 +95,7 @@ func runAudioProbe(ica: ICAFile, app: TestApp) async throws {
         session.send { _, twi in twi.activate(windowId: target) }
         try await Task.sleep(nanoseconds: 3_000_000_000)
         let script = AudioProbeScript.powershell(microphone: mic)
-        let command = "powershell -NoProfile -EncodedCommand " + AudioProbeScript.encoded(script)
+        let command = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + AudioProbeScript.encoded(script)
         say("typing powershell -EncodedCommand (\(script.count) chars of script: a 1 kHz WAV played\(mic ? ", 3 s recorded and played back" : ""))")
         // In chunks: a 3 kB burst of key events lost characters in the console (the microphone script did not run).
         let units = Array(command.utf16)
@@ -115,7 +115,7 @@ func runAudioProbe(ica: ICAFile, app: TestApp) async throws {
         }
         ran = true
         // Generation (~2 s) + 1 s tone, and with the microphone 3 s recording + 3 s playback.
-        let wait: Double = mic ? 30 : 18
+        let wait: Double = mic ? 45 : 18
         say("listening \(Int(wait)) s")
         let deadline = Date().addingTimeInterval(wait)
         while Date() < deadline, !session.isClosed { try await Task.sleep(nanoseconds: 500_000_000) }
@@ -174,12 +174,11 @@ enum AudioProbeScript {
         [IO.File]::WriteAllBytes($f,$ms.ToArray());(New-Object Media.SoundPlayer $f).PlaySync();Remove-Item $f;
         """
         if microphone {
+            // The waveIn recorder installed on the lab VDA (scripts/vda/mic-wavein.ps1; MCI record failed with 322 for
+            // every client), then the recording is played back so that our playback path can check it for 440 Hz.
             s += """
-            Add-Type -Name M -Namespace W -MemberDefinition '[DllImport("winmm.dll")] public static extern int mciSendString(string c, System.Text.StringBuilder r, int l, IntPtr h); [DllImport("winmm.dll")] public static extern int waveInGetNumDevs();';'waveIn devices '+[W.M]::waveInGetNumDevs();\
-            $r="$env:TEMP\\ica-probe-rec.wav";'mci open '+[W.M]::mciSendString('open new type waveaudio alias rec',$null,0,0);\
-            'mci set '+[W.M]::mciSendString('set rec bitspersample 16 samplespersec 48000 channels 2 bytespersec 192000 alignment 4',$null,0,0);\
-            'mci record '+[W.M]::mciSendString('record rec',$null,0,0);Start-Sleep 3;'mci save '+[W.M]::mciSendString('save rec '+$r,$null,0,0);\
-            [W.M]::mciSendString('close rec',$null,0,0)|Out-Null;(New-Object Media.SoundPlayer $r).PlaySync();Remove-Item $r;
+            & C:\\Users\\Public\\mic-wavein.ps1 -Seconds 3;$r="C:\\Users\\Public\\micw-$env:USERNAME.wav";\
+            if(Test-Path $r){(New-Object Media.SoundPlayer $r).PlaySync()};
             """
         }
         return s
