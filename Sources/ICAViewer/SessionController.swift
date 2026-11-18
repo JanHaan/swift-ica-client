@@ -171,6 +171,7 @@ final class SessionController: NSObject {
         let kbdLayout = KeyboardLayoutSync.sessionLayout()
         config.logon.keyboardLayout = kbdLayout.klid
         sessionKLID = kbdLayout.klid
+        keyboard.sessionLayout = kbdLayout.klid
         vlog(String(format: "keyboard layout %08x from %@", kbdLayout.klid, kbdLayout.source))
         // Match macOS text rendering: greyscale anti-aliasing (1 = standard) instead of ClearType's
         // colour fringes. ICA_FONT_SMOOTHING: 0 none, 1 standard, 2 ClearType.

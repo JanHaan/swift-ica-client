@@ -1,21 +1,20 @@
 import Carbon.HIToolbox
-import ICAKit
 
 /// macOS virtual key codes (kVK_*) → PC scancode set 1. Scancodes are positional, so the
-/// server's keyboard layout (German, 0x407) decides the character. Extended keys carry 0xE0.
-enum KeyMap {
-    struct Code: Equatable, Hashable {
-        var extended: Bool
-        var code: UInt8
-        init(_ code: UInt8, extended: Bool = false) { self.code = code; self.extended = extended }
+/// session's keyboard layout (announced at logon, D141) decides the character. Extended keys carry 0xE0.
+public enum KeyMap {
+    public struct Code: Equatable, Hashable {
+        public var extended: Bool
+        public var code: UInt8
+        public init(_ code: UInt8, extended: Bool = false) { self.code = code; self.extended = extended }
     }
 
     /// ISO keyboards (German Mac keyboards) swap the two keys around the left shift/1 key
     /// compared with ANSI: kVK_ISO_Section is the key left of 1 (PC 0x29), kVK_ANSI_Grave
     /// is the key right of the left shift (PC 0x56).
-    static var isISO: Bool = KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO
+    public static var isISO: Bool = KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO
 
-    static func scancode(_ keyCode: UInt16) -> Code? {
+    public static func scancode(_ keyCode: UInt16) -> Code? {
         switch Int(keyCode) {
         case kVK_ISO_Section: return Code(isISO ? 0x29 : 0x56)
         case kVK_ANSI_Grave: return Code(isISO ? 0x56 : 0x29)
@@ -25,7 +24,7 @@ enum KeyMap {
 
     /// Keys that type a character in some layout (letters, digits, punctuation, the ISO key): a dead key among them gives
     /// no characters on its own (D141). Not space, return, tab, escape, delete, keypad or function keys.
-    static func isCharacterKey(_ keyCode: UInt16) -> Bool { characterKeys.contains(Int(keyCode)) }
+    public static func isCharacterKey(_ keyCode: UInt16) -> Bool { characterKeys.contains(Int(keyCode)) }
 
     static let characterKeys: Set<Int> = [
         kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F, kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I,
@@ -82,7 +81,7 @@ enum KeyMap {
     /// The key that types `character` (a letter) in the current keyboard layout, for a menu command sent
     /// as its shortcut (scancodes are positional: on a German layout Z is kVK_ANSI_Y, on Dvorak V is
     /// kVK_ANSI_Period). Every key code is searched; the ANSI position when the layout has no Unicode data.
-    static func keyCode(typing character: String) -> UInt16? {
+    public static func keyCode(typing character: String) -> UInt16? {
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
               let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
             return KeyLayoutSearch.keyCode(typing: character, translate: nil)
@@ -103,6 +102,6 @@ enum KeyMap {
         }
     }
 
-    static let leftControl = Code(0x1D)
-    static let leftAlt = Code(0x38)
+    public static let leftControl = Code(0x1D)
+    public static let leftAlt = Code(0x38)
 }

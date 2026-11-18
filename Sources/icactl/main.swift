@@ -401,7 +401,8 @@ case "cdmtest-explorer":
 
 case "kbdtest":
     // icactl kbdtest <klid hex> [resource] — keyboard layout announced at logon reaches the session (D141, KbdTest.swift):
-    // fixed scancodes in Notepad, read back through the clipboard; ICA_KBDTEST_TEXT=1 sends Unicode text instead.
+    // fixed scancodes in Notepad, read back through the clipboard; ICA_KBDTEST_TEXT=1 types German-Mac key strokes through
+    // the app's KeyTranslator in text mode instead (D160).
     // Lab only (ICA_ALLOW_ANY_RESOURCE=1).
     guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("kbdtest needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
     guard let klidText = args.first, let klid = UInt32(klidText, radix: 16) else { fail("usage: icactl kbdtest <klid hex, e.g. 00000407> [resource]") }

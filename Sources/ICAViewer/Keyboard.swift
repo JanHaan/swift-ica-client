@@ -30,23 +30,29 @@ struct KeyInput {
     }
 }
 
-/// Turns AppKit key events into ICA keyboard input: scancodes for mapped keys (the server's German
-/// layout applies), Unicode for characters without a mapping and for Option-composed characters
-/// (the macOS layout's Option characters differ from the Windows AltGr ones). Cmd+key becomes Ctrl+key.
+/// Turns AppKit key events into ICA keyboard input through ICAKit's `KeyTranslator` (docs/30 §14.1a): scancodes for
+/// keys, Unicode for Option-composed characters and, after a layout switch, for printable keys; Cmd+key becomes Ctrl+key.
 final class KeyboardTranslator {
     weak var controller: SessionController?
+    private let core = KeyTranslator()
     /// The Mac's input source differs from the layout announced at logon (D141): printable characters go as Unicode
     /// text, as the stock client always does, so they stay right after a mid-session switch. Set by the controller.
-    var textForPrintables = false
-    /// Scancodes currently down on the server, to release on focus loss.
-    private var down: Set<KeyMap.Code> = []
-    /// Option is held but Alt has not been sent yet (it might compose a character).
-    private var pendingAlt: KeyMap.Code?
-    private var altUsed = false
+    var textForPrintables: Bool {
+        get { core.textForPrintables }
+        set { core.textForPrintables = newValue }
+    }
+    /// The KLID announced at logon (shortcut letters in text mode follow it).
+    var sessionLayout: UInt32 {
+        get { core.sessionLayout }
+        set { core.sessionLayout = newValue }
+    }
+
     /// Keys go through the controller's input path, which may briefly hold them (and the mouse) behind
     /// a clipboard announce; keys are queued while suspended, never dropped.
-    private func emit(_ body: @escaping (WinstationDriver) -> Void) {
-        controller?.sendInput(dropWhileSuspended: false, body)
+    private func emit(_ outputs: [KeyOutput]) {
+        guard !outputs.isEmpty else { return }
+        controller?.noteActivity()
+        controller?.sendInput(dropWhileSuspended: false) { wd in wd.send(outputs) }
     }
 
     /// Cmd-V or Ctrl-V, by character as the Edit menu matches it (so Dvorak's V counts too).
@@ -59,26 +65,15 @@ final class KeyboardTranslator {
         controller?.clipboardBeforePaste()
     }
 
-    private func send(_ code: KeyMap.Code, up: Bool) {
-        controller?.noteActivity()
-        if up { down.remove(code) } else { down.insert(code) }
-        emit { wd in
-            if code.extended { wd.keyScancodes([0xE0, code.code], up: up) } else { wd.keyScancode(code.code, up: up) }
-        }
-    }
-
-    private func sendText(_ text: String) {
-        controller?.noteActivity()
-        emit { wd in
-            for unit in text.utf16 {
-                if wd.unicodeInsertMode { wd.keyUnicode(unit, flags: .insert) }
-                else { wd.keyUnicode(unit, flags: []); wd.keyUnicode(unit, flags: .up) }
-            }
-        }
-    }
-
-    private func flushPendingAlt() {
-        if let alt = pendingAlt { send(alt, up: false); pendingAlt = nil }
+    private func stroke(_ event: KeyInput) -> KeyStroke {
+        let flags = event.modifierFlags
+        var m: KeyStroke.Modifiers = []
+        if flags.contains(.shift) { m.insert(.shift) }
+        if flags.contains(.control) { m.insert(.control) }
+        if flags.contains(.option) { m.insert(.option) }
+        if flags.contains(.command) { m.insert(.command) }
+        return KeyStroke(keyCode: event.keyCode, modifiers: m, characters: event.characters,
+                         charactersIgnoringModifiers: event.charactersIgnoringModifiers, isARepeat: event.isARepeat)
     }
 
     func keyDown(_ event: NSEvent) { keyDown(KeyInput(event)) }
@@ -86,79 +81,14 @@ final class KeyboardTranslator {
     func flagsChanged(_ event: NSEvent) { flagsChanged(KeyInput(event)) }
 
     func keyDown(_ event: KeyInput) {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let code = KeyMap.scancode(event.keyCode)
         // The pasteboard goes to the host before the paste key does (docs/70 §5.4).
-        if !event.isARepeat { syncClipboardIfPaste(event, flags) }
-        if flags.contains(.command) {
-            // Cmd shortcuts not taken by our menu: Ctrl+key on the server (copy, paste, …).
-            guard let code else { return }
-            send(KeyMap.leftControl, up: false)
-            send(code, up: false)
-            send(code, up: true)
-            send(KeyMap.leftControl, up: true)
-            return
-        }
-        if flags.contains(.option), !flags.contains(.control), let chars = event.characters, !chars.isEmpty,
-           chars != event.charactersIgnoringModifiers, chars.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }),
-           chars.unicodeScalars.first.map({ $0.value < 0xF700 || $0.value > 0xF8FF }) ?? false {
-            // Option-composed character (e.g. @ € | on a German Mac layout): send it as text, without Alt.
-            sendText(chars)
-            return
-        }
-        if textForPrintables, !flags.contains(.control), !flags.contains(.option) {
-            // Layout differs from the session's: the Mac's character, not the key position (D141). A dead key gives no
-            // characters yet; it is swallowed and the composed character follows as text.
-            if let chars = event.characters, KeyboardLayoutSync.isPrintable(chars) { sendText(chars); return }
-            if event.characters?.isEmpty ?? true, code != nil, KeyMap.isCharacterKey(event.keyCode) { return }
-        }
-        if let code {
-            if pendingAlt != nil { flushPendingAlt(); altUsed = true }
-            send(code, up: false)    // repeats send another make code, as on a PC
-        } else if let chars = event.characters, !chars.isEmpty {
-            sendText(chars)
-        }
+        if !event.isARepeat { syncClipboardIfPaste(event, event.modifierFlags.intersection(.deviceIndependentFlagsMask)) }
+        emit(core.keyDown(stroke(event)))
     }
 
-    func keyUp(_ event: KeyInput) {
-        if event.modifierFlags.contains(.command) { return }
-        guard let code = KeyMap.scancode(event.keyCode), down.contains(code) else { return }
-        send(code, up: true)
-    }
+    func keyUp(_ event: KeyInput) { emit(core.keyUp(stroke(event))) }
 
-    func flagsChanged(_ event: KeyInput) {
-        let keyCode = Int(event.keyCode)
-        guard let code = KeyMap.scancode(event.keyCode) else { return }
-        let flags = event.modifierFlags
-        if keyCode == kVK_CapsLock {
-            // One flagsChanged per toggle: tap Caps Lock on the server.
-            send(code, up: false)
-            send(code, up: true)
-            return
-        }
-        let isDown: Bool
-        switch keyCode {
-        case kVK_Shift, kVK_RightShift: isDown = flags.contains(.shift) && !down.contains(code)
-        case kVK_Control, kVK_RightControl: isDown = flags.contains(.control) && !down.contains(code)
-        case kVK_Option, kVK_RightOption: isDown = flags.contains(.option) && !(down.contains(code) || pendingAlt == code)
-        default: return
-        }
-        if keyCode == kVK_Option || keyCode == kVK_RightOption {
-            if isDown {
-                pendingAlt = code
-                altUsed = false
-            } else if pendingAlt == code {
-                // Lone Option tap: an Alt tap on the server (menu activation).
-                pendingAlt = nil
-                send(code, up: false)
-                send(code, up: true)
-            } else if down.contains(code) {
-                send(code, up: true)
-            }
-            return
-        }
-        if isDown { send(code, up: false) } else if down.contains(code) { send(code, up: true) }
-    }
+    func flagsChanged(_ event: KeyInput) { emit(core.flagsChanged(stroke(event))) }
 
     /// An Edit menu item a helper app's menu bar sent (docs/99 §12 phase 2): the same path as its Cmd
     /// shortcut, so Ctrl+letter on the server and, for Paste, the clipboard sync first.
@@ -170,10 +100,5 @@ final class KeyboardTranslator {
     }
 
     /// Releases every key the server thinks is down (focus left our windows).
-    func releaseAll() {
-        pendingAlt = nil
-        for code in down { send(code, up: true) }
-        down.removeAll()
-    }
-
+    func releaseAll() { emit(core.releaseAll()) }
 }

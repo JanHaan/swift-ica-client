@@ -54,6 +54,23 @@ public enum KeyboardLayoutSync {
         !characters.isEmpty && characters.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F && !(0xF700...0xF8FF).contains($0.value) }
     }
 
+    /// The scancode of a letter (a–z) in a Windows layout, for shortcuts while the Mac's layout differs from the
+    /// session's: Windows matches Ctrl shortcuts by the layout's letter, not by position. QWERTY unless the KLID is a
+    /// QWERTZ, AZERTY or Dvorak layout we announce; nil for anything but one ASCII letter.
+    public static func letterScancode(_ letter: String, klid: UInt32) -> UInt8? {
+        guard letter.count == 1, let c = letter.unicodeScalars.first, ("a"..."z").contains(c) else { return nil }
+        let qwertz: Set<UInt32> = [0x0000_0407, 0x0000_0807, 0x0000_100C, 0x0000_0405, 0x0001_0415]
+        let rows: [(UInt8, String)]
+        if klid == 0x0001_0409 { rows = [(0x13, "pyfgcrl"), (0x1E, "aoeuidhtns"), (0x2D, "qjkxbmwvz")] }   // Dvorak
+        else if qwertz.contains(klid) { rows = [(0x10, "qwertzuiop"), (0x1E, "asdfghjkl"), (0x2C, "yxcvbnm")] }
+        else if [0x040C, 0x080C].contains(klid & 0xFFFF) { rows = [(0x10, "azertyuiop"), (0x1E, "qsdfghjklm"), (0x2C, "wxcvbn")] }
+        else { rows = [(0x10, "qwertyuiop"), (0x1E, "asdfghjkl"), (0x2C, "zxcvbnm")] }
+        for (start, row) in rows {
+            if let i = Array(row.unicodeScalars).firstIndex(of: c) { return start + UInt8(i) }
+        }
+        return nil
+    }
+
     /// Posted (distributed) when the user picks another input source.
     public static let changedNotification = Notification.Name("com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged")
 }

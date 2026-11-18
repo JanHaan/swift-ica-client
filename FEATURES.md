@@ -123,7 +123,7 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
 | Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at sign-in (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text; verified headless |
 | Keyboard layout sync to a Linux VDA | Yes | Yes | Yes | No | No | Yes | Yes | ? | |
 | Scancode keyboard mode | Yes | Yes | Yes | Yes | Yes | No | No | Yes | |
-| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters only |
+| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters, and printable keys while the Mac layout differs from the logon layout (D141, D160) |
 | Local input method for Chinese, Japanese, Korean | Yes | Yes | No | Yes | Yes | Yes | Yes | No | CTXIME |
 | Server input method for Chinese, Japanese, Korean | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: needs only key events |
 | Mouse and wheel | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | |
