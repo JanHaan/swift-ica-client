@@ -8,20 +8,20 @@ If your server blocks audio, the [Connection Center](10-connection-center.md#fea
 
 ## Microphone
 
-> **Not verified.** The microphone is implemented, but on the servers it was tested against, the Windows session never opened it, so nothing was recorded. It may not work with your server.
+The microphone is **on by default**. To use it, for example for a voice recorder or a call in a remote app:
 
-The microphone is **off by default**. To use it, for example for a voice recorder or a call in a remote app:
-
-1. In **Settings > Devices**, tick **Pass the microphone to the session**.
-2. Start a session. When a remote app starts recording, macOS asks whether ICA Viewer may use the microphone. Click **OK**.
+1. Start a session and start recording in the remote app.
+2. The first time, macOS asks whether ICA Viewer may use the microphone. Click **Allow**. The remote app waits for your answer.
 
 ICA Viewer sends sound to the session only while an app in the session is recording. While it does, a microphone icon appears in the menu bar. Click it to see **Microphone: recording** and the item **Disable Microphone for This Session**, which stops it for the current session at once.
 
 If you refused the permission, ICA Viewer says so and offers **Open Privacy Settings**; allow ICA Viewer under **System Settings > Privacy & Security > Microphone**.
 
+To never pass the microphone, clear **Pass the microphone to the session** in **Settings > Devices** ([Settings](12-settings.md#audio-and-camera)); the change applies from the next time you connect.
+
 ## Webcam
 
-The webcam is **off by default** too. In **Settings > Devices**, tick **Pass the camera to the session** and, if you have several cameras, pick one in the list below it (the default is **Automatic (system default)**). macOS asks for permission the first time a remote app starts the camera.
+The webcam is **off by default**. In **Settings > Devices**, tick **Pass the camera to the session** and, if you have several cameras, pick one in the list below it (the default is **Automatic (system default)**). macOS asks for permission the first time a remote app starts the camera.
 
 - The camera is used only while a remote app uses it. A camera icon appears in the menu bar. Click it to see **Camera: in use** and **Disable Camera for This Session**.
 - **Only 32-bit Windows apps can use this webcam path.** Modern 64-bit apps (for example Windows Camera, Teams or browsers) will not see the camera.

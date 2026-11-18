@@ -6,7 +6,7 @@ This chapter says what ICA Viewer stores and what leaves your Mac.
 
 - **The connection to your organization's server.** ICA Viewer connects only to the gateway or store address you give it, and from there to the session. The connection is encrypted with TLS. ICA Viewer has no server of its own and sends no data to its authors or to anyone else.
 - **Your sign-in.** Your user name, password and one-time code go to your organization's gateway or store, as with any Citrix client.
-- **What you choose to share.** The clipboard, files you copy, a shared folder, the microphone or the camera reach the session only when you turn these on or use them (see below).
+- **What you choose to share.** The clipboard, files you copy, a shared folder, the microphone or the camera reach the session only when you turn these on or use them (see below). The microphone is on by default, but it is used only while a remote app records, and only after you allowed it when macOS asked.
 - **Reports.** A problem report is sent only when you create a GitHub issue yourself, after you have read the preview ([Report a Problem](13-report-a-problem.md)).
 
 ICA Viewer does not check for updates and does not collect usage data.
@@ -28,14 +28,14 @@ ICA Viewer does not check for updates and does not collect usage data.
 - It **cannot** see your Mac's files, unless you share a folder or copy files into the session.
 - It **can read and change everything in the shared folder** while the client drive is on. Use a folder just for this, or **Read-only**.
 - It can read the **clipboard** when you copy or paste with the session: do not copy secrets you do not want a remote app to see.
-- It can use the **microphone** or the **camera** only when you allowed them in **Settings** and in macOS. The menu bar shows when they are in use, and you can switch them off for the current session.
+- It can use the **microphone** only while it records and you allowed it in macOS (you can turn it off in **Settings**), and the **camera** only when you allowed it in **Settings** and in macOS. The menu bar shows when they are in use, and you can switch them off for the current session.
 - Files from the session carry the macOS **quarantine flag**, so macOS checks them before opening.
 
 ## Permissions macOS may ask for
 
 | Permission | When |
 |---|---|
-| Microphone | A remote app records and **Pass the microphone to the session** is on |
+| Microphone | A remote app records for the first time (**Pass the microphone to the session** is on by default) |
 | Camera | A remote app uses the camera and **Pass the camera to the session** is on |
 | Files and Folders | You share a folder or copy files |
 | Touch ID | Reading a protected saved password or TOTP secret |

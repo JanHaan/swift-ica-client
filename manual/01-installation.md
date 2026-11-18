@@ -23,7 +23,8 @@ The app is signed with a Developer ID and notarized by Apple, so it opens like a
 
 On the first start ICA Viewer shows the **Sign In** window ([Signing in](02-signing-in.md)). Nothing is read from your Mac, and no folder or device is shared, until you sign in and start an app. macOS asks for permission the first time a feature needs it:
 
-- **Microphone** and **Camera**, only if you turn those features on in **Settings** and a remote app uses them ([Audio, microphone and webcam](08-audio-video.md)).
+- **Microphone**, the first time a remote app records ([Audio, microphone and webcam](08-audio-video.md)).
+- **Camera**, only if you turn it on in **Settings** and a remote app uses it.
 - **Files and Folders**, when you share a folder or copy files.
 
 > **If macOS refuses to open the app.** A build that is not notarized (for example one you built yourself) is blocked on its first start. Open **System Settings > Privacy & Security**, scroll down and click **Open Anyway** for ICAViewer. Alternatively, run `xattr -dr com.apple.quarantine /Applications/ICAViewer.app` in Terminal.

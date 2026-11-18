@@ -1,7 +1,7 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
 ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
-Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.8.0 as
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.9.0 as
 of 2026-11-18; how each feature behaves is described in the README and under `docs/`.
 
 ## At a glance
@@ -10,10 +10,10 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
   gateway, seamless apps as native Mac windows with their own Dock entries, several apps in one
   session, a published desktop in one window, reconnect and survival of network drops, Thinwire and
   H.264 graphics, Retina scaling, text, image, rich text and file clipboard, a shared client drive,
-  audio playback, PDF printing, the keyboard layout announced at sign-in, sign-out, and an indicator
-  for features the server refuses.
-- **Built, not yet verified live:** microphone (the test servers never opened it), webcam with a real
-  camera; the automatic reconnect after a long drop is verified in the lab, a by-hand Wi-Fi test is open.
+  audio playback, the microphone, PDF printing, the keyboard layout announced at sign-in, sign-out, and an
+  indicator for features the server refuses.
+- **Built, not yet verified live:** webcam with a real camera; the automatic reconnect after a long drop is
+  verified in the lab, a by-hand Wi-Fi test is open.
 - **Main gaps:** links opening on the Mac, several monitors for a desktop, HTML on the clipboard (the
   server filters it), SAML, smart card and FIDO2, USB devices, UDP transport (an experimental path
   exists, off), Teams optimization.
@@ -120,10 +120,10 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
 
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at sign-in (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text; verified headless |
+| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at sign-in (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text; verified headless and in the macOS test VM |
 | Keyboard layout sync to a Linux VDA | Yes | Yes | Yes | No | No | Yes | Yes | ? | |
 | Scancode keyboard mode | Yes | Yes | Yes | Yes | Yes | No | No | Yes | |
-| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters, and printable keys while the Mac layout differs from the logon layout (D141, D160) |
+| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters (€, @; such an Option never acts as Alt), and printable keys while the Mac layout differs from the logon layout; Cmd and Ctrl shortcuts stay keys, placed by the session's layout (D141, D160) |
 | Local input method for Chinese, Japanese, Korean | Yes | Yes | No | Yes | Yes | Yes | Yes | No | CTXIME |
 | Server input method for Chinese, Japanese, Korean | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: needs only key events |
 | Mouse and wheel | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | |
@@ -154,7 +154,7 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
 | Scanners | Yes | No | Partly | No | Yes | No | No | No | Windows: TWAIN, WIA (not LTSR). Linux: SANE. ChromeOS 2411.1; matrix says no |
 | Webcam | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: 32-bit host apps only; no real camera tried |
 | Audio playback | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| Microphone | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: off by default; the test servers' VDA never opened the capture device, so nothing has been recorded |
+| Microphone | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: on by default from 0.9.0; opens only while a session app records, macOS asks at the first recording; a menu-bar item while recording with "Disable Microphone for This Session"; Opus |
 | Audio over UDP | Yes | No | Yes | No | No | No | No | No | |
 | Location | Yes | Partly | No | No | No | Yes | Yes | No | Mac 2607 preview; matrix says no |
 | Mobile device features (mobility pack) | Yes | No | No | Yes | Yes | Yes | Yes | No | |
@@ -240,8 +240,7 @@ Libraries next to them: `libUrlRedirection_client.dylib` (link redirection), `li
 
 Ordered for daily use through a gateway with mail and line-of-business applications.
 
-1. **Microphone and webcam.** Implemented; the test servers never opened the capture device, and no real
-   camera has been tried (only 32-bit host apps can use the webcam).
+1. **Webcam.** Implemented; no real camera has been tried, and only 32-bit host apps can use it.
 2. **Several monitors in a published desktop**, and more than one fixed-size window for it.
 3. **File transfer** beyond clipboard files and the shared folder; HTML on the clipboard (filtered by the server).
 4. **Authentication** beyond ExplicitForms with TOTP and plain StoreFront forms (SAML, smart card, FIDO2),
