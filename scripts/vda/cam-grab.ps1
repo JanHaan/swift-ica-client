@@ -1,12 +1,16 @@
 # VDA-side webcam checker for the lab (backlog 1.10). Installed as C:\Users\Public\cam-grab.ps1 by scripts/vda/install.sh.
-# In a session: powershell -nop -ep bypass -file C:\Users\Public\cam-grab.ps1 [-Seconds 6] [-Device "Citrix HDX Web Camera"]
-# Opens the camera with the lab's 32-bit VLC (HDX webcam redirection serves 32-bit apps; "Webcam Test" is the same VLC),
+# In a session: powershell -nop -ep bypass -file C:\Users\Public\cam-grab.ps1 [-Seconds 6] [-Device "Citrix HDX Web Camera"] [-Bits 64]
+# Opens the camera with the lab's 32-bit VLC ("Webcam Test" is the same VLC; -Bits 64: "Webcam Test 64"),
 # headless (dummy interface and video output), saves every frame as PNG through VLC's scene filter, and reports:
 # the camera consent value, the DirectShow video devices registered for 32-bit apps, VLC's dshow lines, the frame count
 # and size, the colour bars read at mid-height of the top three quarters (ICALabCam shows W Y C G M R B K), whether
 # the picture moves, and a RESULT line. Writes C:\Users\Public\camg-<user>.txt and the last frame as camg-<user>.png.
+# -Bits 64: the lab's 64-bit VLC (C:\Program Files\VLC64, "Webcam Test 64") instead of the 32-bit one.
+# -KillAfter N: kill VLC N s after its start (an app that dies while capturing), wait 20 s, then open the camera again
+# for -Seconds with a fresh VLC: the frames, bars and RESULT are those of that second run (can an app use the camera
+# after another one died with it?).
 # -Expect "": skip the bar check (another test pattern, e.g. ICA Viewer's synthetic one).
-param([int]$Seconds = 6, [string]$Device = 'Citrix HDX Web Camera', [string]$Expect = 'WYCGMRBK')
+param([int]$Seconds = 6, [string]$Device = 'Citrix HDX Web Camera', [string]$Expect = 'WYCGMRBK', [ValidateSet(32, 64)][int]$Bits = 32, [int]$KillAfter = 0)
 Add-Type -AssemblyName System.Drawing
 $base = "C:\Users\Public\camg-$env:USERNAME"
 $dir = Join-Path $env:TEMP 'camgrab'
@@ -16,12 +20,15 @@ $L.Add("time " + (Get-Date -Format s) + " user $env:USERNAME session $env:SESSIO
 $ck = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam'
 $L.Add("consent webcam " + (Get-ItemProperty $ck -ErrorAction SilentlyContinue).Value + ", NonPackaged " +
     (Get-ItemProperty "$ck\NonPackaged" -ErrorAction SilentlyContinue).Value)
-$cat = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Classes\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance'
-$devs = @(Get-ChildItem $cat -ErrorAction SilentlyContinue | ForEach-Object { (Get-ItemProperty $_.PSPath).FriendlyName })
-$L.Add("32-bit video input devices: " + ($devs -join ', '))
+foreach ($v in @(@(32, 'WOW6432Node\'), @(64, ''))) {
+    $cat = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\$($v[1])Classes\CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance"
+    $devs = @(Get-ChildItem $cat -ErrorAction SilentlyContinue | ForEach-Object { (Get-ItemProperty $_.PSPath).FriendlyName })
+    $L.Add("$($v[0])-bit video input devices registered: " + ($devs -join ', '))
+}
 Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory $dir | Out-Null
 Remove-Item "$base.png" -ErrorAction SilentlyContinue
-$vlc = 'C:\Program Files (x86)\VideoLAN\VLC\vlc.exe'
+$vlc = $(if ($Bits -eq 64) { 'C:\Program Files\VLC64\vlc.exe' } else { 'C:\Program Files (x86)\VideoLAN\VLC\vlc.exe' })
+$L.Add("VLC $Bits-bit: $vlc")
 function Grab($dev) {
     Remove-Item $vlcLog -ErrorAction SilentlyContinue
     $a = "-I dummy --dummy-quiet --ignore-config --no-audio --no-video-title-show dshow:// --dshow-vdev=`"$dev`" " +
@@ -29,7 +36,9 @@ function Grab($dev) {
          "--vout=dummy --run-time=$Seconds --play-and-exit --file-logging --logfile=`"$vlcLog`" --log-verbose=2 vlc://quit"
     $t0 = Get-Date
     $p = Start-Process -FilePath $vlc -ArgumentList $a -PassThru
-    if (-not $p.WaitForExit(1000 * ($Seconds + 40))) { $p.Kill(); $L.Add("vlc: killed after $($Seconds + 40) s") }
+    if ($KillAfter -gt 0) {
+        if (-not $p.WaitForExit(1000 * $KillAfter)) { $p.Kill(); $L.Add("vlc: killed on purpose after $KillAfter s (-KillAfter); waiting 20 s"); Start-Sleep 20 }
+    } elseif (-not $p.WaitForExit(1000 * ($Seconds + 40))) { $p.Kill(); $L.Add("vlc: killed after $($Seconds + 40) s") }
     $L.Add(("vlc on `"{0}`": exit {1} after {2:N1} s" -f $dev, $p.ExitCode, ((Get-Date) - $t0).TotalSeconds))
     if (Test-Path $vlcLog) {
         $lines = @(Get-Content $vlcLog)
@@ -51,6 +60,12 @@ if ($n -eq 0) {
         $used = $d; $n = Grab $d
         if ($n -gt 0) { break }
     }
+}
+if ($KillAfter -gt 0) {
+    $L.Add("killed run: $n frames; opening the camera again")
+    Remove-Item "$dir\*" -ErrorAction SilentlyContinue
+    $KillAfter = 0
+    $n = Grab $used
 }
 $L.Add("devices VLC found: " + ($found -join ', ') + "; used: $used")
 $files = @(Get-ChildItem $dir -Filter *.png -ErrorAction SilentlyContinue | Sort-Object Name)
@@ -86,6 +101,6 @@ if ($files.Count -gt 0) {
     Copy-Item $files[-1].FullName "$base.png"
     $pass = $files.Count -ge 10 -and $diff -gt 1.0 -and ((-not $Expect) -or $b2 -eq $Expect)
 }
-$L.Add("RESULT: " + $(if ($pass) { 'PASS' } else { 'FAIL' }) + " cam-grab $($files.Count) frames")
+$L.Add("RESULT: " + $(if ($pass) { 'PASS' } else { 'FAIL' }) + " cam-grab $Bits-bit $($files.Count) frames")
 $L | Set-Content "$base.txt"; $L
 Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue

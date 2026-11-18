@@ -215,7 +215,8 @@ private final class WebcamHarness {
 
     @Test func refusalAfterBindUsesEFailBytes() {
         let h = WebcamHarness()
-        h.ready()
+        h.bound()
+        h.engine.disableCamera(notifyHost: false, reason: "test")   // a refusal that answers the CREATE_CONTEXT
         #expect(h.feed(webcamCreate(major: 1, minor: 2))
                 == [hex("18 00 86 00 01 00 00 00 02 00 00 00 05 40 00 80 00 00 00 00 18 00 00 00")])
     }
@@ -231,12 +232,13 @@ private final class WebcamHarness {
         w.raw(type + device)
         #expect(h.feed([UInt8](w.data)) == [webcamCaptureSuccess])
         #expect(h.events.contains { $0.contains("TYPE property of 12 B truncated") })
-        // A DEVICE cut short still marks a device context (the second context gets the E_FAIL refusal, not 0x81).
+        // A DEVICE cut short still marks a device context: 2/2 replaces 1/1 (the newest wins, D168), not 0x81.
         var d = ByteWriter()
         let shortDevice = WebcamElement(type: 3, hex("0C 00 00 00 00 00")).encoded
         d.u16(UInt16(20 + shortDevice.count)); d.u8(2); d.u8(0); d.u32(2); d.u32(2); d.u32(0); d.u16(16); d.u8(1); d.u8(0)
         d.raw(shortDevice)
-        #expect(h.feed([UInt8](d.data)) == [WebcamMessage.captureContextError(major: 2, minor: 2, status: WebcamWire.Status.failed)])
+        #expect(h.feed([UInt8](d.data)) == [WebcamMessage.captureContextError(major: 1, minor: 1),
+                                             WebcamMessage.captureContextSuccess(major: 2, minor: 2, format: .standard)])
         // A broken element list (length past the end) after the handles: answered (0x81, no DEVICE parsed), not dropped.
         let broken = hex("1C 00 02 00 03 00 00 00 03 00 00 00 00 00 00 00 10 00 01 00 FF 00 00 00 03 00 00 00")
         #expect(h.feed(broken) == [WebcamMessage.contextReject(major: 3, minor: 3, status: WebcamWire.Status.failed)])
@@ -265,20 +267,25 @@ private final class WebcamHarness {
         #expect(h.engine.context == nil)
     }
 
-    @Test func secondContextGetsTheErrorAndDestroyForgetsTheWholeMajor() {
+    /// docs/98b §5.4, D168: an app that ended while capturing never gets STOP/DESTROY from the host, but the next app's
+    /// context arrives. The newest wins: the old context stops, gets the device failure and is forgotten.
+    @Test func newestContextWinsAndDestroyForgetsTheWholeMajor() {
         let h = WebcamHarness()
         h.ready()
-        #expect(h.feed(webcamCreate(major: 1, minor: 2)) == [WebcamMessage.captureContextError(major: 1, minor: 2, status: WebcamWire.Status.failed)])
-        #expect(h.engine.context?.minor == 1)
         h.camera.autoGrant = true
         h.feed(webcamPlay)
         #expect(h.camera.running)
-        // DESTROY(1, 2) forgets every context with major 1, so 1/1 stops too (§3.1).
-        #expect(h.feed(hex("0C 00 04 00 01 00 00 00 02 00 00 00")).isEmpty)
-        #expect(!h.camera.running && h.engine.context == nil && h.engine.state == .idle && h.encoder.invalidated)
-        // PLAY for the forgotten context does nothing.
+        #expect(h.feed(webcamCreate(major: 1, minor: 2)) == [WebcamMessage.captureContextError(major: 1, minor: 1),
+                                                              WebcamMessage.captureContextSuccess(major: 1, minor: 2, format: .standard)])
+        #expect(!h.camera.running && h.capturing == [true, false])
+        #expect(h.engine.context?.minor == 2 && h.engine.state == .ready && h.engine.diagnostics.contextsReplaced == 1)
+        #expect(h.engine.diagnostics.contextErrors == 0)
+        // PLAY for the replaced 1/1 does nothing.
         h.feed(webcamPlay)
         #expect(h.camera.starts == 1)
+        // DESTROY(1, 1) forgets every context with major 1, so 1/2 goes too (§3.1): the camera stays off.
+        #expect(h.feed(hex("0C 00 04 00 01 00 00 00 01 00 00 00")).isEmpty)
+        #expect(!h.camera.running && h.engine.context == nil && h.engine.state == .idle && h.encoder.invalidated)
         // DESTROY of another major leaves a context alone.
         h.feed(webcamCreateContext)
         h.feed(hex("0C 00 04 00 02 00 00 00 01 00 00 00"))

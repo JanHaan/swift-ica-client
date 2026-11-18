@@ -8,7 +8,7 @@ import ICAKit
 /// `C:\Users\Public\cam-grab.ps1` (scripts/vda/) opens "Citrix HDX Web Camera" with the lab's 32-bit VLC for 6 s and
 /// reports frames, size and motion in the console and in `C:\Users\Public\camg-<user>.txt`. Here: every ch 18 command,
 /// the §13 verdict, and the console as a picture. PASS when the host played the context and our samples went out.
-/// Logs off at the end.
+/// `ICA_CAMPROBE_BITS=64`: the checker runs the lab's 64-bit VLC instead; `ICA_CAMPROBE_CHECK=web`: Edge (cam-web.ps1). Logs off at the end.
 func runCamProbe(ica: ICAFile, app: TestApp) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
@@ -70,7 +70,12 @@ func runCamProbe(ica: ICAFile, app: TestApp) async throws {
     } else if let target {
         session.send { _, twi in twi.activate(windowId: target) }
         try await Task.sleep(nanoseconds: 3_000_000_000)
-        let command = #"powershell -nop -ep bypass -file C:\Users\Public\cam-grab.ps1 -Seconds 6 -Expect """#
+        // ICA_CAMPROBE_BITS=64: the checker uses the lab's 64-bit VLC ("Webcam Test 64"); ICA_CAMPROBE_CHECK=web: the
+        // browser checker cam-web.ps1 (Edge, getUserMedia) instead of VLC.
+        let bits = env["ICA_CAMPROBE_BITS"] == "64" ? " -Bits 64" : ""
+        let command = env["ICA_CAMPROBE_CHECK"] == "web"
+            ? #"powershell -nop -ep bypass -file C:\Users\Public\cam-web.ps1 -Seconds 6"#
+            : #"powershell -nop -ep bypass -file C:\Users\Public\cam-grab.ps1 -Seconds 6 -Expect """# + bits
         say("typing: \(command)")
         session.sendInput { wd in
             for unit in command.utf16 {

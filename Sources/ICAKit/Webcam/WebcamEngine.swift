@@ -24,6 +24,8 @@ public struct WebcamDiagnostics: Sendable {
     public var rejects = 0
     public var contextErrors = 0
     public var contextSuccesses = 0
+    /// Device contexts replaced by a newer one (the newest wins, docs/98b §5.4, D168).
+    public var contextsReplaced = 0
     /// ORed "VDA Supported Encoder Formats" of the CREATE_CONTEXTs (H.264 = 2, legacy = 1).
     public var hostEncoderBits: UInt32 = 0
     public static let recentLimit = 8
@@ -84,7 +86,7 @@ public struct WebcamDiagnostics: Sendable {
             return text + "; W11: \(contextRequests) CREATE_CONTEXT without DEVICE or with minor 0, answered 0x81 (media redirection or helper contexts)"
         }
         guard contextSuccesses > 0 else {
-            return text + "; \(deviceContexts) device context(s) answered with the 0x86 error only (camera disabled, a second context, or no encoder)"
+            return text + "; \(deviceContexts) device context(s) answered with the 0x86 error only (camera disabled or no encoder)"
         }
         text += String(format: "; 0x86 success (H.264 352×288) for %d device context(s), host encoder bits 0x%x", contextSuccesses, hostEncoderBits)
         guard (controls["PLAY"] ?? 0) > 0 else {
@@ -107,7 +109,8 @@ public struct WebcamDiagnostics: Sendable {
 ///   No credits, no flow control.
 /// - CREATE_CONTEXT: only DEVICE contexts with minor ≠ 0 after BIND are served. The encoder is created and the
 ///   208-byte 0x86 success (H.264 352×288 15 fps 160 kbit/s) goes out; **the camera is not touched**. Others get
-///   0x81 (non-device) or the 24-byte 0x86 error (0x40001: before BIND, a second context, camera disabled, no encoder).
+///   0x81 (non-device) or the 24-byte 0x86 error (before BIND, camera disabled, no encoder). The newest device context
+///   wins: one with other handles replaces the current one, which gets the unsolicited 0x86 failure (§5.4, D168).
 /// - CONTROL PLAY: camera permission is asked for at the first PLAY only; then the source starts and every frame is
 ///   encoded (key frame first and at least every 2 s) and sent as TRANSMIT fragments of ≤ 4000 B. A denied
 ///   permission or a failing source answers the 0x86 error. PAUSE/STOP stop the source (the encoder stays);
@@ -396,11 +399,19 @@ public final class WebcamEngine: VirtualChannelEngine, VirtualChannelModule {
         if !bindSeen { return fail("before BIND") }
         if cameraDisabled { return fail("camera disabled for this session") }
         if let context {
-            guard context.major == request.major, context.minor == request.minor else {
-                return fail("context \(context.major)/\(context.minor) is active; one at a time")
+            if context.major == request.major, context.minor == request.minor {
+                // The same handles again: replace the old context.
+                stopCapture(to: .idle, reason: "context \(ids) re-created")
+            } else {
+                // The newest wins (§5.4, D168): a host app that ended while capturing never gets STOP or DESTROY, but
+                // the next app's context arrives; the old one is told it failed and is forgotten.
+                let old = "\(context.major)/\(context.minor)"
+                stopCapture(to: .idle, reason: "context \(old) replaced by \(ids)")
+                send(WebcamMessage.captureContextError(major: context.major, minor: context.minor))
+                diagnostics.contextsReplaced += 1
+                log("context \(old) replaced by \(ids) (newest wins; its app may have ended without STOP): "
+                    + "device failure 0x00040001 sent for \(old)")
             }
-            // The same handles again: replace the old context.
-            stopCapture(to: .idle, reason: "context \(ids) re-created")
             releaseContext()
         }
         let made: WebcamVideoEncoder
