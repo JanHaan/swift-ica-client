@@ -13,7 +13,7 @@ product and not a replacement for the official client. Expect gaps; see [Status]
 > interoperates with. This project contains no code from any Citrix product.
 
 <p align="center">
-  <img src="manual/images/desktop.png" width="720" alt="Remote Windows apps as native Mac windows, with their Dock entries">
+  <img src="manual/images/desktop.png" width="720" alt="Remote Windows apps as native Mac windows">
 </p>
 
 ## User manual
