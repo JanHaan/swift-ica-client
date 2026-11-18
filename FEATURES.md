@@ -13,7 +13,7 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
   audio playback, PDF printing, the keyboard layout announced at sign-in, sign-out, and an indicator
   for features the server refuses.
 - **Built, not yet verified live:** microphone (the test servers never opened it), webcam with a real
-  camera, a by-hand test of the automatic reconnect after a long drop.
+  camera; the automatic reconnect after a long drop is verified in the lab, a by-hand Wi-Fi test is open.
 - **Main gaps:** links opening on the Mac, several monitors for a desktop, HTML on the clipboard (the
   server filters it), SAML, smart card and FIDO2, USB devices, UDP transport (an experimental path
   exists, off), Teams optimization.
@@ -84,10 +84,10 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
 | TLS 1.3 | Yes | Yes | Yes | No | Yes | Yes | Yes | Built | Ours: system TLS offers 1.3; the negotiated version is not logged |
 | TLS 1.0 / 1.1 | No | Yes | No | Yes | Yes | No | No | ? | |
 | Survives short network drops (session reliability) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Up to the server's timeout, typically 180 s |
-| Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | Built | Web: matrix no, HTML5 2607 yes. Ours: the ACR protocol was tried live, but on this site the reconnected session waits at the Windows logon screen, so not used (D84). Instead, after a long drop ICAViewer relaunches the app through the store by itself, which reconnects the session (D86, Settings › Connection drop; waits up to 10 min for the network); not yet verified live |
-| UDP transport (EDT) | Yes | Yes | Yes | Partly | Yes | Yes | Yes | No | Web: matrix no, HTML5 2603 mentions EDT Reliable |
+| Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | Yes | Web: matrix no, HTML5 2607 yes. Ours: after a longer outage the app is relaunched through the store, which brings the session back by itself (verified in the lab: a 240 s outage, and a 60 s outage with resume in the VM); direct, gateway-less sessions get no reconnect ticket from the VDA, so the store relaunch is the long-outage path. A by-hand Wi-Fi test is still open |
+| UDP transport (EDT) | Yes | Yes | Yes | Partly | Yes | Yes | Yes | No | Web: matrix no, HTML5 2603 mentions EDT Reliable. Ours: experimental, off by default; built including DTLS and verified in the lab (4.6 to 8 times the throughput of TCP under latency and loss) |
 | EDT lossy mode | Yes | Yes | Yes | ? | Yes | Yes | Yes | No | Release notes only |
-| DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11 |
+| DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11. Ours: experimental, off by default; built including DTLS and verified in the lab (4.6 to 8 times the throughput of TCP under latency and loss) |
 | Direct VDA connection (HDX Direct) | Yes | Yes | Yes | Partly | Partly | ? | Partly | No | Release notes only; Web, ChromeOS, Android mention it in passing |
 | ICA stream compression (server → client) | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | Ours: on by default (Settings › Network), about a quarter of the data in a live test; client → server stays uncompressed |
 | Multi-port ICA | Yes | No | Yes | No | No | No | No | No | |
@@ -240,16 +240,12 @@ Libraries next to them: `libUrlRedirection_client.dylib` (link redirection), `li
 
 Ordered for daily use through a gateway with mail and line-of-business applications.
 
-1. **Auto client reconnect: built, live check pending.** Session reliability covers short outages
-   (verified under lab fault injection). After a longer outage ICAViewer relaunches the app through the
-   store by itself and waits up to 10 minutes for the network; it was run live with a 4-minute outage,
-   but a Wi-Fi-off test by hand is still open.
-2. **Microphone and webcam.** Implemented; the test servers never opened the capture device, and no real
+1. **Microphone and webcam.** Implemented; the test servers never opened the capture device, and no real
    camera has been tried (only 32-bit host apps can use the webcam).
-3. **Several monitors in a published desktop**, and more than one fixed-size window for it.
-4. **File transfer** beyond clipboard files and the shared folder; HTML on the clipboard (filtered by the server).
-5. **Authentication** beyond ExplicitForms with TOTP and plain StoreFront forms (SAML, smart card, FIDO2),
-   USB devices, links opening on the Mac, and HDX over UDP (an experimental, switched-off path exists).
+2. **Several monitors in a published desktop**, and more than one fixed-size window for it.
+3. **File transfer** beyond clipboard files and the shared folder; HTML on the clipboard (filtered by the server).
+4. **Authentication** beyond ExplicitForms with TOTP and plain StoreFront forms (SAML, smart card, FIDO2),
+   USB devices, links opening on the Mac, and HDX over UDP (experimental and off).
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,
 Citrix Cloud, App Protection, EPA, GACS, auto-update.

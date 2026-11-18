@@ -118,12 +118,12 @@ if ax wait "$V" id=username --timeout 30 >/dev/null; then
     sleep 1
     ax focus "$V" id=username >/dev/null; ax type "$(lab_user)" >/dev/null
     ax focus "$V" id=password >/dev/null; ax type "wrong-$RANDOM-pw" >/dev/null   # a wrong password first: the error shot
+    ax click "$V" role=AXCheckBox title~"Remember" >/dev/null 2>&1   # AXPress is unsupported on this checkbox
     sleep 1; snap "$V" "Sign In" login-form      # the password shows as dots
     ax press "$V" id=loginBtn >/dev/null
     ax wait "$V" role=AXStaticText value~"incorrect" --timeout 20 >/dev/null
     sleep 1; snap "$V" "Sign In" login-error
     ax focus "$V" id=password >/dev/null; ax key cmd+a >/dev/null; lab_password | ax type --stdin >/dev/null
-    ax press "$V" role=AXCheckBox title~"Remember" >/dev/null
     ax press "$V" id=loginBtn >/dev/null
 else miss login-form "no user name field after $STORE"; fi
 
@@ -168,7 +168,7 @@ sleep 1
 snap_rect status-menu 1320 0 600 420
 ax key escape >/dev/null; sleep 1
 tree "$V" status-item 6
-clean_notifications; snap_rect desktop 0 0 1540 1080
+clean_notifications; snap_rect desktop 0 0 1920 1080
 # Cmd-Tab between the apps is shown in the text; the window list of the Mission Control style is not captured.
 
 # ------------------------------------------------------------ clipboard
