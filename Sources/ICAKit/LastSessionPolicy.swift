@@ -30,9 +30,12 @@ public enum LastSessionPolicy {
 
     public static func decide(_ c: Context) -> Decision {
         if c.byUser { return .stay(reason: "disconnected by the user", showLauncher: !c.userWindowOpen) }
-        if c.userWindowOpen { return .stay(reason: "Settings or the Connection Center is open", showLauncher: false) }
         if c.launchPending { return .stay(reason: "another launch is pending", showLauncher: false) }
-        if !c.appeared, !c.automated { return .stay(reason: "the launch failed before an app window appeared", showLauncher: true) }
+        // Unattended (hold, self-test, ICAVIEWER_LAUNCH): nobody works in the windows, the script waits for the quit
+        // (mac-C's nightly: an open Connection Center kept a hold run alive for 7 minutes).
+        if c.automated { return .quit }
+        if c.userWindowOpen { return .stay(reason: "Settings or the Connection Center is open", showLauncher: false) }
+        if !c.appeared { return .stay(reason: "the launch failed before an app window appeared", showLauncher: true) }
         return .quit
     }
 }
