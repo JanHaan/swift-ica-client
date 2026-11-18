@@ -401,6 +401,9 @@ public final class KeychainSecretStore: SecretStore {
     }
 
     public func store(_ value: String, kind: SecretKind, host: String, account: String, protected: Bool) throws {
+        // Upgrade path: `delete` also removes the same item from the login keychain in data-protection mode, where
+        // 0.7.0 (Developer ID without a keychain entitlement) and ad-hoc builds kept it. `read` never looks there,
+        // so the user signs in once more after the upgrade, and this store leaves no orphaned old secret behind.
         delete(kind, host: host)
         var q = baseQuery(kind, host: host)
         q[kSecValueData as String] = Data(value.utf8)
@@ -423,16 +426,20 @@ public final class KeychainSecretStore: SecretStore {
     }
 
     public func delete(_ kind: SecretKind, host: String) {
-        var query = baseQuery(kind, host: host)
-        let status = SecItemDelete(query as CFDictionary)
-        if status == errSecSuccess { log("keychain: deleted \(kind.rawValue) for \(host)") }
-        if mode == .dataProtection {
-            // Items an unsigned (ad-hoc) build left in the login keychain.
-            query.removeValue(forKey: kSecUseDataProtectionKeychain as String)
-            if SecItemDelete(query as CFDictionary) == errSecSuccess {
-                log("keychain: deleted \(kind.rawValue) for \(host) from the login keychain")
-            }
+        for (i, query) in deleteQueries(kind, host: host).enumerated() where SecItemDelete(query as CFDictionary) == errSecSuccess {
+            log(i == 0 ? "keychain: deleted \(kind.rawValue) for \(host)"
+                       : "keychain: deleted the legacy \(kind.rawValue) for \(host) from the login keychain (0.7.0 or ad-hoc build)")
         }
+    }
+
+    /// What `delete` (and so `store`) removes: the item itself and, in data-protection mode, the same item in the
+    /// login keychain (the same query without `kSecUseDataProtectionKeychain`).
+    func deleteQueries(_ kind: SecretKind, host: String) -> [[String: Any]] {
+        let query = baseQuery(kind, host: host)
+        guard mode == .dataProtection else { return [query] }
+        var legacy = query
+        legacy.removeValue(forKey: kSecUseDataProtectionKeychain as String)
+        return [query, legacy]
     }
 
     public func read(_ kinds: [SecretKind], host: String, reason: String) async throws -> [SecretKind: String] {
