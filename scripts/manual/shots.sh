@@ -168,7 +168,7 @@ sleep 1
 snap_rect status-menu 1320 0 600 420
 ax key escape >/dev/null; sleep 1
 tree "$V" status-item 6
-clean_notifications; snap_rect desktop 0 0 1920 1080
+clean_notifications; snap_rect desktop 0 140 1920 940   # below the menu bar: a stock-app banner sits at the top right
 # Cmd-Tab between the apps is shown in the text; the window list of the Mission Control style is not captured.
 
 # ------------------------------------------------------------ clipboard
