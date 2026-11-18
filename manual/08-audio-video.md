@@ -8,6 +8,8 @@ If your server blocks audio, the [Connection Center](10-connection-center.md#fea
 
 ## Microphone
 
+> **Not verified.** The microphone is implemented, but on the servers it was tested against, the Windows session never opened it, so nothing was recorded. It may not work with your server.
+
 The microphone is **off by default**. To use it, for example for a voice recorder or a call in a remote app:
 
 1. In **Settings > Devices**, tick **Pass the microphone to the session**.

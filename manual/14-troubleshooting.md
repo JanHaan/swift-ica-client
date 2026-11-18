@@ -20,7 +20,7 @@ Logins are saved only when **Remember in Keychain** is ticked, and never after a
 Try again. If the server says it refused another session for your user, you may have a session open on another device: look in the [Connection Center](10-connection-center.md) and use **Take Over…** or **Log Off**.
 
 **I do not see any apps in the launcher.**
-Your account may have none assigned, or the sign-in did not finish. Choose **ICA Viewer > Sign In…** and try again, or ask your IT department.
+Your account may have none assigned, or the sign-in did not finish. Choose **File > Sign In…** and try again, or ask your IT department.
 
 **An app opened in the same session as another one.**
 That is normal: apps of the same user share one session, which is why the second app starts quickly and needs no new sign-in. ICA Viewer shows a message when a particular app has to run in the session of another.

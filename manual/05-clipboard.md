@@ -18,7 +18,7 @@ Copy a picture on the Mac (for example from Preview, or a screenshot to the clip
 
 ## Formatted text
 
-Formatted text (bold, lists, tables) is passed as rich text when both apps support it. Which formatting survives depends on the two apps. If the receiving app cannot take the formatting, you get plain text.
+Formatted text (bold, colors, lists, and pictures inside it) is passed as rich text when both apps support it, in both directions. It was checked with WordPad and LibreOffice Writer. Which formatting survives depends on the two apps. If the receiving app cannot take the formatting, you get plain text. HTML (for example copied from a web page) is usually filtered by the server, so you get plain text.
 
 ## Files and folders
 
@@ -40,6 +40,7 @@ The feature is on by default. You can turn it off in [Settings](12-settings.md#c
 ![The progress window for a large copy from the session](images/clipboard-progress.png)
 
 - Above a size limit (10 GB by default), ICA Viewer asks before it starts. You can change the limit in **Settings**, **Ask above 1, 5, 10 or 50 GB**, or **Never ask**. Copies from the Mac to the session stop at this size.
+- How fast it is depends on the server: some servers pace file transfers, so a copy can be slow however fast your network is.
 - ICA Viewer checks that your Mac has enough free disk space first, and refuses the copy otherwise.
 - At most 1,000 files and folders are copied at once. Links and unreadable items on the Mac are left out, and ICA Viewer tells you.
 

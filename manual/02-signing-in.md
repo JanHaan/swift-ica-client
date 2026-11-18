@@ -2,6 +2,10 @@
 
 ICA Viewer signs in to your organization's **gateway** (a Citrix Gateway, also called NetScaler Gateway) or directly to a **StoreFront** store. It builds the sign-in form from what the server asks for, so the fields you see depend on your organization.
 
+## Gateway or StoreFront directly
+
+Enter the address of a **gateway** and ICA Viewer signs in through it. Enter the address of a **StoreFront store** and it signs in to the store directly, without a gateway; this works the same way for you. Either way, the rest of this chapter applies.
+
 ## Enter the address
 
 1. Open ICA Viewer. The **Sign In** window asks for the address.
@@ -46,4 +50,8 @@ Tick **Remember in Keychain** before you sign in. ICA Viewer then keeps your pas
 
 ## Sign in again
 
-If the app starts without a saved login, or the server asks you to sign in again, choose **ICA Viewer > Sign In…**.
+If the app starts without a saved login, or the server asks you to sign in again, choose **File > Sign In…**.
+
+## Sign out
+
+**File > Sign Out** ends your sign-in at the server (the store and, if you came through one, the gateway) and removes the sign-in cookies from your Mac. Sessions that are already open are not touched; they keep running. **Forget All Saved Credentials** in **Settings > Account** does the same and also deletes the saved password and TOTP secret.

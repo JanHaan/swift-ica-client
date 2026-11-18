@@ -21,7 +21,7 @@ ICA Viewer does not check for updates and does not collect usage data.
 | Files copied from the session | A temporary folder in `~/Library/Caches/ICAViewer`, removed at the next copy and when you quit | The files you paste stay where Finder puts them |
 | The shared folder | `~/Citrix Shared` (or the one you choose) | Only if you turn on the client drive |
 
-**Forget All Saved Credentials** in **Settings** deletes the password and TOTP secret.
+**Forget All Saved Credentials** in **Settings > Account** deletes the password and TOTP secret, and also signs out at the server.
 
 ## What a remote app can do on your Mac
 

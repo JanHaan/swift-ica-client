@@ -59,8 +59,9 @@ To quit ICA Viewer itself, use the menu bar icon > **Quit ICA Viewer**, or **ICA
 
 - **⌘ shortcuts are sent as Ctrl shortcuts.** ⌘C, ⌘V, ⌘X, ⌘A, ⌘Z and so on do what Ctrl+C and so on do in Windows. ⌘Q, ⌘H and ⌘M stay Mac shortcuts.
 - **The Option key (⌥)** types special characters as on your Mac (for example @ or € on some layouts). Tapping ⌥ alone acts as the Windows Alt key, for example to reach the menu bar of a Windows app.
+- **Keyboard layout.** ICA Viewer tells the server which layout your Mac uses when you sign in (German, US, UK, French, Swiss, Dutch, Spanish, Italian, Dvorak and more). If you switch the Mac's input source during a session, ICA Viewer sends the characters you type as text, so they stay right, but keyboard shortcuts still use key positions.
 - More in [Keyboard shortcuts](15-shortcuts.md).
 
 ## Full desktops
 
-ICA Viewer is built and tested for published apps. A published *desktop* (such as the lab's "Lab Desktop") has not been tested and may not work.
+A published *desktop* (such as the lab's "Lab Desktop") opens in one ordinary window with the resource's name. The window has a fixed size (90 % of your main screen), cannot be resized, and does not span several screens. Closing the window disconnects the session; the desktop keeps running and you can reconnect from the launcher or the [Connection Center](10-connection-center.md).

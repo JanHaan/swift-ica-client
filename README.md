@@ -23,60 +23,49 @@ and not a replacement for the official client. Expect gaps; see [Status](#status
 |---|---|
 | <img src="assets/screenshots/login.png" width="440" alt="Sign-in window"> | <img src="assets/screenshots/launcher.png" width="420" alt="Launcher"> |
 
-| Settings and Keychain storage | Reconnecting after a network drop |
+| Settings (Devices pane) | Reconnecting after a network drop |
 |---|---|
-| <img src="assets/screenshots/settings.png" width="540" alt="Settings window"> | <img src="assets/screenshots/hud.png" width="360" alt="Reconnect status"><br><br><img src="assets/screenshots/gaveup.png" width="360" alt="Reconnect panel"> |
+| <img src="manual/images/settings-devices.png" width="440" alt="Settings window, Devices pane"> | <img src="assets/screenshots/hud.png" width="360" alt="Reconnect status"><br><br><img src="assets/screenshots/gaveup.png" width="360" alt="Reconnect panel"> |
 
-The calculator above is a live session; the other images use the app's demo mode
+The calculator above is a live session, and the Settings image is from the lab; the other images use the app's demo mode
 (`ICAVIEWER_DEMO=1`) with example data.
 
 ## What works
 
-- Gateway logon (nFactor ExplicitForms with username, password and TOTP passcode), store resource
-  list and launch, from a native login window generated from the gateway's own form definition.
-- Optional credential storage in the macOS Keychain, with Touch ID or password required before the
-  TOTP secret is read. Builds with Keychain entitlements (a provisioning profile, see Building) use
-  the data protection keychain: Touch ID enforced by the Keychain, items bound to this Mac. Builds
-  without one (ad hoc, or Developer ID without a profile) use the login keychain: the items are
-  limited to this app, but Touch ID is checked by the app and the items move with backups.
-- TLS to the gateway, CGP with session reliability: the session survives network drops, Wi-Fi
-  changes and short sleeps (up to the server's reliability timeout, typically 180 s), with dimmed
-  windows and a countdown while reconnecting.
-- ICA handshake, V3 framing, keyboard (scancodes) and mouse input.
-- Thinwire classic graphics (the GDI-style command set, caches, pointer shapes), double-buffered,
-  with an adaptive frame-rate limit. An H.264 path (VideoToolbox) exists but is untested.
-- Seamless windows (TWI): native windows and popups, local move and resize without round trips,
-  minimise, multi-monitor sessions spanning all screens.
-- Reconnecting to an existing disconnected session. A start that drops early is retried a few times.
-  At start, the launcher offers to reconnect disconnected sessions (verified live).
-- Session sharing: several published apps run in one session. A second app starts inside the
-  running session, with no second logon (verified live). Closing one app leaves the others running.
-- One Dock and Cmd-Tab entry per remote app, with the app's own name and icon and its own Mac menu
-  bar; Cmd-Q there quits only that app. While remote apps are open, ICA Viewer itself moves to the
-  menu bar, and the launcher stays one click away there or on ⌃⌥⌘L from anywhere. If a helper
-  crashes, it is restarted, and its windows fall back into ICA Viewer. On by default; Settings
-  switches back to a single Dock entry whose icon and menu name follow the active app. The launcher
-  shows the real app icons. Verified live.
-- A new app icon, with Liquid Glass appearances on macOS 26.
-- Display scaling: Windows scaling and client scaling are set separately. The Auto default is
-  Retina-sharp at normal size (2x / 200 %), chosen per screen, and falls back to 1x when the
-  session would exceed the protocol's size limit (5120x4096). Verified live: a single Retina
-  screen runs at 2x, and two Retina screens fall back to 1x. Settings explains the fallback.
-- Session management: a Connection Center window (Cmd-Shift-C) lists sessions and can reconnect,
-  disconnect or log them off. Cmd-Q asks whether to Disconnect (default) or Log off. Verified live
-  with a user.
-- Launcher: type to filter the resource list, Return (or a double-click) launches.
-- Audio playback (PCM, Opus): verified live, heard on the Mac.
-- Microphone: Opus uplink when a session application records. Off by default in Settings; macOS asks
-  for permission on first use, and a menu-bar item disables the microphone for the current session.
-  Verified live.
-- Clipboard: text works both ways in the app (verified live).
-- Copying files through the clipboard, both ways: copy in Finder and paste in Explorer, or copy in
-  Explorer and paste in Finder (folders too, up to 200 MB per paste from the session). Settings ›
-  Clipboard › "Copy files through the clipboard", on by default. Verified live both ways, including
-  a folder with a subfolder; files from the session get the quarantine flag.
-- Clipboard images both ways (verified live).
-- Report a Problem (Help menu): builds a scrubbed report and a prefilled GitHub issue; see
+Verified live means: run against a test lab (a StoreFront site with Windows VDAs), in a macOS VM or headless.
+
+- **Sign-in:** a gateway with an nFactor form (user name, password, TOTP passcode), or a StoreFront
+  store directly, without a gateway. The login window is generated from the server's own form. Sign
+  Out (File menu) ends the store and gateway sessions at the servers.
+- **Saved logins:** optional, in the macOS Keychain with Touch ID or the Mac password required.
+  The release build is signed with a Keychain access group, so the items are bound to this Mac and
+  Touch ID is enforced by the Keychain; builds without it use the login keychain (see Build and run).
+- **Seamless apps:** every remote window is a real Mac window, with one Dock and Cmd-Tab entry per
+  app, its own menu bar (Cmd-Q quits that app only), and the launcher on ⌃⌥⌘L. Several apps share
+  one session. A published desktop opens in one window (fixed size; no multi-monitor desktop).
+- **Sessions survive trouble:** session reliability carries short network drops (dimmed windows and a
+  countdown), longer drops reconnect automatically, and the launcher offers to reconnect
+  disconnected sessions. The Connection Center lists sessions (reconnect, disconnect, log off) and
+  shows which features the server refuses ("blocked by server policy") and an unencrypted
+  connection.
+- **Graphics and displays:** Thinwire classic and H.264 (4:2:0 decode verified), Retina-sharp 2x
+  with a 1x fallback, separate Windows and client scaling.
+- **Keyboard:** scancodes and Unicode, Cmd shortcuts sent as Ctrl; the Mac's keyboard layout is
+  announced at sign-in, and after a layout switch printable keys go as text (verified headless).
+- **Clipboard:** text and images both ways; rich text (RTF, also with a picture) both ways with
+  WordPad and LibreOffice Writer; files and folders between Finder and File Explorer both ways, with a
+  progress window for large copies. HTML does not cross (the server filters it). Large copies from
+  the session are slow on servers that pace file transfers.
+- **Client drive:** one shared folder as drive M (verified live; files written by the session get the
+  quarantine flag).
+- **Printing:** the session's PDF printer delivers a PDF to the Mac (verified to a valid PDF; off by
+  default). **Audio playback** (verified live).
+- **Interface:** Settings in four panes that apply at once, Mac-style menus, VoiceOver labels,
+  contrast settings, English and German. Help opens the [user manual](manual/README.md).
+- **Security:** server XML never expands entities, host input cannot crash the viewer, no HTTPS to
+  HTTP downgrade, a gateway account never connects in plain TCP, and release builds ignore test
+  switches in the environment.
+- **Report a Problem** (Help menu): builds a scrubbed report and a prefilled GitHub issue; see
   [Reporting problems](#reporting-problems).
 
 ## User manual
@@ -87,22 +76,16 @@ A full user manual with screenshots is in [manual/](manual/README.md): installat
 
 See [FEATURES.md](FEATURES.md) for a feature-by-feature comparison with the official clients.
 
-Implemented but not yet verified live:
+Implemented but not verified live: the **microphone** (macOS asks for permission; the test servers'
+VDA never opened the capture device, so nothing has been recorded) and the **webcam** (the host
+handshake works, no real camera has been tried; only 32-bit host apps can use it). The gateway step
+of Sign Out was not run against a live gateway, and the keyboard layout switch has been checked
+against the protocol, not yet by hand in the app. Only seamless app launches and one published
+desktop were exercised.
 
-- Clipboard HTML and RTF.
-- Client drive mapping: one shared folder (default `~/Citrix Shared`, read-write, strictly
-  confined, files written by the session get the quarantine flag). Security-reviewed; the test site
-  does not redirect client drives.
-- Printing: PDF printing through the host's PDF printer to the macOS print panel. Off by default;
-  the test site creates no client printers.
-- Webcam: HDX webcam redirection (H.264) with a camera picker. Off by default; macOS asks for
-  permission when the host first starts the camera. The host handshake is verified, but no real
-  camera has been tried yet. Only 32-bit host applications can use this webcam path; 64-bit apps
-  (Windows Camera, Teams, modern browsers) will not see the camera.
-
-Not implemented yet: EDT/UDP, other authentication methods (SAML, smart card, FIDO2), file transfer beyond the
-shared folder. H.264 is untested. Only seamless app launches are exercised; full desktops are
-untested.
+Not implemented: SAML, smart card and FIDO2 sign-in, USB devices, links opening on the Mac, file
+transfer beyond clipboard files and the shared folder, Teams optimization. HDX over UDP exists as an
+experimental, switched-off code path and is not part of this release.
 
 ## Reporting problems
 
@@ -118,7 +101,7 @@ the preview before you submit. Separately, ICAViewer keeps a local log in `~/Lib
 ## Requirements
 
 - macOS 14 or later, Swift 6 toolchain (Xcode 16 or newer).
-- An environment reachable through a NetScaler Gateway with an ExplicitForms nFactor policy.
+- A StoreFront store, directly or behind a NetScaler Gateway with an ExplicitForms nFactor policy.
 
 ## Install
 

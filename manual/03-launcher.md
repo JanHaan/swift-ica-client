@@ -22,7 +22,7 @@ The launcher closes when you start an app. To open it again:
 
 - press **⌃⌥⌘L** from any app (you can change this shortcut in **Settings**),
 - or click the ICA Viewer icon in the menu bar and choose **Open Launcher**,
-- or choose **ICA Viewer > Show Launcher** (⌘L) while ICA Viewer is in front.
+- or choose **Window > Launcher** (⌘L) while ICA Viewer is in front.
 
 ## Sessions that are still running
 

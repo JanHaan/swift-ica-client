@@ -1,20 +1,22 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
 ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
-Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.5.0 as
-of 2026-11-13; how each feature behaves is described in the README and under `docs/`.
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.8.0 as
+of 2026-11-18; how each feature behaves is described in the README and under `docs/`.
 
 ## At a glance
 
-- **Works, verified live:** gateway logon with password and one-time code, seamless apps as native
-  Mac windows with their own Dock entries, several apps in one session, reconnect, survival of short
-  network drops, Thinwire graphics, several monitors, Retina scaling, text and image clipboard,
-  audio playback and microphone.
-- **Built, not yet verified live:** client drive (one shared folder), printing to PDF, H.264,
-  formatted text (HTML, RTF) on the clipboard, webcam with a real camera, copying files through the
-  clipboard in the app is verified live both ways (D92).
-- **Main gaps:** file transfer, links opening on the Mac, automatic reconnect after longer drops,
-  UDP transport (EDT), Teams optimisation, smart cards, USB devices.
+- **Works, verified live:** gateway logon with password and one-time code, StoreFront directly without a
+  gateway, seamless apps as native Mac windows with their own Dock entries, several apps in one
+  session, a published desktop in one window, reconnect and survival of network drops, Thinwire and
+  H.264 graphics, Retina scaling, text, image, rich text and file clipboard, a shared client drive,
+  audio playback, PDF printing, the keyboard layout announced at sign-in, sign-out, and an indicator
+  for features the server refuses.
+- **Built, not yet verified live:** microphone (the test servers never opened it), webcam with a real
+  camera, a by-hand test of the automatic reconnect after a long drop.
+- **Main gaps:** links opening on the Mac, several monitors for a desktop, HTML on the clipboard (the
+  server filters it), SAML, smart card and FIDO2, USB devices, UDP transport (an experimental path
+  exists, off), Teams optimization.
 
 ## How to read the tables
 
@@ -42,7 +44,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | StoreFront through NetScaler Gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| StoreFront direct, without gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: designed; all tests ran through a gateway |
+| StoreFront direct, without gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: verified live against the lab StoreFront, with CGP and raw ICA ports |
 | Citrix Cloud (Workspace) stores | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | |
 | Anonymous store access | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | |
 | Store set-up from an email address | Yes | Yes | No | No | No | Yes | Yes | No | |
@@ -67,11 +69,11 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | Seamless published apps | Likely | Partly | ? | Partly | ? | Partly | Partly | Yes | Mac: borderless windows (see below). Web: inside a browser tab. Mobile: inside a session view, unverified |
-| Full desktops | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: only seamless apps are tested |
+| Full desktops | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: one published desktop opens in one fixed-size window (verified in a VM); no multi-monitor desktop |
 | Desktop Viewer toolbar | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | |
 | Several apps in one session | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: no second logon |
 | Reconnect to a disconnected session | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: also offered at start |
-| Session list (Connection Center) | Likely | ? | ? | ? | ? | ? | ? | Partly | Ours: reconnect, disconnect, log off |
+| Session list (Connection Center) | Likely | ? | ? | ? | ? | ? | ? | Yes | Ours: reconnect, take over, disconnect, log off; shows features the server refuses and an unencrypted connection |
 | Local App Access | Yes | No | No | No | No | No | No | No | |
 
 ## Network
@@ -96,10 +98,10 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | Thinwire classic | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| H.264 | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: the test server never chose H.264 |
+| H.264 | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: 4:2:0 decode verified in the lab; 4:4:4 is not requested |
 | H.265 / AV1 | Yes | Partly | Partly | ? | ? | ? | ? | No | Mac, Linux: H.265 only |
 | Full colour (YUV 4:4:4) | Yes | Yes | ? | ? | ? | ? | ? | No | |
-| Hardware video decoding | Yes | Yes | Yes | No | No | No | Yes | Built | Ours: VideoToolbox, the H.264 path |
+| Hardware video decoding | Yes | Yes | Yes | No | No | No | Yes | Yes | Ours: VideoToolbox, the H.264 path |
 | Desktop composition redirection | Yes | No | No | No | No | No | No | No | |
 | Several monitors as one desktop | Yes | Yes | Yes | Yes | Yes | Partly | Partly | Yes | iOS, Android: external monitor only. Ours: size fixed per session |
 | Retina / HiDPI scaling | Likely | ? | ? | Yes | ? | Yes | Yes | Yes | Ours: 2x on Retina, 1x above 5120 × 4096 |
@@ -118,7 +120,7 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at logon (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text (D141) |
+| Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at sign-in (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text; verified headless |
 | Keyboard layout sync to a Linux VDA | Yes | Yes | Yes | No | No | Yes | Yes | ? | |
 | Scancode keyboard mode | Yes | Yes | Yes | Yes | Yes | No | No | Yes | |
 | Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters only |
@@ -133,9 +135,9 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | Clipboard: plain text | Likely | Yes | Yes | Yes | ? | ? | ? | Yes | |
-| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Partly | Web: HTML confirmed, images not. Ours: images verified both ways (D85); RTF with formatting and rich text with an embedded image (RTFD ⇄ RTF `\pict`) verified both ways with Word, headless (D100); HTML built, not carried by the site's Word |
-| Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | Built | Ours: both ways over CTXGDT, Finder ⇄ Explorer, folders included; protocol verified live headless (D88), app built, live check pending (D90) |
-| Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: one shared folder; the test site maps no drives |
+| Clipboard: formatted text, images | Likely | Yes | Yes | Partly | ? | ? | ? | Yes | Web: HTML confirmed, images not. Ours: images and RTF (also with a picture) verified both ways with WordPad and LibreOffice Writer; HTML does not cross (the server filters it) |
+| Clipboard: files | Likely | Yes | Yes | ? | ? | ? | ? | Yes | Ours: both ways over CTXGDT, Finder and Explorer, folders included, with a progress window above 50 MB; verified live in a VM. Throughput depends on the server pacing |
+| Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: one shared folder as drive M, verified live (the read bug is fixed) |
 | File transfer (upload, download) | Likely | Likely | Likely | Likely | Likely | ? | ? | No | Not a matrix row. Ours: under investigation |
 | Open a local file in a remote app | Yes | Partly | Yes | No | Yes | Yes | Yes | No | Mac: matrix no, but Mac 2411 added file type association |
 | Links in remote apps open on the client | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Host-to-client URL redirection |
@@ -145,14 +147,14 @@ of 2026-11-13; how each feature behaves is described in the README and under `do
 
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| Printing to client printers | Yes | Yes | Yes | Yes | Yes | Yes | No | Built | Ours: PDF to the macOS print panel, off by default |
+| Printing to client printers | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | Ours: the session PDF printer delivers a PDF to the Mac, verified to a valid PDF; off by default |
 | Any USB device (generic USB) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Mac docs describe storage devices |
 | Smart card in the session | Likely | ? | Likely | ? | Partly | ? | ? | No | ChromeOS: through generic USB |
 | FIDO2 / WebAuthn in the session | Yes | Yes | Yes | ? | ? | ? | ? | No | Windows 2402, Linux 2303, Mac 2307 and later |
 | Scanners | Yes | No | Partly | No | Yes | No | No | No | Windows: TWAIN, WIA (not LTSR). Linux: SANE. ChromeOS 2411.1; matrix says no |
 | Webcam | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: 32-bit host apps only; no real camera tried |
 | Audio playback | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| Microphone | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: off by default |
+| Microphone | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Built | Ours: off by default; the test servers' VDA never opened the capture device, so nothing has been recorded |
 | Audio over UDP | Yes | No | Yes | No | No | No | No | No | |
 | Location | Yes | Partly | No | No | No | Yes | Yes | No | Mac 2607 preview; matrix says no |
 | Mobile device features (mobility pack) | Yes | No | No | Yes | Yes | Yes | Yes | No | |
@@ -238,22 +240,16 @@ Libraries next to them: `libUrlRedirection_client.dylib` (link redirection), `li
 
 Ordered for daily use through a gateway with mail and line-of-business applications.
 
-1. **Auto client reconnect: built, live check pending.** Session reliability covers short outages.
-   The ACR protocol works up to the host, but on this site Windows then asks for a logon (D84). So
-   after a longer outage ICAViewer now relaunches the app through the store by itself, which
-   reconnects the session; it waits up to 10 minutes for the network and then falls back to the
-   Reconnect panel (D86). Needs the user's GUI test (Wi-Fi off for more than 3 minutes).
-2. **Live verification of what is already built.** Client drive mapping and printing are
-   implemented but need a site that redirects drives and printers; clipboard HTML and RTF are
-   unverified too (the Word test app was unavailable; images are verified, D85), as is the webcam
-   with a real camera.
-3. **Real-camera check of the webcam.** Implemented; only 32-bit host apps can use it (Teams
-   optimisation is a separate, larger piece).
-4. **Full-desktop launch.** Only seamless apps are exercised.
-5. **General file transfer.** Clipboard files work both ways (verified live); beyond that only the
-   shared folder exists. Mixed clipboard content (text plus an image as a file, e.g. from Pages)
-   arrives incomplete.
-6. **EDT/UDP and further authentication methods** beyond ExplicitForms with TOTP; H.264 is untested.
+1. **Auto client reconnect: built, live check pending.** Session reliability covers short outages
+   (verified under lab fault injection). After a longer outage ICAViewer relaunches the app through the
+   store by itself and waits up to 10 minutes for the network; it was run live with a 4-minute outage,
+   but a Wi-Fi-off test by hand is still open.
+2. **Microphone and webcam.** Implemented; the test servers never opened the capture device, and no real
+   camera has been tried (only 32-bit host apps can use the webcam).
+3. **Several monitors in a published desktop**, and more than one fixed-size window for it.
+4. **File transfer** beyond clipboard files and the shared folder; HTML on the clipboard (filtered by the server).
+5. **Authentication** beyond ExplicitForms with TOTP and plain StoreFront forms (SAML, smart card, FIDO2),
+   USB devices, links opening on the Mac, and HDX over UDP (an experimental, switched-off path exists).
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,
 Citrix Cloud, App Protection, EPA, GACS, auto-update.

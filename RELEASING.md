@@ -38,13 +38,16 @@ Run the publish tool (kept outside this repository) into a new directory:
 ## 4. Disk image
 
 ```sh
-ICA_SIGN=developer-id ICA_NOTARY_PROFILE=<notarytool keychain profile> scripts/make-dmg.sh
+ICA_SIGN=developer-id ICA_NOTARY_PROFILE=<notarytool keychain profile> \
+  ICA_RELEASE_PROFILE=<Developer ID .provisionprofile> scripts/make-dmg.sh
 ```
 
 Run it in the scrubbed tree so the shipped build identity matches the public history.
 
 - [ ] The DMG is signed with the Developer ID, notarized and stapled (`xcrun stapler validate`, `spctl -a -vv`).
+- [ ] The embedded profile is present and `codesign -d --entitlements -` shows `keychain-access-groups` and the application identifier (without `ICA_RELEASE_PROFILE` the build falls back to the login keychain).
 - [ ] Universal binary (`lipo -archs`), the SHA-256 file next to the DMG.
+- [ ] In the macOS test VM (not on your own screen): `scripts/macvm/exec.sh .build/ICAViewer.app scripts/macvm/tests/dmg-check.sh <the DMG>` starts the app from the DMG, shows the log line `release build: ignored test switches`, and the About panel.
 - [ ] The About panel shows the right version, build and commit, and a clean tree.
 
 ## 5. Push and release (only on the maintainer's go)

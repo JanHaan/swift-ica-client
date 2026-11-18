@@ -48,4 +48,6 @@ Your organization's server decides which redirections a session may use. If it r
 - Printing: blocked by server policy
 - Audio: blocked by server policy
 
+A connection that is not encrypted (for example to a store at an `http://` address) shows the line **Connection: not encrypted**.
+
 The first time you try to use a blocked feature in a session, ICA Viewer also shows a short notice, for example "The server's policy blocks the clipboard for Notepad." These are not faults of your Mac; only your IT department can change the policy. The lab user used for the screenshots in this manual has no blocked features, so none appear above.

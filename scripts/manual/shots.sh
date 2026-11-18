@@ -46,8 +46,11 @@ tree() { ax tree "$1" --depth "${3:-12}" >"$OUT/ax-$2.txt" 2>&1; }
 appearance_light() { # light mode (the golden image is light; no Apple event to System Events, which would wait for a prompt)
     if guirun defaults read -g AppleInterfaceStyle >/dev/null 2>&1; then guirun defaults delete -g AppleInterfaceStyle; sleep 2; fi
 }
-launch() { # launch <search text> <helper app> <window title> [seconds]
-    has_win "$V" "ICA Viewer" || { ax key ctrl+alt+cmd+l >/dev/null; sleep 2; }
+launch() { # launch <search text> <helper app> <window title> [seconds]: opens the launcher (shortcut, retried) and starts an app
+    for try in 1 2 3; do
+        ax wait "$V" placeholder=Search --timeout 5 >/dev/null 2>&1 && break
+        ax key ctrl+alt+cmd+l >/dev/null; sleep 3
+    done
     ax focus "$V" placeholder=Search >/dev/null; ax set "$V" placeholder=Search --value "" >/dev/null
     ax type "$1" >/dev/null; sleep 1; ax key return >/dev/null
     wait_for "${4:-90}" has_win "$2" "$3"
@@ -120,7 +123,7 @@ if ax wait "$V" id=username --timeout 30 >/dev/null; then
     ax wait "$V" role=AXStaticText value~"incorrect" --timeout 20 >/dev/null
     sleep 1; snap "$V" "Sign In" login-error
     ax focus "$V" id=password >/dev/null; ax key cmd+a >/dev/null; lab_password | ax type --stdin >/dev/null
-    ax press "$V" title~"Remember" >/dev/null
+    ax press "$V" role=AXCheckBox title~"Remember" >/dev/null
     ax press "$V" id=loginBtn >/dev/null
 else miss login-form "no user name field after $STORE"; fi
 
