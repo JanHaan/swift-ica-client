@@ -377,10 +377,19 @@ final class SessionController: NSObject {
     func shortcutAttempt(_ key: String) {
         guard !ended else { return }
         switch key {
-        case "c", "x": refused.attempt(.clipboard, near: NSApp.keyWindow)
-        case "p": refused.attempt(.printing, near: NSApp.keyWindow)
+        case "c", "x": refused.attempt(.clipboard, near: NSApp.keyWindow, inApp: foregroundAppName())
+        case "p": refused.attempt(.printing, near: NSApp.keyWindow, inApp: foregroundAppName())
         default: break
         }
+    }
+
+    /// The app of the host's foreground window (a popup or dialog counts for its app), named as its helper is: the
+    /// session's first app is the wrong name when several apps share the session.
+    func foregroundAppName() -> String? {
+        guard let id = foreground, let w = windows[id] else { return nil }
+        let app = w.isApp ? w : windows.values.first { $0.isApp && $0.info.appKey == w.info.appKey }
+        guard let app, let source = dockSource(for: app) else { return nil }
+        return DockIcon.shared.identity(for: source).name ?? source.names.first
     }
 
     /// SET_LED gate (session queue).
@@ -1557,7 +1566,7 @@ final class SessionController: NSObject {
     /// Right before Cmd-V/Ctrl-V goes to the host. If a new announce was just queued, all input (keys,
     /// mouse, wheel) is held briefly so the host has the list before the paste (§5.4).
     func clipboardBeforePaste() {
-        if !ended { refused.pasteAttempt(near: NSApp.keyWindow) }
+        if !ended { refused.pasteAttempt(near: NSApp.keyWindow, inApp: foregroundAppName()) }
         guard !ended, let sync = clipboardSync, sync.check("paste key") else { return }
         holdInput(for: pasteDelay)
     }

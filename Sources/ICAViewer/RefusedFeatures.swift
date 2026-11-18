@@ -127,22 +127,24 @@ final class RefusedFeatureMonitor: @unchecked Sendable {
 
     /// Main: the user tried `feature` (paste, copy, print). The first time per session while it is refused, a small
     /// non-modal notice near `window`.
-    func attempt(_ feature: RedirectionFeature, near window: NSWindow?) {
+    /// `inApp`: the app the user works in (the session's foreground app); sessions share apps, so the session's first
+    /// app may be another one (mac-C: Cmd-P in WordPad said "from Notepad").
+    func attempt(_ feature: RedirectionFeature, near window: NSWindow?, inApp: String? = nil) {
         guard status.attempt(feature, at: ProcessInfo.processInfo.systemUptime) else { return }
         vlog("redirection \(feature.rawValue): blocked attempt, notice shown")
-        let text = feature.noticeText(app: displayName(app))
+        let text = feature.noticeText(app: displayName(inApp ?? app))
         MainActor.assumeIsolated { FeatureNotice.show(text, near: window) }
     }
 
     /// Main: Cmd/Ctrl-V into a remote window. With files on the pasteboard the file copy counts (if the clipboard
     /// itself is allowed), else the clipboard.
-    func pasteAttempt(near window: NSWindow?) {
+    func pasteAttempt(near window: NSWindow?, inApp: String? = nil) {
         let now = ProcessInfo.processInfo.systemUptime
         let files = NSPasteboard.general.types?.contains(.fileURL) == true
         if files, status.state(.clipboard, at: now) != .refused, status.state(.fileCopy, at: now) == .refused {
-            attempt(.fileCopy, near: window)
+            attempt(.fileCopy, near: window, inApp: inApp)
         } else {
-            attempt(.clipboard, near: window)
+            attempt(.clipboard, near: window, inApp: inApp)
         }
     }
 }
