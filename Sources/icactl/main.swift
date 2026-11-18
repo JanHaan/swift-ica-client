@@ -497,6 +497,23 @@ case "audioprobe":
         fail("\(error)")
     }
 
+case "camprobe":
+    // icactl camprobe [resource] — HDX webcam redirection end to end in the lab's "Command Prompt" (backlog 1.10,
+    // CamProbe.swift): the synthetic test pattern only (never a camera); the VDA checker cam-grab.ps1 opens the HDX
+    // camera with 32-bit VLC for 6 s. Lab only.
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("camprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let camApp = testApp(args.first ?? "Command Prompt", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "camprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == camApp.resource }) else { fail("no resource named \(camApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runCamProbe(ica: ica, app: camApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "chromaprobe":
     // icactl chromaprobe [seconds] — 4:2:0 vs 4:4:4 H.264 on moving content (backlog 1.4, ChromaProbe.swift): mac-D's
     // noise window in the lab's "Command Prompt"; chroma inside vs across 2×2 blocks; logoff. Lab only.
@@ -824,6 +841,8 @@ default:
                                          "Sound ABC"/"Sound XYZ": window screenshot .session/audiotest-sound-0.png; keys
                                          only from ICA_AUDIOTEST_KEYS="ctrl+tab,tab,alt+t" (1.5 s apart, screenshot each)
                                          ICA_AUDIOTEST_MIC=tone: also announce the capture device, fed by a 440 Hz sine
+      icactl camprobe [resource]         lab: HDX webcam end to end in "Command Prompt" with the synthetic test pattern; the
+                                         VDA checker cam-grab.ps1 (32-bit VLC) grabs 6 s; ch 18 log, §13 verdict, logoff
       icactl camtest [resource]          webcam channel test in "Notepad" or "Sound ABC": CTXMM module, BIND exchange,
                                          contexts on ch 18 (ICA_CAMTEST_OBSERVE s after connect, default 90); no input;
                                          synthetic test pattern only (never the camera), H.264 to .session/camtest.h264

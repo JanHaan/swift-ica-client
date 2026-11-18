@@ -210,6 +210,8 @@ public final class WebcamEngine: VirtualChannelEngine, VirtualChannelModule {
     private var needKeyFrame = true
     private var lastKeyFrameTime: Double?
     private var samplesThisRun = 0
+    /// The skip and error counters when this run started (the "camera off" line reports this run's share, §13 W15).
+    private var runBase = (inFlight: 0, backlog: 0, encodeErrors: 0, beforeKey: 0)
 
     public init(config: Config = Config()) {
         self.config = config
@@ -497,6 +499,8 @@ public final class WebcamEngine: VirtualChannelEngine, VirtualChannelModule {
         needKeyFrame = true
         lastKeyFrameTime = nil
         samplesThisRun = 0
+        runBase = (diagnostics.framesSkippedInFlight, diagnostics.framesSkippedBacklog, diagnostics.encodeErrors,
+                   diagnostics.samplesDroppedBeforeKeyFrame)
         do {
             try source.start(format: config.format, deliver: { [weak self] frame, time in
                 self?.onSession { self?.frameArrived(frame, time: time, run: run) }
@@ -532,7 +536,13 @@ public final class WebcamEngine: VirtualChannelEngine, VirtualChannelModule {
             onEvent?(.capturing(false))
         }
         state = context == nil ? .idle : newState
-        if wasRunning { log("camera off (\(reason)): \(samplesThisRun) samples this run, \(diagnostics.samplesSent) in total") }
+        if wasRunning {
+            let d = diagnostics
+            log("camera off (\(reason)): \(samplesThisRun) samples this run, \(d.samplesSent) in total; this run skipped "
+                + "\(d.framesSkippedInFlight - runBase.inFlight) frames while one was in flight, \(d.framesSkippedBacklog - runBase.backlog) "
+                + "for the backlog, \(d.encodeErrors - runBase.encodeErrors) encode errors, "
+                + "\(d.samplesDroppedBeforeKeyFrame - runBase.beforeKey) samples before the key frame")
+        }
     }
 
     private func releaseContext() {

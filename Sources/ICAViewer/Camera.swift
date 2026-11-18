@@ -30,6 +30,10 @@ final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleB
         let minInterval: Double
         var lastFrame: Double?
         var session: AVCaptureSession?
+        /// Frame counts of this run, logged when it closes (docs/98b §13 W15): from the camera, over the frame rate,
+        /// failed to scale, delivered to the engine, and dropped by AVFoundation as late.
+        var received = 0, overRate = 0, scaleFailed = 0, delivered = 0, late = 0
+        var opened: Double?
         var observers: [NSObjectProtocol] = []
         init(deliver: @escaping (CVPixelBuffer, CMTime) -> Void, failed: @escaping (String) -> Void, format: WebcamFormat) {
             self.deliver = deliver
@@ -91,7 +95,7 @@ final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleB
         lock.unlock()
         guard let run else { return }
         // The device is closed on the capture queue (after a pending open); no callback of this run starts any more.
-        captureQueue.async { Self.close(run) }
+        captureQueue.async { [lock, log] in Self.close(run, lock: lock, log: log) }
     }
 
     /// Capture queue. Opens the device unless the run was stopped meanwhile.
@@ -138,16 +142,28 @@ final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleB
         lock.lock()
         name = device.localizedName
         lock.unlock()
-        guard isCurrent(run) else { return Self.close(run) }
+        guard isCurrent(run) else { return Self.close(run, lock: lock, log: log) }
+        lock.lock()
+        run.opened = CFAbsoluteTimeGetCurrent()
+        lock.unlock()
         s.startRunning()
     }
 
-    /// Capture queue: removes the observers and stops the device.
-    private static func close(_ run: Run) {
+    /// Capture queue: removes the observers, stops the device and logs the run's frame counts. Static, so the device
+    /// is stopped even when the `Camera` is already gone.
+    private static func close(_ run: Run, lock: NSLock, log: (String) -> Void) {
         run.observers.forEach(NotificationCenter.default.removeObserver)
         run.observers = []
+        let hadSession = run.session != nil
         run.session?.stopRunning()
         run.session = nil
+        guard hadSession else { return }
+        lock.lock()
+        let seconds = run.opened.map { CFAbsoluteTimeGetCurrent() - $0 } ?? 0
+        let text = String(format: "camera closed after %.1f s: %d frames from the camera, %d over the frame rate, %d late (dropped by AVFoundation), "
+                          + "%d failed to scale, %d delivered", seconds, run.received, run.overRate, run.late, run.scaleFailed, run.delivered)
+        lock.unlock()
+        log(text)
     }
 
     private func isCurrent(_ run: Run) -> Bool {
@@ -163,22 +179,38 @@ final class Camera: NSObject, WebcamFrameSource, AVCaptureVideoDataOutputSampleB
         current = nil
         run.failed(why)
         lock.unlock()
-        captureQueue.async { Self.close(run) }
+        captureQueue.async { [lock, log] in Self.close(run, lock: lock, log: log) }
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         lock.lock()
         let run = current
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        run?.received += 1
         var due = run != nil
-        if due, let run, let last = run.lastFrame, time.seconds - last < run.minInterval { due = false }
+        if due, let run, let last = run.lastFrame, time.seconds - last < run.minInterval { due = false; run.overRate += 1 }
         if due { run?.lastFrame = time.seconds }
         lock.unlock()
-        guard due, let run, let image = CMSampleBufferGetImageBuffer(sampleBuffer), let frame = run.scaler.scale(image) else { return }
+        guard due, let run, let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let frame = run.scaler.scale(image) else {
+            lock.lock()
+            run.scaleFailed += 1
+            lock.unlock()
+            return
+        }
         // Delivered under the lock, and only while this run is current: nothing arrives after `stop` returns. The
         // callback only hops to the session queue, so the lock is held briefly.
         lock.lock()
-        if current === run { run.deliver(frame, time) }
+        if current === run {
+            run.delivered += 1
+            run.deliver(frame, time)
+        }
+        lock.unlock()
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        lock.lock()
+        current?.late += 1
         lock.unlock()
     }
 }

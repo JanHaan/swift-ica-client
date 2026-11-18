@@ -396,6 +396,25 @@ private final class WebcamHarness {
         #expect(h.encoder.forced.count == 2)
     }
 
+    /// docs/98b §13 W15: the "camera off" line reports this run's skips, not the session's totals.
+    @Test func cameraOffReportsThisRunsSkips() {
+        let h = WebcamHarness()
+        h.encoder.hold = true
+        h.playing()
+        h.camera.push(0)
+        h.camera.push(0.07)
+        h.camera.push(0.14)
+        h.encoder.held.removeFirst()()
+        h.feed(webcamControl(WebcamWire.Control.stop))
+        #expect(h.events.contains { $0.contains("1 samples this run") && $0.contains("skipped 2 frames while one was in flight") })
+        h.encoder.hold = false
+        h.feed(webcamControl(WebcamWire.Control.play))
+        h.camera.push(1.0)
+        h.feed(webcamControl(WebcamWire.Control.stop))
+        #expect(h.engine.diagnostics.framesSkippedInFlight == 2)
+        #expect(h.events.last { $0.hasPrefix("camera off (") }?.contains("skipped 0 frames while one was in flight") == true)
+    }
+
     @Test func largeSamplesAreFragmented() {
         let h = WebcamHarness()
         h.encoder.sampleSize = 9000
