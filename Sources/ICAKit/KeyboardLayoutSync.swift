@@ -56,7 +56,8 @@ public enum KeyboardLayoutSync {
 
     /// The scancode of a letter (a–z) in a Windows layout, for shortcuts while the Mac's layout differs from the
     /// session's: Windows matches Ctrl shortcuts by the layout's letter, not by position. QWERTY unless the KLID is a
-    /// QWERTZ, AZERTY or Dvorak layout we announce; nil for anything but one ASCII letter.
+    /// QWERTZ, AZERTY or Dvorak layout we announce (all match `MapVirtualKeyEx` on the lab VDA, D167); nil for anything
+    /// but one ASCII letter.
     public static func letterScancode(_ letter: String, klid: UInt32) -> UInt8? {
         guard letter.count == 1, let c = letter.unicodeScalars.first, ("a"..."z").contains(c) else { return nil }
         let qwertz: Set<UInt32> = [0x0000_0407, 0x0000_0807, 0x0000_100C, 0x0000_0405, 0x0001_0415]
@@ -70,6 +71,29 @@ public enum KeyboardLayoutSync {
         }
         return nil
     }
+
+    /// The scancode of the key Windows names by `character` (VK_OEM_PLUS, VK_OEM_MINUS, VK_OEM_COMMA, VK_OEM_PERIOD for
+    /// + - , .) in a session layout, for shortcuts while the Mac's layout differs (D167); nil if that layout has no such
+    /// key or we do not know the layout.
+    public static func punctuationScancode(_ character: String, klid: UInt32) -> UInt8? {
+        guard let i = "+-,.".firstIndex(of: Character(character.count == 1 ? character : " ")),
+              let codes = oemScancodes[klid] else { return nil }
+        let code = codes["+-,.".distance(from: "+-,.".startIndex, to: i)]
+        return code == 0 ? nil : code
+    }
+
+    /// VK_OEM_PLUS, VK_OEM_MINUS, VK_OEM_COMMA, VK_OEM_PERIOD → scancode (0 = none) for every KLID we announce, as
+    /// `MapVirtualKeyEx` gave them on the lab VDA (Windows Server 2022, `kbdtest` key probe, 2026-11-18) [L].
+    static let oemScancodes: [UInt32: [UInt8]] = [
+        0x0000_0405: [0x0C, 0x35, 0x33, 0x34], 0x0000_0406: [0x0C, 0x35, 0x33, 0x34], 0x0000_0407: [0x1B, 0x35, 0x33, 0x34],
+        0x0000_0409: [0x0D, 0x0C, 0x33, 0x34], 0x0000_040A: [0x1B, 0x35, 0x33, 0x34], 0x0000_040B: [0x0C, 0x35, 0x33, 0x34],
+        0x0000_040C: [0x0D, 0x00, 0x32, 0x33], 0x0000_0410: [0x1B, 0x35, 0x33, 0x34], 0x0000_0413: [0x27, 0x35, 0x33, 0x34],
+        0x0000_0414: [0x0C, 0x35, 0x33, 0x34], 0x0000_0415: [0x0D, 0x0C, 0x33, 0x34], 0x0000_0416: [0x0D, 0x0C, 0x33, 0x34],
+        0x0000_041D: [0x0C, 0x35, 0x33, 0x34], 0x0000_0807: [0x00, 0x35, 0x33, 0x34], 0x0000_0809: [0x0D, 0x0C, 0x33, 0x34],
+        0x0000_080C: [0x35, 0x0D, 0x32, 0x33], 0x0000_0816: [0x1A, 0x35, 0x33, 0x34], 0x0000_100C: [0x00, 0x35, 0x33, 0x34],
+        0x0000_1809: [0x0D, 0x0C, 0x33, 0x34], 0x0001_0405: [0x0D, 0x0C, 0x33, 0x34], 0x0001_0409: [0x1B, 0x28, 0x11, 0x12],
+        0x0001_0415: [0x0C, 0x35, 0x33, 0x34], 0x0001_1009: [0x0D, 0x0C, 0x33, 0x34], 0x0002_0409: [0x0D, 0x0C, 0x33, 0x34],
+    ]
 
     /// Posted (distributed) when the user picks another input source.
     public static let changedNotification = Notification.Name("com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged")

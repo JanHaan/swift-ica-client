@@ -17,14 +17,22 @@ public struct KeyStroke: Equatable {
     public var characters: String?
     public var charactersIgnoringModifiers: String?
     public var isARepeat: Bool
+    /// The key's characters on its base and Shift levels in the Mac layout (no dead-key state), for a shortcut on a
+    /// punctuation key in text mode; empty when the caller does not know them.
+    public var keyCharacters: [String]
+    /// `characters` are a dead-key composition (the key after ^, D167): they go as text in both modes.
+    public var composed: Bool
 
     public init(keyCode: UInt16, modifiers: Modifiers = [], characters: String? = nil,
-                charactersIgnoringModifiers: String? = nil, isARepeat: Bool = false) {
+                charactersIgnoringModifiers: String? = nil, isARepeat: Bool = false, keyCharacters: [String] = [],
+                composed: Bool = false) {
         self.keyCode = keyCode
         self.modifiers = modifiers
         self.characters = characters
         self.charactersIgnoringModifiers = charactersIgnoringModifiers
         self.isARepeat = isARepeat
+        self.keyCharacters = keyCharacters
+        self.composed = composed
     }
 }
 
@@ -34,9 +42,9 @@ public enum KeyOutput: Equatable {
     case text(String)
 }
 
-/// Mac key events → ICA keyboard input (docs/30 §14.1a, D141, D160). Scancodes for keys (the session's layout
-/// applies); Unicode text for Option-composed characters and, while the Mac's input source differs from the session
-/// layout (`textForPrintables`), for printable keys. Chords with Cmd or Ctrl are shortcuts and always go as modifier +
+/// Mac key events → ICA keyboard input (docs/30 §14.1a, D141, D160, D167). Scancodes for keys (the session's layout
+/// applies); Unicode text for Option-composed characters, for what follows a dead key (the Mac composes) and, while
+/// the Mac's input source differs from the session layout (`textForPrintables`), for printable keys. Chords with Cmd or Ctrl are shortcuts and always go as modifier +
 /// scancode; Cmd becomes Ctrl. Option alone is held back: it becomes Alt when a key needs it, an Alt tap when released
 /// alone, and nothing when it only composed characters.
 public final class KeyTranslator {
@@ -60,18 +68,25 @@ public final class KeyTranslator {
         out.append(.key(code, up: up))
     }
 
-    /// The scancode for a shortcut chord. Positional, unless the Mac's layout differs from the session's and the key
-    /// types a letter: then the letter's key in the session layout (Cmd-Z after a switch QWERTY → QWERTZ stays undo).
+    /// The scancode for a shortcut chord (D160, D167). Positional, unless the Mac's layout differs from the session's:
+    /// then a key that types a letter goes to that letter's key in the session layout (Cmd-Z after a switch QWERTY →
+    /// QWERTZ stays undo), and a key with + - , or . on its base or Shift level to the session's VK_OEM_PLUS, MINUS,
+    /// COMMA or PERIOD key (Ctrl-+ stays zoom). Digits and other keys stay positional.
     func shortcutCode(_ k: KeyStroke) -> KeyMap.Code? {
         let positional = KeyMap.scancode(k.keyCode)
-        guard textForPrintables, positional != nil, let plain = k.charactersIgnoringModifiers?.lowercased(),
-              let scancode = KeyboardLayoutSync.letterScancode(plain, klid: sessionLayout) else { return positional }
-        return KeyMap.Code(scancode)
+        guard textForPrintables, positional != nil else { return positional }
+        if let plain = k.charactersIgnoringModifiers?.lowercased(),
+           let scancode = KeyboardLayoutSync.letterScancode(plain, klid: sessionLayout) { return KeyMap.Code(scancode) }
+        for level in k.keyCharacters {
+            if let scancode = KeyboardLayoutSync.punctuationScancode(level, klid: sessionLayout) { return KeyMap.Code(scancode) }
+        }
+        return positional
     }
 
     public func keyDown(_ k: KeyStroke) -> [KeyOutput] {
         var out: [KeyOutput] = []
         let m = k.modifiers
+        let positional = KeyMap.scancode(k.keyCode)
         if m.contains(.command) {
             // Cmd shortcuts not taken by our menu: Ctrl+key on the server (copy, paste, …).
             guard let code = shortcutCode(k) else { return [] }
@@ -81,27 +96,46 @@ public final class KeyTranslator {
             press(KeyMap.leftControl, up: true, into: &out)
             return out
         }
-        if m.contains(.option), !m.contains(.control), let chars = k.characters, chars != k.charactersIgnoringModifiers,
-           KeyboardLayoutSync.isPrintable(chars) {
+        if !m.contains(.control), k.characters?.isEmpty ?? true, positional != nil, KeyMap.isCharacterKey(k.keyCode) {
+            // A dead key (^ ´ ` on a German Mac, Option-N): no characters yet. Swallowed in both modes; the Mac composes,
+            // and the next key's characters follow as text (D167). An Option that started a composition is no Alt.
+            if m.contains(.option), pendingAlt != nil { optionComposed = true }
+            return []
+        }
+        if k.composed, !m.contains(.control) {
+            // The key after a dead key: its characters are the composition (ê, or ^ and the key's own character). The
+            // printable part goes as text; a control character after it (Return, Esc, Backspace) as its key.
+            let chars = k.characters ?? ""
+            let printable = String(String.UnicodeScalarView(chars.unicodeScalars.prefix { KeyboardLayoutSync.isPrintable(String($0)) }))
+            if !printable.isEmpty { out.append(.text(printable)) }
+            if m.contains(.option), pendingAlt != nil { optionComposed = true }
+            if printable.count == chars.count { return out }
+        } else if m.contains(.option), !m.contains(.control), let chars = k.characters, chars != k.charactersIgnoringModifiers,
+                  KeyboardLayoutSync.isPrintable(chars) {
             // Option-composed character (@ € | on a German Mac layout): text, and the Option was not an Alt.
             if pendingAlt != nil { optionComposed = true }
             return [.text(chars)]
+        } else if textForPrintables, !m.contains(.control), !m.contains(.option), let chars = k.characters,
+                  KeyboardLayoutSync.isPrintable(chars) {
+            // Layout differs from the session's: the Mac's character, not the key position (D141).
+            return [.text(chars)]
         }
-        if textForPrintables, !m.contains(.control), !m.contains(.option) {
-            // Layout differs from the session's: the Mac's character, not the key position (D141). A dead key gives no
-            // characters yet; it is swallowed and the composed character follows as text.
-            if let chars = k.characters, KeyboardLayoutSync.isPrintable(chars) { return [.text(chars)] }
-            if k.characters?.isEmpty ?? true, KeyMap.scancode(k.keyCode) != nil, KeyMap.isCharacterKey(k.keyCode) { return [] }
-        }
-        let code = m.contains(.control) ? shortcutCode(k) : KeyMap.scancode(k.keyCode)
+        let code = m.contains(.control) ? shortcutCode(k) : positional
         if let code {
             if let alt = pendingAlt { press(alt, up: false, into: &out); pendingAlt = nil }
-            if code != KeyMap.scancode(k.keyCode) { sentFor[k.keyCode] = code }
+            if code != positional { sentFor[k.keyCode] = code }
             press(code, up: false, into: &out)    // repeats send another make code, as on a PC
-        } else if let chars = k.characters, !chars.isEmpty {
+        } else if out.isEmpty, let chars = k.characters, !chars.isEmpty {
             out.append(.text(chars))
         }
         return out
+    }
+
+    /// Text the macOS text input system inserted without a key event (Emoji & Symbols, the Character Viewer; D167):
+    /// Unicode text, printable characters only.
+    public func insertText(_ text: String) -> [KeyOutput] {
+        let printable = String(String.UnicodeScalarView(text.unicodeScalars.filter { KeyboardLayoutSync.isPrintable(String($0)) }))
+        return printable.isEmpty ? [] : [.text(printable)]
     }
 
     public func keyUp(_ k: KeyStroke) -> [KeyOutput] {

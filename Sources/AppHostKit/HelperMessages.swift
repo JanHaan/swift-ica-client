@@ -180,6 +180,8 @@ public enum HelperMessage: Codable, Equatable, Sendable {
     case checkIn(token: String, pid: Int32)
     case key(windowId: UInt32, phase: KeyPhase, keyCode: UInt16, characters: String, charactersIgnoringModifiers: String,
              modifiers: UInt, isRepeat: Bool, sentNs: UInt64)
+    /// Text the macOS text input system inserted without a key event (Emoji & Symbols, D167): Unicode to the session.
+    case text(windowId: UInt32, text: String, sentNs: UInt64)
     /// `button`: 0 left, 1 right, 2 middle, -1 none (moves).
     case mouse(windowId: UInt32, kind: MouseKind, button: Int, x: Double, y: Double, screenX: Double, screenY: Double,
                clickCount: Int, modifiers: UInt, sentNs: UInt64)

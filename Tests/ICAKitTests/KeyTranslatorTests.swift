@@ -122,3 +122,124 @@ private func ctrlChord(_ t: KeyTranslator, keyCode: Int, plain: String) -> [KeyO
     #expect(KeyboardLayoutSync.letterScancode("1", klid: 0x0000_0409) == nil)
     #expect(KeyboardLayoutSync.letterScancode("ab", klid: 0x0000_0409) == nil)
 }
+
+// D167: dead keys compose on the Mac in both modes; shortcuts on + - , . follow the session layout in text mode; text
+// from the macOS text input system goes as Unicode.
+
+private func plain(_ t: KeyTranslator, _ keyCode: Int, _ chars: String, _ modifiers: KeyStroke.Modifiers = [],
+                   composed: Bool = false) -> [KeyOutput] {
+    let k = KeyStroke(keyCode: UInt16(keyCode), modifiers: modifiers, characters: chars, charactersIgnoringModifiers: chars,
+                      composed: composed)
+    return t.keyDown(k) + t.keyUp(k)
+}
+
+@Test func deadKeysComposeOnTheMacInBothModes() {
+    for textMode in [false, true] {
+        let t = KeyTranslator()
+        t.textForPrintables = textMode
+        // ^ e → ê, ´ e → é, ^ space → ^; ^ ^ → ^ with ^ still pending (the Mac layout's rule), then x → ^x.
+        #expect(plain(t, kVK_ISO_Section, "") == [])
+        #expect(plain(t, kVK_ANSI_E, "ê", composed: true) == [.text("ê")])
+        #expect(plain(t, kVK_ANSI_Equal, "") == [])
+        #expect(plain(t, kVK_ANSI_E, "é", composed: true) == [.text("é")])
+        #expect(plain(t, kVK_ISO_Section, "") == [])
+        #expect(plain(t, kVK_Space, "^", composed: true) == [.text("^")])
+        #expect(plain(t, kVK_ISO_Section, "") == [])
+        #expect(plain(t, kVK_ISO_Section, "^", composed: true) == [.text("^")])
+        #expect(plain(t, kVK_ANSI_X, "^x", composed: true) == [.text("^x")])
+        // After the composition, keys are as before: a scancode in scancode mode.
+        #expect(plain(t, kVK_ANSI_X, "x") == (textMode ? [.text("x")] : [.key(code(0x2D), up: false), .key(code(0x2D), up: true)]))
+        #expect(t.down.isEmpty)
+    }
+}
+
+@Test func optionDeadKeyIsNoAlt() {
+    // Option-N on a German Mac starts ~; n then gives ñ. Neither Alt+N nor an Alt tap may reach the session.
+    let t = KeyTranslator()
+    var out = t.flagsChanged(KeyStroke(keyCode: UInt16(kVK_Option), modifiers: .option))
+    out += plain(t, kVK_ANSI_N, "", .option)
+    out += t.flagsChanged(KeyStroke(keyCode: UInt16(kVK_Option)))
+    out += plain(t, kVK_ANSI_N, "ñ", composed: true)
+    #expect(out == [.text("ñ")])
+}
+
+@Test func controlCharacterAfterADeadKeyIsItsKey() {
+    // ^ then Return: the layout gives "^\r": the accent as text, then Return as its key.
+    let t = KeyTranslator()
+    _ = plain(t, kVK_ISO_Section, "")
+    let ret = KeyStroke(keyCode: UInt16(kVK_Return), characters: "^\r", composed: true)
+    #expect(t.keyDown(ret) == [.text("^"), .key(code(0x1C), up: false)])
+    #expect(t.keyUp(ret) == [.key(code(0x1C), up: true)])
+}
+
+@Test func punctuationShortcutsFollowTheSessionLayoutInTextMode() {
+    func ctrl(_ t: KeyTranslator, _ keyCode: Int, _ plain: String, _ levels: [String], shift: Bool = false) -> KeyOutput? {
+        let k = KeyStroke(keyCode: UInt16(keyCode), modifiers: shift ? [.control, .shift] : .control, characters: plain,
+                          charactersIgnoringModifiers: plain, keyCharacters: levels)
+        let out = t.keyDown(k)
+        _ = t.keyUp(k)
+        return out.first
+    }
+    let t = germanAfterSwitch()   // German Mac, US session
+    #expect(ctrl(t, kVK_ANSI_RightBracket, "+", ["+", "*"]) == .key(code(0x0D), up: false))   // VK_OEM_PLUS
+    #expect(ctrl(t, kVK_ANSI_Slash, "-", ["-", "_"]) == .key(code(0x0C), up: false))          // VK_OEM_MINUS
+    #expect(ctrl(t, kVK_ANSI_Comma, ",", [",", ";"]) == .key(code(0x33), up: false))
+    #expect(ctrl(t, kVK_ANSI_7, "/", ["7", "/"], shift: true) == .key(code(0x08), up: false)) // digits: positional
+    #expect(ctrl(t, kVK_ANSI_Backslash, "#", ["#", "'"]) == .key(code(0x2B), up: false))      // other keys: positional
+    #expect(t.down.isEmpty)
+    // A US Mac in a German session: the =/+ key is the plus key there (0x1B).
+    let us = KeyTranslator()
+    us.textForPrintables = true
+    #expect(ctrl(us, kVK_ANSI_Equal, "=", ["=", "+"]) == .key(code(0x1B), up: false))
+    // Swiss German has no VK_OEM_PLUS: positional.
+    us.sessionLayout = 0x0000_0807
+    #expect(ctrl(us, kVK_ANSI_Equal, "=", ["=", "+"]) == .key(code(0x0D), up: false))
+    // Layouts match (scancode mode): always positional.
+    let same = KeyTranslator()
+    #expect(ctrl(same, kVK_ANSI_RightBracket, "+", ["+", "*"]) == .key(code(0x1B), up: false))
+}
+
+@Test func punctuationScancodesPerSessionLayout() {
+    #expect(KeyboardLayoutSync.punctuationScancode("+", klid: 0x0000_0409) == 0x0D)
+    #expect(KeyboardLayoutSync.punctuationScancode("-", klid: 0x0000_0407) == 0x35)
+    #expect(KeyboardLayoutSync.punctuationScancode("-", klid: 0x0000_040C) == nil)    // French: no VK_OEM_MINUS
+    #expect(KeyboardLayoutSync.punctuationScancode(".", klid: 0x0001_0409) == 0x12)   // Dvorak
+    #expect(KeyboardLayoutSync.punctuationScancode("+", klid: 0x0000_0807) == nil)
+    #expect(KeyboardLayoutSync.punctuationScancode("#", klid: 0x0000_0407) == nil)
+    #expect(KeyboardLayoutSync.punctuationScancode("+", klid: 0x0000_0C07) == nil)    // not a KLID we announce
+    #expect(Set(KeyboardLayoutSync.klids.values).allSatisfy { KeyboardLayoutSync.oemScancodes[$0] != nil })
+}
+
+@Test func insertedTextGoesAsUnicode() {
+    let t = KeyTranslator()
+    #expect(t.insertText("🚀") == [.text("🚀")])
+    #expect(t.insertText("é") == [.text("é")])
+    #expect(t.insertText("\n").isEmpty)
+}
+
+/// The German Mac layout's own compositions (read from the layout, not the current input source).
+@Test func deadKeyComposerFollowsTheMacLayout() {
+    var c = DeadKeyComposer(inputSource: "com.apple.keylayout.German")
+    func key(_ code: Int, shift: Bool = false, option: Bool = false) -> String? {
+        c.characters(keyCode: UInt16(code), shift: shift, option: option, capsLock: false)
+    }
+    #expect(key(kVK_ISO_Section) == "")
+    #expect(c.isComposing)
+    #expect(key(kVK_ANSI_E) == "ê")
+    #expect(!c.isComposing)
+    #expect(key(kVK_ANSI_Equal) == "")
+    #expect(key(kVK_ANSI_E) == "é")
+    #expect(key(kVK_ANSI_Equal, shift: true) == "")
+    #expect(key(kVK_ANSI_E) == "è")
+    #expect(key(kVK_ISO_Section) == "")
+    #expect(key(kVK_Space) == "^")
+    #expect(key(kVK_ISO_Section) == "")
+    #expect(key(kVK_ISO_Section) == "^")                 // ^ ^ → one ^, and ^ is still pending
+    #expect(c.isComposing)
+    #expect(key(kVK_ANSI_X) == "^x")
+    #expect(key(kVK_ANSI_N, option: true) == "")
+    #expect(key(kVK_ANSI_N) == "ñ")
+    #expect(key(kVK_ISO_Section) == "")
+    #expect(key(kVK_Return) == "^\r")
+    #expect(key(kVK_ANSI_X) == "x")
+}

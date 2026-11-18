@@ -79,6 +79,7 @@ import Testing
         #expect(HelperMessage.frameStats(count: 1, meanUs: 1, p95Us: 1, maxUs: 1).mayDrop)
         #expect(!HelperMessage.key(windowId: 1, phase: .up, keyCode: 0, characters: "", charactersIgnoringModifiers: "",
                                    modifiers: 0, isRepeat: false, sentNs: 0).mayDrop)
+        #expect(!HelperMessage.text(windowId: 1, text: "🚀", sentNs: 0).mayDrop)
         #expect(!HelperMessage.appQuit.mayDrop && !HelperMessage.focus(windowId: 1).mayDrop)
     }
 

@@ -517,7 +517,9 @@ final class SurfaceView: NSView {
             self.key(event, .down)
             return true
         }
-        guard flags.contains(.command) || flags.contains(.control), !(flags.contains(.command) && key == "`") else {
+        // ⌘` (cycle windows) and ⌃⌘Space (Emoji & Symbols, D167) stay with AppKit.
+        guard flags.contains(.command) || flags.contains(.control), !(flags.contains(.command) && key == "`"),
+              !(flags.contains(.command) && flags.contains(.control) && key == " ") else {
             return super.performKeyEquivalent(with: event)
         }
         var modifiers: HelperShortcut.Modifiers = []
@@ -541,4 +543,28 @@ final class SurfaceView: NSView {
         send(.key(windowId: windowId, phase: phase, keyCode: event.keyCode, characters: text, charactersIgnoringModifiers: plain,
                   modifiers: event.modifierFlags.rawValue, isRepeat: phase == .down && event.isARepeat, sentNs: uptimeNanoseconds()))
     }
+}
+
+// MARK: Text input → host (docs/30 §14.1a, D167)
+
+/// Text the macOS text input system inserts without a key event (Emoji & Symbols, the Character Viewer) goes to the host
+/// as text; key events still go to keyDown, as in ICAViewer's SessionView (no marked text, no input methods).
+extension SurfaceView: NSTextInputClient {
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        let text = (string as? NSAttributedString)?.string ?? string as? String ?? ""
+        guard !text.isEmpty else { return }
+        send(.text(windowId: windowId, text: text, sentNs: uptimeNanoseconds()))
+    }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {}
+    func unmarkText() {}
+    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func hasMarkedText() -> Bool { false }
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    /// The caret is the session's and unknown here: the picker opens at the pointer.
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        NSRect(origin: NSEvent.mouseLocation, size: NSSize(width: 0, height: 16))
+    }
+    func characterIndex(for point: NSPoint) -> Int { NSNotFound }
 }

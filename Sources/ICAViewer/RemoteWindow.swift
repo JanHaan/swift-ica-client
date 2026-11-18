@@ -201,6 +201,30 @@ final class SessionView: NSView {
     override func flagsChanged(with event: NSEvent) { if !blocked { remote?.controller?.keyboard.flagsChanged(event) } }
 }
 
+// MARK: Text input (docs/30 §14.1a, D167)
+
+/// Text the macOS text input system inserts without a key event (Edit > Emoji & Symbols, Ctrl-Cmd-Space, the Character
+/// Viewer) goes to the session as Unicode. Key events still go to keyDown (no interpretKeyEvents): no marked text, no
+/// input methods, no press-and-hold accents. The helper apps' SurfaceView does the same.
+extension SessionView: NSTextInputClient {
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        guard !blocked else { return }
+        remote?.controller?.keyboard.insertText((string as? NSAttributedString)?.string ?? string as? String ?? "")
+    }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {}
+    func unmarkText() {}
+    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func hasMarkedText() -> Bool { false }
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    /// The caret is the session's and unknown here: the picker opens at the pointer.
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        NSRect(origin: NSEvent.mouseLocation, size: NSSize(width: 0, height: 16))
+    }
+    func characterIndex(for point: NSPoint) -> Int { NSNotFound }
+}
+
 /// Titled window for an `.appWindow`: a real NSWindow so switchers see an AXStandardWindow with
 /// working close and minimize buttons. The title bar is transparent, full-size content and the
 /// traffic lights are invisible (alpha 0, still in AX), so the remote window's own caption is all

@@ -202,6 +202,9 @@ final class SpikeHost {
             let shown = chars.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F } ? chars : "\\u{\(chars.unicodeScalars.first.map { String($0.value, radix: 16) } ?? "")}"
             say("\(helpers[i].label.name) window \(id): key \(down ? "down" : "up  ") code \(code) chars \"\(shown)\" modifiers 0x\(String(modifiers, radix: 16)) (\(latency(sentNs)))")
             if down { updateInput(i, "key \"\(shown)\" (\(code))") }
+        case .text(let id, let text, _):
+            guard let i = owner(id) else { return }
+            say("\(helpers[i].label.name) window \(id): text \"\(text)\"")
         case .mouse(let id, let kind, let button, let viewX, let viewY, _, _, let clicks, _, let sentNs):
             guard let i = owner(id), let spec = helpers[i].windows.first(where: { $0.id == id }) else { return }
             // The helper sends view points; the spike's session maps 1:1 at the helper's backing scale.

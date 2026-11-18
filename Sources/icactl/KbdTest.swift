@@ -11,12 +11,12 @@ import ICAKit
 ///   A = 2C 15 28 0C (German "yzäß"), B = 15 2C ⇧03 1A (US "yz@["), C = AltGr+10 AltGr+09 AltGr+12 (German "@[€", only
 ///   sent for 0x407: under US, Right Alt would reach Notepad's menu).
 /// `text` mode: the app's own path after a mid-session switch to a German Mac layout (S17, D160): `KeyTranslator` in
-/// text mode turns German-Mac key strokes for "yz@[äß€𝄞" (@ [ € with their own Option press each; 𝄞 outside the
-/// BMP as a surrogate pair) and then Ctrl-A, Ctrl-C into session input. It must arrive unchanged under any layout.
+/// text mode turns German-Mac key strokes for "yz@[äß€𝄞êñ^" (@ [ € with their own Option press each; 𝄞 outside the
+/// BMP as a surrogate pair; ê ñ ^ through dead keys, D167) and then Ctrl-A, Ctrl-C into session input. It must arrive unchanged under any layout.
 func runKbdTest(ica: ICAFile, app: TestApp, klid: UInt32, text textMode: Bool = false) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
-    let unicodeString = "yz@[äß€𝄞"
+    let unicodeString = "yz@[äß€𝄞êñ^"
     let expected: [UInt32: String] = textMode ? [0x0000_0407: unicodeString, 0x0000_0409: unicodeString, 0x0000_040C: unicodeString]
         : [0x0000_0407: "yzäß zy\"ü @[€", 0x0000_0409: "zy'- yz@["]
     guard let want = expected[klid] else { fail(String(format: "kbdtest knows 00000407 and 00000409, not %08x", klid)) }
@@ -75,24 +75,7 @@ func runKbdTest(ica: ICAFile, app: TestApp, klid: UInt32, text textMode: Bool = 
             try await Task.sleep(nanoseconds: 120_000_000)
         }
     }
-    /// Strokes as AppKit reports them: a plain key, or a modifier pressed and released around one key.
-    func type(_ strokes: [Stroke], _ t: KeyTranslator) async throws {
-        for stroke in strokes {
-            var out: [KeyOutput] = []
-            switch stroke {
-            case .key(let code, let chars):
-                let k = KeyStroke(keyCode: code, characters: chars, charactersIgnoringModifiers: chars)
-                out = t.keyDown(k) + t.keyUp(k)
-            case .chord(let mod, let code, let chars, let plain):
-                let modKey = UInt16(mod == .option ? kVK_Option : kVK_Control)
-                let k = KeyStroke(keyCode: code, modifiers: mod, characters: chars, charactersIgnoringModifiers: plain)
-                out = t.flagsChanged(KeyStroke(keyCode: modKey, modifiers: mod)) + t.keyDown(k) + t.keyUp(k)
-                    + t.flagsChanged(KeyStroke(keyCode: modKey))
-            }
-            session.sendInput { wd in wd.send(out) }
-            try await Task.sleep(nanoseconds: 120_000_000)
-        }
-    }
+    func type(_ strokes: [Stroke], _ t: KeyTranslator) async throws { try await typeStrokes(strokes, t, session) }
     let space = Key(code: 0x39)
     let a = [0x2C, 0x15, 0x28, 0x0C].map { Key(code: UInt8($0)) }
     let b = [Key(code: 0x15), Key(code: 0x2C), Key(code: 0x03, shift: true), Key(code: 0x1A)]
@@ -143,17 +126,57 @@ func runKbdTest(ica: ICAFile, app: TestApp, klid: UInt32, text textMode: Bool = 
     say(String(format: "RESULT: %@ kbdtest %08x%@: expected \"%@\", got \"%@\"; end: %@", text == want ? "PASS" : "FAIL", klid, textMode ? " text" : "", want, text, ending))
 }
 
-/// A scripted Mac key stroke for `kbdtest` text mode.
+/// A scripted Mac key stroke as AppKit reports it (`kbdtest` text mode, the key probe).
 enum Stroke {
+    /// A plain key and its characters ("" = a dead key).
     case key(UInt16, String)
-    case chord(KeyStroke.Modifiers, UInt16, String, String)   // modifier, key code, characters, without modifiers
+    /// The key after a dead key, with the Mac's composition as its characters.
+    case composed(UInt16, String)
+    /// Modifier keys pressed and released around one key: key code, characters, characters without modifiers, and the
+    /// key's characters on its base and Shift levels in the Mac layout.
+    case chord(KeyStroke.Modifiers, UInt16, String, String, levels: [String] = [])
 }
 
-/// "yz@[äß€𝄞" on the German Mac layout (key codes are ANSI positions: y is at Z, z at Y, ä at Quote, ß at Minus).
+/// Feeds strokes through the app's translator into the session, one stroke every 120 ms.
+func typeStrokes(_ strokes: [Stroke], _ t: KeyTranslator, _ session: ICASession) async throws {
+    let modifierKeys: [(KeyStroke.Modifiers, Int)] = [(.control, kVK_Control), (.option, kVK_Option), (.shift, kVK_Shift),
+                                                       (.command, kVK_Command)]
+    for stroke in strokes {
+        var out: [KeyOutput] = []
+        switch stroke {
+        case .key(let code, let chars):
+            let k = KeyStroke(keyCode: code, characters: chars, charactersIgnoringModifiers: chars)
+            out = t.keyDown(k) + t.keyUp(k)
+        case .composed(let code, let chars):
+            let k = KeyStroke(keyCode: code, characters: chars, charactersIgnoringModifiers: chars, composed: true)
+            out = t.keyDown(k) + t.keyUp(k)
+        case .chord(let mods, let code, let chars, let plain, let levels):
+            var held: KeyStroke.Modifiers = []
+            for (m, key) in modifierKeys where mods.contains(m) {
+                held.insert(m)
+                out += t.flagsChanged(KeyStroke(keyCode: UInt16(key), modifiers: held))
+            }
+            let k = KeyStroke(keyCode: code, modifiers: mods, characters: chars, charactersIgnoringModifiers: plain,
+                              keyCharacters: levels)
+            out += t.keyDown(k) + t.keyUp(k)
+            for (m, key) in modifierKeys.reversed() where mods.contains(m) {
+                held.remove(m)
+                out += t.flagsChanged(KeyStroke(keyCode: UInt16(key), modifiers: held))
+            }
+        }
+        session.sendInput { wd in wd.send(out) }
+        try await Task.sleep(nanoseconds: 120_000_000)
+    }
+}
+/// "yz@[äß€𝄞êñ^" on the German Mac layout (key codes are ANSI positions: y is at Z, z at Y, ä at Quote, ß at Minus).
 /// 𝄞 stands for any character outside the BMP a key can give (a custom layout or the Unicode Hex Input source).
 func germanMacStrokes() -> [Stroke] {
     [.key(UInt16(kVK_ANSI_Z), "y"), .key(UInt16(kVK_ANSI_Y), "z"),
      .chord(.option, UInt16(kVK_ANSI_L), "@", "l"), .chord(.option, UInt16(kVK_ANSI_5), "[", "5"),
      .key(UInt16(kVK_ANSI_Quote), "ä"), .key(UInt16(kVK_ANSI_Minus), "ß"),
-     .chord(.option, UInt16(kVK_ANSI_E), "€", "e"), .key(UInt16(kVK_ANSI_Grave), "𝄞")]
+     .chord(.option, UInt16(kVK_ANSI_E), "€", "e"), .key(UInt16(kVK_ANSI_Grave), "𝄞"),
+     // Dead keys (D167): ^ e, Option-N n, ^ Space; the second key carries the Mac's composition.
+     .key(UInt16(kVK_ISO_Section), ""), .composed(UInt16(kVK_ANSI_E), "ê"),
+     .chord(.option, UInt16(kVK_ANSI_N), "", "n"), .composed(UInt16(kVK_ANSI_N), "ñ"),
+     .key(UInt16(kVK_ISO_Section), ""), .composed(UInt16(kVK_Space), "^")]
 }

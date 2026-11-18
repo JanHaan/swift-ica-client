@@ -127,6 +127,7 @@ import Testing
                  isRepeat: false, sentNs: 1),
             .key(windowId: 1, phase: .flags, keyCode: 56, characters: "", charactersIgnoringModifiers: "", modifiers: 0x20102,
                  isRepeat: false, sentNs: 1),
+            .text(windowId: 1, text: "🚀é", sentNs: 1),
             .mouse(windowId: 2, kind: .down, button: 0, x: 10.5, y: 20, screenX: 300.5, screenY: -20, clickCount: 2,
                    modifiers: 0x40000, sentNs: 2),
             .scroll(windowId: 2, dx: 0, dy: -3, precise: true, x: 1, y: 2, screenX: 3, screenY: 4, sentNs: 3),

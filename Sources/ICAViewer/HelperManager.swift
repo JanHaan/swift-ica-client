@@ -834,6 +834,9 @@ final class HelperManager: NSObject, RemotePresenter {
             case .up: c.keyboard.keyUp(input)
             case .flags: c.keyboard.flagsChanged(input)
             }
+        case .text(let id, let text, _):
+            guard let (_, c) = remote(id), !c.inputBlocked else { return }
+            c.keyboard.insertText(text)
         case .mouse(let id, let kind, let button, let x, let y, let sx, let sy, _, let modifiers, _):
             guard let (w, _) = remote(id), let (view, screen) = Self.validPoints(x, y, sx, sy) else { return }
             w.helperMouse(kind, button: button, view: view, screen: screen, modifiers: NSEvent.ModifierFlags(rawValue: modifiers))

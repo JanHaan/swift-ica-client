@@ -35,6 +35,7 @@ struct KeyInput {
 final class KeyboardTranslator {
     weak var controller: SessionController?
     private let core = KeyTranslator()
+    private var composer = DeadKeyComposer()
     /// The Mac's input source differs from the layout announced at logon (D141): printable characters go as Unicode
     /// text, as the stock client always does, so they stay right after a mid-session switch. Set by the controller.
     var textForPrintables: Bool {
@@ -72,8 +73,11 @@ final class KeyboardTranslator {
         if flags.contains(.control) { m.insert(.control) }
         if flags.contains(.option) { m.insert(.option) }
         if flags.contains(.command) { m.insert(.command) }
+        // A shortcut on a punctuation key in text mode is placed by the key's characters (D167).
+        let levels = core.textForPrintables && (m.contains(.command) || m.contains(.control)) ? KeyMap.characters(keyCode: event.keyCode) : []
         return KeyStroke(keyCode: event.keyCode, modifiers: m, characters: event.characters,
-                         charactersIgnoringModifiers: event.charactersIgnoringModifiers, isARepeat: event.isARepeat)
+                         charactersIgnoringModifiers: event.charactersIgnoringModifiers, isARepeat: event.isARepeat,
+                         keyCharacters: levels)
     }
 
     func keyDown(_ event: NSEvent) { keyDown(KeyInput(event)) }
@@ -81,9 +85,22 @@ final class KeyboardTranslator {
     func flagsChanged(_ event: NSEvent) { flagsChanged(KeyInput(event)) }
 
     func keyDown(_ event: KeyInput) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         // The pasteboard goes to the host before the paste key does (docs/70 §5.4).
-        if !event.isARepeat { syncClipboardIfPaste(event, event.modifierFlags.intersection(.deviceIndependentFlagsMask)) }
-        emit(core.keyDown(stroke(event)))
+        if !event.isARepeat { syncClipboardIfPaste(event, flags) }
+        var key = stroke(event)
+        if flags.contains(.command) || flags.contains(.control) {
+            composer.reset()
+        } else if composer.isComposing || (event.characters ?? "").isEmpty && KeyMap.isCharacterKey(event.keyCode) {
+            // AppKit does not compose dead keys for us (no input context): the layout's composition (D167).
+            let afterDeadKey = composer.isComposing
+            if let composed = composer.characters(keyCode: event.keyCode, shift: flags.contains(.shift),
+                                                  option: flags.contains(.option), capsLock: flags.contains(.capsLock)) {
+                key.characters = composed
+                key.composed = afterDeadKey && !composed.isEmpty
+            }
+        }
+        emit(core.keyDown(key))
     }
 
     func keyUp(_ event: KeyInput) { emit(core.keyUp(stroke(event))) }
@@ -99,6 +116,16 @@ final class KeyboardTranslator {
         keyUp(input)
     }
 
+    /// Text the macOS text input system inserted (Emoji & Symbols; D167), from our view or a helper app's.
+    func insertText(_ text: String) {
+        let out = core.insertText(text)
+        if !out.isEmpty { vlog("keyboard: inserted \(text.unicodeScalars.count) character(s) from the text input system") }
+        emit(out)
+    }
+
     /// Releases every key the server thinks is down (focus left our windows).
-    func releaseAll() { emit(core.releaseAll()) }
+    func releaseAll() {
+        composer.reset()
+        emit(core.releaseAll())
+    }
 }

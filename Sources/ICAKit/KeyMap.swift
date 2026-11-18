@@ -102,6 +102,80 @@ public enum KeyMap {
         }
     }
 
+    /// The characters a key types on its base and Shift levels in the current keyboard layout (no dead-key state; a
+    /// dead key gives its accent), for shortcuts on punctuation keys in text mode (D167). Empty without layout data.
+    public static func characters(keyCode: UInt16) -> [String] {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return [] }
+        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
+        return data.withUnsafeBytes { raw -> [String] in
+            guard let layout = raw.bindMemory(to: UCKeyboardLayout.self).baseAddress else { return [] }
+            return [UInt32(0), UInt32(shiftKey >> 8)].compactMap { modifiers in
+                var dead: UInt32 = 0
+                var chars = [UniChar](repeating: 0, count: 4)
+                var length = 0
+                let status = UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDown), modifiers, UInt32(LMGetKbdType()),
+                                            OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, chars.count, &length, &chars)
+                return status == noErr && length > 0 ? String(utf16CodeUnits: chars, count: length) : nil
+            }
+        }
+    }
+
     public static let leftControl = Code(0x1D)
     public static let leftAlt = Code(0x38)
+}
+
+/// Dead-key composition the way the Mac's text system does it (D167): AppKit gives a view that does not route key
+/// events through an input context the dead key with no characters and the next key **uncomposed** (S17 VM run:
+/// ^ e arrived as "e"). This keeps the layout's dead-key state across key downs and returns the composed characters
+/// (UCKeyTranslate, the current keyboard layout or a given one).
+public struct DeadKeyComposer {
+    private var state: UInt32 = 0
+    private var layoutID: String?
+    private let fixedSource: String?
+
+    /// `inputSource`: a layout id (`com.apple.keylayout.German`) for tests; nil = the current keyboard layout.
+    public init(inputSource: String? = nil) { fixedSource = inputSource }
+
+    /// A dead key is waiting for the next key (UCKeyTranslate keeps other bits in the state's upper half after a
+    /// composition: 0x10000 after ^ e).
+    public var isComposing: Bool { state & 0xFFFF != 0 }
+
+    public mutating func reset() { state = 0 }
+
+    /// The characters of a key down with Shift, Option and Caps Lock as given, under the layout's dead-key state: ""
+    /// for a dead key (the state now waits), the composition for the key after it. nil without layout data.
+    public mutating func characters(keyCode: UInt16, shift: Bool, option: Bool, capsLock: Bool) -> String? {
+        guard let (id, data) = layout() else { state = 0; return nil }
+        if id != layoutID { state = 0; layoutID = id }   // another input source: a pending dead key is void
+        var modifiers: UInt32 = 0
+        if shift { modifiers |= UInt32(shiftKey >> 8) }
+        if capsLock { modifiers |= UInt32(alphaLock >> 8) }
+        if option { modifiers |= UInt32(optionKey >> 8) }
+        var dead = state
+        let result: String? = data.withUnsafeBytes { raw in
+            guard let layout = raw.bindMemory(to: UCKeyboardLayout.self).baseAddress else { return nil }
+            var chars = [UniChar](repeating: 0, count: 8)
+            var length = 0
+            let status = UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDown), modifiers, UInt32(LMGetKbdType()), 0,
+                                        &dead, chars.count, &length, &chars)
+            return status == noErr ? String(utf16CodeUnits: chars, count: length) : nil
+        }
+        state = result == nil ? 0 : dead
+        return result
+    }
+
+    private func layout() -> (String, Data)? {
+        let source: TISInputSource?
+        if let fixedSource {
+            let filter = [kTISPropertyInputSourceID as String: fixedSource] as CFDictionary
+            source = (TISCreateInputSourceList(filter, true)?.takeRetainedValue() as? [TISInputSource])?.first
+        } else {
+            source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue()
+        }
+        guard let source, let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData),
+              let rawID = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+        let id = Unmanaged<CFString>.fromOpaque(rawID).takeUnretainedValue() as String
+        return (id, Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data)
+    }
 }
