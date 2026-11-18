@@ -133,6 +133,8 @@ public struct AudioDiagnostics: Sendable {
 ///   microphone. Recording commands for the playback device answer RESET_DEVICE `81 dev 03` (§3.1).
 /// - Capture (§7): OPEN of the capture device asks the source for permission (the app's first OPEN prompts),
 ///   then answers `84 02 80 02 40 00 00` (or `… FF`: denied, no source, no encoder) with one command credit.
+///   While the question is open the host CLOSEs and re-OPENs every 5 s (§7.1b): such OPENs are only credited, the
+///   question is asked once, and the answer goes to the OPEN waiting at that moment.
 ///   START_RECORD starts the source; every 10 ms Opus packet goes out as READ_DATA (READ_DATA_V2 with RW V2)
 ///   followed by `80 01 00 01 00`. STOP_RECORD, CLOSE, suspend and the session end stop the source at once. A
 ///   source that fails sends `81 02 FF`; the device then ignores commands until RESET_ACK.
@@ -223,6 +225,17 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     private var captureGeneration = 0
     private var uplink: AudioUplink?
     private var startAfterOpen = false
+    /// The source's permission question is open (the macOS prompt may be up): later OPENs wait for the same answer.
+    private var permissionPending = false
+    private var permissionRequest = 0
+    /// Uplink pacing (§7.1): packets leave one per frame interval, measured from `paceOrigin` (uptime ns).
+    private var pacedPackets: [Data] = []
+    private var paceTimerArmed = false
+    private var paceInterval: TimeInterval = 0.01
+    private var paceOrigin: UInt64 = 0
+    private var pacedCount = 0
+    /// The clock for pacing (tests inject their own), in nanoseconds.
+    public var uptimeNanoseconds: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     private var captureSequence: UInt16 = 0
     /// The CGP link is down (between suspend and resume): the source never runs, whatever the state.
     private var linkDown = false
@@ -568,8 +581,12 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             log("OPEN capture \(code) → ignored (device in reset state until RESET_ACK)")
             return
         }
-        // A re-OPEN replaces the previous one; a still unanswered OPEN is answered "failed" first.
-        if case .awaitingPermission = captureState { answerOpen(ok: false, "replaced by another OPEN") }
+        // A re-OPEN replaces the previous one. An OPEN still waiting for the permission gets no answer, only its
+        // credit (§7.1b): a "failed" answer would end the session application's open attempt.
+        if case .awaitingPermission(let old) = captureState {
+            creditCommand()
+            log("OPEN capture \(old) replaced before the permission answer → credited, no OPEN_RESPONSE")
+        }
         stopCapture(to: .closed)
         guard !microphoneDisabled else {
             answerOpen(ok: false, "microphone disabled")
@@ -581,45 +598,66 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
             log("OPEN capture \(code) → OPEN_RESPONSE failed (\(config.microphone ? "format not encodable here" : "microphone off"))")
             return
         }
-        guard let source = captureSource, let encoder = makeEncoder(code) else {
+        guard let source = captureSource, makeEncoder(code) != nil else {
             answerOpen(ok: false, captureSource == nil ? "no capture source" : "no encoder")
             log("OPEN capture \(code) → OPEN_RESPONSE failed (\(captureSource == nil ? "no capture source" : "encoder not available"))")
             return
         }
-        captureGeneration += 1
-        let generation = captureGeneration
         captureState = .awaitingPermission(code)
         startAfterOpen = false
+        if permissionPending {
+            log("OPEN capture \(code) → waiting for the microphone permission asked for earlier")
+            return
+        }
+        permissionPending = true
+        permissionRequest += 1
+        let request = permissionRequest
         log("OPEN capture \(code) → asking for microphone permission")
         source.requestPermission { [weak self] granted in
-            self?.onSession {
-                guard let self, !self.ended, self.captureGeneration == generation,
-                      self.captureState == .awaitingPermission(code) else { return }
-                guard granted, !self.microphoneDisabled else {
-                    self.captureState = .closed
-                    self.answerOpen(ok: false, "permission denied")
-                    self.log("OPEN capture \(code) → OPEN_RESPONSE failed (microphone permission denied)")
-                    self.onEvent?(.microphoneDenied)
-                    return
-                }
-                self.uplink = AudioUplink(encoder: encoder)
-                self.captureSequence = 0
-                self.captureState = .open(code)
-                self.answerOpen(ok: true, "")
-                self.log("OPEN capture \(code) → OPEN_RESPONSE ok (640/64), \(encoder.frameCount)-frame packets")
-                if self.startAfterOpen { self.startRecording(code) }
-            }
+            self?.onSession { self?.permissionAnswered(granted, request: request) }
         }
+    }
+
+    /// The source's permission answer: it goes to the OPEN waiting now, if any (§7.1b).
+    private func permissionAnswered(_ granted: Bool, request: Int) {
+        guard !ended, request == permissionRequest, permissionPending else { return }
+        permissionPending = false
+        guard case .awaitingPermission(let code) = captureState else {
+            log("microphone permission \(granted ? "granted" : "denied") with no OPEN waiting; the next OPEN is answered at once")
+            if !granted { onEvent?(.microphoneDenied) }
+            return
+        }
+        guard granted, !microphoneDisabled else {
+            captureState = .closed
+            answerOpen(ok: false, "permission denied")
+            log("OPEN capture \(code) → OPEN_RESPONSE failed (microphone permission denied)")
+            onEvent?(.microphoneDenied)
+            return
+        }
+        guard let encoder = makeEncoder(code) else {
+            captureState = .closed
+            answerOpen(ok: false, "no encoder")
+            log("OPEN capture \(code) → OPEN_RESPONSE failed (encoder not available)")
+            return
+        }
+        uplink = AudioUplink(encoder: encoder)
+        captureSequence = 0
+        captureState = .open(code)
+        answerOpen(ok: true, "")
+        log("OPEN capture \(code) → OPEN_RESPONSE ok (640/64), \(encoder.frameCount)-frame packets")
+        if startAfterOpen { startRecording(code) }
     }
 
     private func closeCapture() {
         switch captureState {
         case .reset:
             log("CLOSE capture → ignored (device in reset state until RESET_ACK)")
-        case .awaitingPermission:
-            answerOpen(ok: false, "closed before the permission answer")
+        case .awaitingPermission(let code):
+            // The host retries every 5 s while the user has not answered the prompt (§7.1b): credit the OPEN, no
+            // OPEN_RESPONSE; the permission question stays open for the next OPEN.
+            creditCommand()
             stopCapture(to: .closed)
-            log("CLOSE capture before the permission answer → OPEN answered failed")
+            log("CLOSE capture before the permission answer → OPEN \(code) credited, no OPEN_RESPONSE (the host re-OPENs)")
         case .closed:
             log("CLOSE capture (not open)")
         default:
@@ -668,6 +706,10 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
         if uplink == nil { uplink = makeEncoder(code).map { AudioUplink(encoder: $0) } }
         guard let source = captureSource, let uplink, let stream = code.opus ?? code.pcm?.stream else { return streamError("no source or encoder") }
         let generation = captureGeneration
+        paceInterval = Double(uplink.encoder.frameCount) / uplink.encoder.stream.sampleRate
+        pacedPackets = []
+        paceTimerArmed = false
+        pacedCount = 0
         let queue = captureQueue
         let deliver: ([Float]) -> Void = { [weak self] samples in
             let work = {
@@ -691,18 +733,54 @@ public final class AudioEngine: VirtualChannelEngine, VirtualChannelModule {
     private func sendFrames(_ packets: [Data], encodeErrors: Int, generation: Int) {
         guard !ended, generation == captureGeneration, case .recording = captureState, sourceRunning, !linkDown else { return }
         diagnostics.captureEncodeErrors = encodeErrors
-        for packet in packets {
-            if diagnostics.readWriteV2 {
-                send(AudioReply.readDataV2(device: AudioWire.captureDevice, sequence: captureSequence, packet: packet))
-                captureSequence &+= 1
-            } else {
-                send(AudioReply.readData(device: AudioWire.captureDevice, packet: packet))
-            }
-            creditCommand()
-            diagnostics.captureFramesSent += 1
-            diagnostics.captureBytesSent += packet.count
-            if diagnostics.captureFramesSent == 1 { log("first capture frame: \(packet.count) B packet") }
+        // Without a timer (tests, inline use) every packet goes out at once.
+        guard scheduleAfter != nil else { return packets.forEach(sendFrame) }
+        let now = uptimeNanoseconds()
+        if pacedPackets.isEmpty, !paceTimerArmed, pacedCount == 0 || due(at: now) > 2 {
+            // The first packets of a run, or a burst after the source fell behind: the schedule starts from now.
+            paceOrigin = now
+            pacedCount = 0
         }
+        pacedPackets += packets
+        if !paceTimerArmed { pumpPaced(generation: generation) }
+    }
+
+    /// Packets that should be out by `now` and are not.
+    private func due(at now: UInt64) -> Int {
+        let elapsed = Double(now &- paceOrigin) / 1e9
+        return Int(elapsed / paceInterval) + 1 - pacedCount
+    }
+
+    private func pumpPaced(generation: Int) {
+        guard generation == captureGeneration else { return }   // a timer of an earlier run
+        paceTimerArmed = false
+        guard !ended, case .recording = captureState, sourceRunning, !linkDown else {
+            pacedPackets = []
+            return
+        }
+        let n = min(max(due(at: uptimeNanoseconds()), 0), pacedPackets.count)
+        if n > 0 {
+            let out = pacedPackets.prefix(n)
+            pacedPackets.removeFirst(n)
+            pacedCount += n
+            out.forEach(sendFrame)
+        }
+        guard !pacedPackets.isEmpty, let scheduleAfter else { return }
+        paceTimerArmed = true
+        scheduleAfter(paceInterval) { [weak self] in self?.pumpPaced(generation: generation) }
+    }
+
+    private func sendFrame(_ packet: Data) {
+        if diagnostics.readWriteV2 {
+            send(AudioReply.readDataV2(device: AudioWire.captureDevice, sequence: captureSequence, packet: packet))
+            captureSequence &+= 1
+        } else {
+            send(AudioReply.readData(device: AudioWire.captureDevice, packet: packet))
+        }
+        creditCommand()
+        diagnostics.captureFramesSent += 1
+        diagnostics.captureBytesSent += packet.count
+        if diagnostics.captureFramesSent == 1 { log("first capture frame: \(packet.count) B packet") }
     }
 
     /// The source failed: `81 02 FF`, stop, ignore commands until RESET_ACK (§7.1).

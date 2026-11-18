@@ -189,10 +189,52 @@ private let openOpus16 = hex("01 02 06 00 02 00 00 00 00 00")
         let c = CaptureHarness()
         c.feed(hex("00 02 00"))
         c.feed(openOpus16)
-        // CLOSE first: the OPEN is answered "failed", then CLOSE is credited; a late grant changes nothing.
-        #expect(c.feed(hex("02 02")) == [openFailed, credit1, credit1])
+        // CLOSE first: the OPEN is credited without an answer (§7.1b), then CLOSE; a late grant sends nothing.
+        #expect(c.feed(hex("02 02")) == [credit1, credit1])
         #expect(c.answerPermission(true).isEmpty)
         #expect(c.engine.captureState == .closed && c.source.starts == 0)
+        // macOS knows the answer now: the next OPEN asks the source again and is answered.
+        c.feed(openOpus16)
+        #expect(c.answerPermission(true) == [openOK, credit1])
+    }
+
+    /// D159, docs/98 §7.1b: while the macOS prompt is up the host CLOSEs and re-OPENs every 5 s. No OPEN is answered
+    /// "failed", the prompt is asked for once, and the answer goes to the OPEN that waits when the user decides.
+    @Test func openWaitsForThePromptAcrossHostRetries() {
+        let h = CaptureHarness()
+        h.feed(hex("00 02 00"))
+        #expect(h.feed(openOpus16).isEmpty)
+        #expect(h.feed(hex("02 02")) == [credit1, credit1])                  // 5 s later: CLOSE
+        #expect(h.feed(openOpus16).isEmpty)                                   // re-OPEN joins the open question
+        #expect(h.feed(hex("02 02")) == [credit1, credit1])
+        #expect(h.feed(hex("01 02 06 00 14 00 04 00 00 00")).isEmpty)         // re-OPEN, Opus 48 kHz stereo
+        #expect(h.feed(hex("01 02 06 00 14 00 04 00 00 00")) == [credit1])    // replaced without a CLOSE: credit only
+        #expect(h.source.permissionRequests.count == 1)
+        #expect(h.answerPermission(true) == [openOK, credit1])               // the user clicks Allow
+        #expect(h.engine.captureState == .open(AudioFormatCode(6, 0x14)))
+        h.feed(hex("07 02"))
+        #expect(h.source.starts == 1 && h.source.format == AudioStreamFormat(sampleRate: 48000, channels: 2))
+        #expect(!h.sent.contains(openFailed) && h.events == ["rec on"])
+        // Every host command credited exactly once: INIT excluded, 4 OPENs, 2 CLOSEs, START.
+        #expect(h.sent.filter { $0 == credit1 }.count == 7)
+    }
+
+    @Test func promptDeniedAfterTheHostClosed() {
+        let h = CaptureHarness()
+        h.feed(hex("00 02 00"))
+        h.feed(openOpus16)
+        h.feed(hex("02 02"))
+        #expect(h.answerPermission(false).isEmpty && h.events == ["denied"])   // nothing waits: nothing sent
+        h.feed(openOpus16)                                                     // macOS now answers "denied" at once
+        #expect(h.answerPermission(false) == [openFailed, credit1])
+        // Denied while an OPEN waits: answered failed at once.
+        let d = CaptureHarness()
+        d.feed(hex("00 02 00"))
+        d.feed(openOpus16)
+        d.feed(hex("02 02"))
+        d.feed(openOpus16)
+        #expect(d.answerPermission(false) == [openFailed, credit1])
+        #expect(d.engine.captureState == .closed && d.source.starts == 0)
     }
 
     @Test func openFailsWithoutMicrophoneSourceOrEncoder() {
@@ -303,6 +345,45 @@ private let openOpus16 = hex("01 02 06 00 02 00 00 00 00 00")
         p.engine.disableMicrophone(notifyHost: true, reason: "test")
         #expect(Array(p.sent[mark...]) == [openFailed, credit1])
         #expect(p.answerPermission(true).isEmpty && p.source.starts == 0)
+    }
+
+    /// D159, docs/98 §7.1: a 100-ms tap buffer (10 packets) leaves one packet per frame interval, not as a burst.
+    @Test func uplinkIsPacedAtTheFrameInterval() {
+        let h = CaptureHarness()
+        var clock: UInt64 = 0
+        var timers: [(TimeInterval, () -> Void)] = []
+        h.engine.uptimeNanoseconds = { clock }
+        h.engine.scheduleAfter = { delay, block in timers.append((delay, block)) }
+        func tick(_ ms: UInt64) -> Int {   // advance the clock, fire the pending timer; packets sent
+            clock += ms * 1_000_000
+            let before = h.sent.count
+            let pending = timers
+            timers = []
+            pending.forEach { $0.1() }
+            return h.sent[before...].filter { $0.first == 0x83 }.count
+        }
+        h.feed(hex("00 02 00"))
+        h.feed(openOpus16)
+        h.answerPermission(true)
+        h.feed(hex("07 02"))
+        #expect(h.deliver(1600).filter { $0.first == 0x83 }.count == 1)   // 10 packets of 10 ms: the first at once
+        #expect(timers.count == 1 && timers[0].0 == 0.01)
+        var sent = 1
+        for _ in 0..<9 { sent += tick(10) }
+        #expect(sent == 10 && timers.isEmpty)
+        // The next tap buffer 100 ms after the first: on schedule, so again one packet now and nine paced.
+        clock += 10_000_000
+        #expect(h.deliver(1600).filter { $0.first == 0x83 }.count == 1)
+        // A late timer catches up with every packet that is due, no more.
+        #expect(tick(35) == 3)
+        // STOP_RECORD drops what is still queued; the old timer sends nothing.
+        h.feed(hex("08 02"))
+        #expect(tick(10) == 0 && h.engine.diagnostics.captureFramesSent == 14)
+        // A new run starts its own schedule.
+        h.feed(hex("07 02"))
+        clock += 5_000_000_000
+        #expect(h.deliver(320).filter { $0.first == 0x83 }.count == 1)
+        #expect(tick(10) == 1)
     }
 
     @Test func readDataV2WithSequenceWhenRWV2IsOn() {
