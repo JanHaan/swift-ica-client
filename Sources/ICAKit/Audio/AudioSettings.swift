@@ -1,13 +1,14 @@
 import Foundation
 
-/// The audio settings (docs/98 §10.4): play session audio, default **on**; pass the microphone, default **off**
-/// ("until verified live"; when on, the Mac microphone opens only while the host records). Both decide what the
-/// CTXCAM module announces, so they apply at the next connect. Volume follows macOS.
+/// The audio settings (docs/98 §10.4): play session audio, default **on**; pass the microphone, default **on** from
+/// 0.9.0 (D163; the Mac microphone opens only while the host records, and macOS's own prompt at the first recording is
+/// the consent). A stored value wins over the default. Both decide what the CTXCAM module announces, so they apply at
+/// the next connect. Volume follows macOS.
 public struct AudioSettings: Equatable, Sendable {
     /// §10.4: "Play session audio (default on)".
     public static let defaultEnabled = true
-    /// §10.4: "Microphone (default off until verified live)".
-    public static let defaultMicrophone = false
+    /// §10.4: "Microphone (default on from 0.9.0)".
+    public static let defaultMicrophone = true
 
     public var enabled = AudioSettings.defaultEnabled
     public var microphone = AudioSettings.defaultMicrophone

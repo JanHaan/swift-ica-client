@@ -782,6 +782,10 @@ private func code3Packet(_ frames: [Data]) -> Data {
         defer { defaults.removePersistentDomain(forName: name) }
         #expect(AudioSettings.load(defaults: defaults, env: [:]).enabled == AudioSettings.defaultEnabled)
         #expect(AudioSettings.defaultEnabled)
+        // The microphone is on by default from 0.9.0 (docs/98 §10.4, D163); env and a stored value still win.
+        #expect(AudioSettings.defaultMicrophone && AudioSettings.load(defaults: defaults, env: [:]).microphone)
+        #expect(AudioSettings.load(defaults: defaults, env: [:]).engineConfig?.microphone == true)
+        #expect(!AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO_MIC": "0"]).microphone)
         #expect(AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO": "0"]).engineConfig == nil)
         var s = AudioSettings()
         s.enabled = false
@@ -791,7 +795,10 @@ private func code3Packet(_ frames: [Data]) -> Data {
         let limited = AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO": "1", "ICA_AUDIO_CODECS": "PCM, speex"])
         #expect(limited.codecs == [.pcm])
         #expect(limited.engineConfig?.codecs == [.pcm])
-        #expect(!AudioSettings.defaultMicrophone && !AudioSettings.load(defaults: defaults, env: [:]).microphone)
+        var off = AudioSettings()
+        off.microphone = false
+        off.save(to: defaults)
+        #expect(!AudioSettings.load(defaults: defaults, env: [:]).microphone)   // a stored off beats the default
         #expect(AudioSettings.load(defaults: defaults, env: ["ICA_AUDIO": "1", "ICA_AUDIO_MIC": "1"]).engineConfig?.microphone == true)
         var mic = AudioSettings()
         mic.microphone = true
