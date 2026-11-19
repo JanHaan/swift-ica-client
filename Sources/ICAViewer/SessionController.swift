@@ -1388,6 +1388,14 @@ final class SessionController: NSObject {
             vlog("ctxctl: \(event)")
             if case .ready = event { DispatchQueue.main.async { self?.controlReady = true } }
         }
+        // Links from the session (docs/56): decided on main, answered on the session queue.
+        guard LinkOpener.enabled else { return vlog("links: off (ICA_URL_REDIRECT=0); links stay in the session") }
+        let session = self.session, name = self.name
+        engine.onOpenURL = { url, reply in
+            DispatchQueue.main.async {
+                LinkOpener.shared.open(url, from: name) { opened in session.perform { reply(opened) } }
+            }
+        }
     }
 
     /// Starts `resource` inside this session over CTXCTL (docs/55 §6). Queued in the engine until the channel is ready

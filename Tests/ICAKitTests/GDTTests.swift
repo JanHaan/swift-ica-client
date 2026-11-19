@@ -366,11 +366,15 @@ private func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
     // u16 offset 4, count 2, then cap 1 (len 8) and cap 9 (len 8, data 01 00 00 00) as in the sharetest request.
     static let request = hex("04 00 02 00  01 00 08 00 01 00 00 00  09 00 08 00 01 00 00 00")
 
-    @Test func capability9SkippedByDefaultAndEchoedWhenAccepted() {
+    /// Since docs/56 cap 9 (SFTA_EX) is answered by default as the stock client does: 1 when the host offers 1.
+    @Test func capability9AnsweredByDefaultAndEchoedWhenAccepted() {
         let caps = ControlCapability.parseList(Self.request)
         #expect(caps.map(\.id) == [1, 9])
         let plain = ControlCapability.response(to: caps, hasLaunchData: false)
-        #expect(plain.answered.map(\.id) == [1])
+        #expect(plain.answered.map(\.id) == [1, 9])
+        #expect(plain.answered.last?.data == hex("01 00 00 00"))
+        let zero = ControlCapability.parseList(hex("04 00 01 00  09 00 08 00 02 00 00 00"))
+        #expect(ControlCapability.response(to: zero, hasLaunchData: false).answered.map(\.data) == [hex("00 00 00 00")])
         let echoed = ControlCapability.response(to: caps, hasLaunchData: false, echo: [9])
         #expect(echoed.answered.map(\.id) == [1, 9])
         #expect(echoed.payload == hex("04 00 02 00  01 00 08 00 01 00 00 00  09 00 08 00 01 00 00 00"))

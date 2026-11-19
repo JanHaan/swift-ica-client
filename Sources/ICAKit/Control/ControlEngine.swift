@@ -14,6 +14,9 @@ import Foundation
 /// - Commit with cap 5 = 1 (§5.3): our own app goes out over the channel once (reconnect case). Its response, if
 ///   any, is consumed first; shared launches wait for it at most `ownResponseWait`.
 /// - Session events 0x0F are logged; 0x09/0x0C and unknown commands are skipped by length.
+/// - URL redirection (docs/56): each 0x0E goes to `onOpenURL`, whose answer goes back as 0x0A in arrival order (the
+///   wire has no id). Without a handler, or for a payload we cannot read, the reply is "not opened" at once, and the
+///   host opens the link in the session.
 ///
 /// Call everything on the session queue; `onEvent` and the launch completions are called there.
 public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
@@ -104,11 +107,17 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
         public var sessionGuid: String?
         public var skippedCommands: [UInt8: Int] = [:]
         public var malformed = 0
+        /// URL requests (0x0E) received, and replies sent as (opened) in order.
+        public var urlRequests = 0
+        public var urlReplies: [Bool] = []
     }
 
     public let channelName = ControlWire.channelName
     public var output: ((ChannelOutput) -> Void)?
     public var onEvent: ((Event) -> Void)?
+    /// A link opened in the session (docs/56): the URL as sent, and `reply(opened)`, to be called once on the session
+    /// queue (true: opened on this Mac; false: the session opens it). nil: every link stays in the session.
+    public var onOpenURL: ((String, _ reply: @escaping (Bool) -> Void) -> Void)?
     public let config: Config
     /// Runs a block on the session queue after a delay (timeouts). Nil: no timeouts (tests drive them by hand).
     public var scheduleAfter: ((TimeInterval, @escaping () -> Void) -> Void)?
@@ -135,6 +144,9 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
     private var ownPending = false
     /// The CGP link is down (output is queued for the resume): timeouts wait for the link.
     private var linkDown = false
+    /// URL requests in arrival order with their answer once known; answers leave in this order (docs/56 §3.2).
+    private var urlReplies: [(id: Int, opened: Bool?)] = []
+    private var nextURLId = 1
 
     public init(config: Config = Config()) {
         self.config = config
@@ -244,6 +256,7 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
         let waiting = queued, sent = outstanding
         queued = []
         outstanding = []
+        urlReplies = []
         ownPending = false
         waiting.forEach { finish($0, .notSent("the session ended first")) }
         sent.filter { $0.completion != nil }.forEach { finish($0, .sessionEnded) }
@@ -319,9 +332,43 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
             }
         case ControlWire.Command.sessionEvent:
             sessionEvent(p)
+        case ControlWire.Command.openURL:
+            openURL(p)
         default:
             diagnostics.skippedCommands[message.command, default: 0] += 1
             log(String(format: "← command 0x%02X, %d B: skipped", message.command, p.count))
+        }
+    }
+
+    // MARK: URL redirection (docs/56)
+
+    private func openURL(_ p: [UInt8]) {
+        diagnostics.urlRequests += 1
+        let id = nextURLId
+        nextURLId += 1
+        urlReplies.append((id, nil))
+        guard let url = URLRedirectWire.url(fromPayload: p) else {
+            diagnostics.malformed += 1
+            log("← open URL #\(id): \(p.count) B, unreadable; the session opens it")
+            return answerURL(id, false)
+        }
+        guard let handler = onOpenURL else {
+            log("← open URL #\(id): \(URLRedirectFilter.logSummary(raw: url)); no handler, the session opens it")
+            return answerURL(id, false)
+        }
+        log("← open URL #\(id): \(URLRedirectFilter.logSummary(raw: url))")
+        handler(url) { [weak self] opened in self?.answerURL(id, opened) }
+    }
+
+    /// Records the answer for request `id` (the first one counts) and sends every answer at the head of the queue.
+    private func answerURL(_ id: Int, _ opened: Bool) {
+        guard state != .ended, let i = urlReplies.firstIndex(where: { $0.id == id }), urlReplies[i].opened == nil else { return }
+        urlReplies[i].opened = opened
+        while let first = urlReplies.first, let answer = first.opened {
+            urlReplies.removeFirst()
+            diagnostics.urlReplies.append(answer)
+            output?(.channel(Data(URLRedirectWire.reply(opened: answer))))
+            log("→ open URL #\(first.id): " + (answer ? "opened on this Mac" : "not opened; the session opens it"))
         }
     }
 

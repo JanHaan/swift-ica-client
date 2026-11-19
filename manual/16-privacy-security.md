@@ -32,6 +32,7 @@ ICA Viewer does not check for updates and does not collect usage data.
 - It can read the **clipboard** when you copy or paste with the session: do not copy secrets you do not want a remote app to see.
 - It can use the **microphone** only while it records and you allowed it in macOS (you can turn it off in **Settings**), and the **camera** only while it uses it and you allowed it in macOS (you can turn it off in **Settings**). The menu bar shows when they are in use, and you can switch them off for the current session. If a remote app ends while it uses the camera, Windows does not always tell ICA Viewer, and the camera can stay on until another app uses it or you switch it off in the menu bar.
 - Files from the session carry the macOS **quarantine flag**, so macOS checks them before opening.
+- If the server hands links over, it **can open web pages in your default browser** (at most five in 30 seconds), including pages on your home or office network. It cannot open files, mail links or other programs on your Mac this way.
 
 ## Permissions macOS may ask for
 

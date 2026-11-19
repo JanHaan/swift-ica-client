@@ -25,6 +25,9 @@ Your account may have none assigned, or the sign-in did not finish. Choose **Fil
 **An app opened in the same session as another one.**
 That is normal: apps of the same user share one session, which is why the second app starts quickly and needs no new sign-in. ICA Viewer shows a message when a particular app has to run in the session of another.
 
+**A link opens in a browser on the server, not on my Mac.**
+That happens when the server does not hand links over (ask your IT department about the Citrix policy "Host to client redirection"), when the link is not a web link, when your Mac cannot reach its server, or after many links in a short time. Some apps open links in the server's default browser directly; those always stay on the server.
+
 **A window is on a screen that is gone.**
 Use the **Session** menu or the Connection Center to disconnect and reconnect; the windows return on your current screens.
 

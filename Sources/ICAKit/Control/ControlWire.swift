@@ -18,19 +18,29 @@ public enum ControlWire {
         public static let capabilityCommit: UInt8 = 0x02
         public static let launchRequest: UInt8 = 0x03
         public static let launchResponse: UInt8 = 0x04
+        /// URL redirection as the HTML5 reference names it (docs/55 §4.3); the lab VDA never sent it (docs/56 §3).
         public static let urlRedirection: UInt8 = 0x09
+        /// Our reply to 0x0E: u32 0 = opened on the client, 1 = not opened, the host opens it (docs/56 §3.2).
+        public static let openURLReply: UInt8 = 0x0A
+        /// Host-to-client URL redirection: open this URL on the client (docs/56 §3.1).
+        public static let openURL: UInt8 = 0x0E
         public static let pnpEventResponse: UInt8 = 0x0C
         public static let sessionEvent: UInt8 = 0x0F
     }
 
-    /// Capability ids the client answers (§5.2); 7 (webcam PnP) is never sent.
+    /// Capability ids the client answers (§5.2, and 9 since docs/56); 7 (webcam PnP) is never sent.
     public enum Capability {
         public static let version1: UInt16 = 1
         public static let version2: UInt16 = 2
         public static let commandLineLimit: UInt16 = 3
         public static let launchData: UInt16 = 5
+        /// "SFTA" in the stock client's own log (docs/76 §7.11), our older name "session events".
         public static let sessionEvents: UInt16 = 6
         public static let pnpWebcam: UInt16 = 7
+        /// "SFTA_EX" in the stock client's log: with it answered 1, links come as 0x0E (docs/56 §2); without it as
+        /// 0x09, whose layout and reply are unknown.
+        public static let serverFTAEx: UInt16 = 9
+        /// Named URL redirection after docs/55 §5.2 [I]; "SessionEvent" in the stock client's log (docs/76 §7.11).
         public static let urlRedirection: UInt16 = 0x0A
     }
 
@@ -149,6 +159,9 @@ public struct ControlCapability: Equatable, Sendable, CustomStringConvertible {
                 data = ControlWire.le16(limit) + [0, 0] + (cap.length == 10 ? [0, 0] : [])
             case ControlWire.Capability.launchData: data = [hasLaunchData ? 1 : 0, 0, 0, 0]
             case ControlWire.Capability.sessionEvents: data = ControlWire.le32(ControlWire.u32(cap.data, 0) == 1 ? 1 : 0)
+            // As the stock client: SFTA_EX 1 when the host offers 1 (docs/56 §2); links then come as 0x0E.
+            case ControlWire.Capability.serverFTAEx where !echo.contains(cap.id):
+                data = ControlWire.le32(ControlWire.u32(cap.data, 0) == 1 ? 1 : 0)
             case ControlWire.Capability.urlRedirection: data = []
             case let id where echo.contains(id): data = cap.data   // also 7 (webcam PnP) when listed (V13)
             default: continue   // 7 (webcam PnP) and unknown ids are not echoed unless listed

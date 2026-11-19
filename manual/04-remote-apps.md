@@ -63,6 +63,15 @@ To quit ICA Viewer itself, use the menu bar icon > **Quit ICA Viewer**, or **ICA
 - **Accents and emoji.** Dead keys work as on your Mac (^ then e gives ê, ⌥N then n gives ñ). **Edit > Emoji & Symbols** (⌃⌘Space) inserts the emoji you click; typing into its search field does not work there. Holding a key down for the accent menu does not work: the key repeats, as in Windows.
 - More in [Keyboard shortcuts](15-shortcuts.md).
 
+## Links open on your Mac
+
+When you click a link in a remote app, it can open in your Mac's default browser instead of a browser on the server. Your IT department decides whether the server hands links over (the Citrix policy "Host to client redirection"); ICA Viewer has no setting for it.
+
+- Only web links (**http** and **https**) open on your Mac. Everything else, such as mail links, file paths or links to other programs, opens on the server as before.
+- A link to a server your Mac cannot reach (for example an intranet address while you are at home) opens on the server instead.
+- If an app opens many links at once, ICA Viewer opens at most five in 30 seconds on your Mac; the rest open on the server.
+- In a full desktop, links always open on the server.
+
 ## Full desktops
 
 A published *desktop* (such as the lab's "Lab Desktop") opens in one ordinary window with the resource's name. The window has a fixed size (90 % of your main screen), cannot be resized, and does not span several screens. Closing the window disconnects the session; the desktop keeps running and you can reconnect from the launcher or the [Connection Center](10-connection-center.md).
