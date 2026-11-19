@@ -25,7 +25,7 @@ public enum TestSwitches {
         "ICA_CDM": ["0", "off", "no"], "ICA_PRINTING": ["0", "off", "no"], "ICA_AUDIO": ["0", "off", "no"],
         "ICA_AUDIO_MIC": ["0", "off", "no"], "ICA_WEBCAM": ["0", "off", "no"], "ICA_CLIPBOARD": ["0", "off", "no"],
         "ICA_CLIP_IMAGES": ["0", "off", "no"], "ICA_CDM_READONLY": ["1", "on", "yes"],
-        "ICA_TW_YUV444": ["0"],
+        "ICA_TW_YUV444": ["0"], "ICA_EDT": ["0", "off", "no"],
     ]
 
     /// Whether a release build keeps `name=value` (only `ICA_*`/`ICAVIEWER_*` names are ever touched).

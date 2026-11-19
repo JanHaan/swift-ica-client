@@ -422,7 +422,8 @@ case "kbdtest":
 
 case "bulkprobe":
     // icactl bulkprobe [seconds] — bulk throughput, independent of GDT (D135, BulkProbe.swift): a noise window in the lab's
-    // Command Prompt; transport bytes per second; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1). ICA_EDT=1 for EDT.
+    // Command Prompt; transport bytes per second; logoff. Lab only (ICA_ALLOW_ANY_RESOURCE=1). EDT as the ICA file says;
+    // ICA_EDT=0 for TCP.
     guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("bulkprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
     let bulkSeconds = args.first.flatMap(Int.init) ?? 30
     let store = storeClient()
@@ -437,8 +438,7 @@ case "bulkprobe":
     }
 
 case "edtprobe":
-    // icactl edtprobe <vda-ipv4> [port] [seconds] — EDT handshake only (D130, EDTProbe.swift); needs ICA_EDT=1.
-    guard EDTFeature.enabled() else { fail("edtprobe needs ICA_EDT=1 (EDT is experimental)") }
+    // icactl edtprobe <vda-ipv4> [port] [seconds] — EDT handshake only (D130, EDTProbe.swift).
     if args.first == "--dtls" {
         // icactl edtprobe --dtls <server name> <vda-ipv4> [port] [seconds] — EDT inside DTLS (D148).
         guard args.count >= 3 else { fail("usage: icactl edtprobe --dtls <server name> <vda-ipv4> [port, default 443] [seconds, default 3]") }

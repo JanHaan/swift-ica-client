@@ -104,9 +104,12 @@ private func ica(_ lines: [String]) -> ICAFile {
     }
 
     @Test func ipv6AndUDPFlags() throws {
-        let plan = try ICAConnectPlan(ica: ica(["Address=[2001:db8::12]:1494", "HDXoverUDP=Preferred"]), environment: [:])
-        #expect(plan.host == "2001:db8::12" && plan.port == 1494 && plan.ignoresUDP)
-        #expect(plan.description.contains("HDXoverUDP ignored"))
+        let file = ica(["Address=[2001:db8::12]:1494", "HDXoverUDP=Preferred"])
+        let plan = try ICAConnectPlan(ica: file, environment: [:])
+        #expect(plan.host == "2001:db8::12" && plan.port == 1494)
+        // Raw ICA (no CGPAddress): no EDT, whatever the file asks (docs/80 §8.8).
+        let edt = EDTChoice.choose(ica: file, plan: plan, environment: [:])
+        #expect(edt.mode == .off && edt.requested == .preferred && edt.note.contains("session reliability"))
     }
 
     @Test func descriptionNeverShowsTheTicket() throws {

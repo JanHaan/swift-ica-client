@@ -59,9 +59,6 @@ public struct ICAConnectPlan: Equatable, Sendable, CustomStringConvertible {
     public var tls: Bool
     public var framing: Framing
     public var encryption: ICAEncryptionLevel
-    /// `HDXoverUDP` asks for EDT, which we do not offer: TCP only (docs/20 §6). For the log.
-    public var ignoresUDP: Bool
-
     public var usesCGP: Bool { if case .cgp = framing { true } else { false } }
 
     /// Why this plan must not be connected when the account requires TLS (a NetScaler Gateway account: its ICA
@@ -82,8 +79,8 @@ public struct ICAConnectPlan: Equatable, Sendable, CustomStringConvertible {
             what = socks.map { "SOCKS5 to \(route == .gateway ? "ticket (\($0.host.count) chars)" : "\($0.host):\($0.port)"), raw ICA" }
                 ?? "raw ICA"
         }
+        // EDT (`HDXoverUDP`) is decided on top of the plan: EDTChoice (docs/80 §8.8).
         return "\(route.rawValue) \(tls ? "TLS" : "TCP") \(host):\(port), \(what), encryption \(encryption)"
-            + (ignoresUDP ? ", HDXoverUDP ignored (TCP only)" : "")
     }
 
     public static let icaPort: UInt16 = 1494
@@ -98,8 +95,6 @@ public struct ICAConnectPlan: Equatable, Sendable, CustomStringConvertible {
         if case .secureICA(let name) = encryption, environment["ICA_IGNORE_ENCRYPTION_LEVEL"] != "1" {
             throw Failure.unsupportedEncryption(name)
         }
-        let udp = ica["HDXoverUDP"]?.lowercased() ?? ""
-        ignoresUDP = ["on", "pref", "preferred", "true"].contains(udp)
         let address = ica["Address"].flatMap { $0.isEmpty ? nil : $0 }
         let proxy = ica["SSLProxyHost"].flatMap { $0.isEmpty ? nil : $0 }
         let cgpTicket = ica.bool("CGPSecurityTicket")

@@ -108,6 +108,8 @@ public final class EDTConnection {
     public var onState: (State) -> Void = { _ in }
     /// Every datagram received, parsed (tests, probes, logs).
     public var onPacket: (EDTPacket) -> Void = { _ in }
+    /// Probing found the path narrower than the negotiated packet size (the size it carries), once per connection.
+    public var onPathBelowNegotiated: (Int) -> Void = { _ in }
     /// Notable protocol events for the log (first ACK/NAK seen, RTOs, unknown control types).
     public var log: (String) -> Void = { _ in }
 
@@ -622,14 +624,27 @@ public final class EDTConnection {
                 return sendProbe(size: config.minPacketSize, server: server, now: now)
             }
             probeDone = true
-            return log("EDT path MTU: done, sending at \(sendPacketSize) B (probes: "
-                       + probeLog.map { "\($0.size)\($0.answered ? "+" : "-")" }.joined(separator: " ") + ")")
+            log("EDT path MTU: done, sending at \(sendPacketSize) B (probes: "
+                + probeLog.map { "\($0.size)\($0.answered ? "+" : "-")" }.joined(separator: " ") + ")")
+            if let narrower = pathBelowNegotiated {
+                // The peer sends at the negotiated size, which our probes say the path does not carry (docs/80 §8.8).
+                log("EDT path MTU: the path carries \(narrower) B, less than the negotiated \(packetSize) B; the server's "
+                    + "larger packets may be lost on the way to us")
+                onPathBelowNegotiated(narrower)
+            }
+            return
         }
         let mid = ((probeLow + probeHigh + 1) / 2) & ~3
         sendProbe(size: max(probeLow + 4, mid), server: server, now: now)
     }
 
     public var mtuProbingDone: Bool { probeDone }
+
+    /// After probing: the largest size the path carried, when that is below the negotiated size (the peer's packets at
+    /// the negotiated size may then never reach us, docs/80 §8.8); nil while probing, or when the negotiated size fits.
+    public var pathBelowNegotiated: Int? {
+        probeDone && probeReplies > 0 && sendPacketSize < packetSize ? sendPacketSize : nil
+    }
 
     // MARK: Helpers
 

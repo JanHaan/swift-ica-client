@@ -1,7 +1,7 @@
 import Foundation
 import ICAKit
 
-/// `icactl edtprobe <vda-ipv4> [port] [seconds]` (D130, needs ICA_EDT=1): the EDT handshake only, with ICAKit's
+/// `icactl edtprobe <vda-ipv4> [port] [seconds]` (D130): the EDT handshake only, with ICAKit's
 /// `EDTConnection` over a plain UDP socket: induction, conclusion, then `seconds` (default 3) of keep-alives both ways,
 /// then our shutdown. No CGP, no ICA, no session; the VDA forgets the half-open connection.
 func runEDTProbe(host: String, port: UInt16, seconds: Double) {

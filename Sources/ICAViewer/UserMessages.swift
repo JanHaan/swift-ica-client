@@ -17,6 +17,12 @@ enum UserMessage {
         if let e = error as? GatewayLogon.Failure { return gateway(e) }
         if let e = error as? SessionsError { return sessions(e) }
         if let e = error as? CredentialError { return credential(e) }
+        if case CGPTransport.Failure.udpRequired(_, let port, _)? = error as? CGPTransport.Failure {
+            // HDXoverUDP=On and no EDT answer (docs/80 §8.8).
+            return String(format: loc("This server accepts only UDP connections (HDX over UDP), and UDP does not get through on this network. Try another network, or ask your IT department to open UDP port %d.",
+                                      "Dieser Server nimmt nur UDP-Verbindungen an (HDX über UDP), und UDP kommt in diesem Netzwerk nicht durch. Ein anderes Netzwerk versuchen oder die IT-Abteilung bitten, UDP-Port %d freizugeben."),
+                          Int(port))
+        }
         if (error as NSError).domain == NSURLErrorDomain { return network(URLError(URLError.Code(rawValue: (error as NSError).code))) }
         return loc("Something went wrong.", "Etwas ist schiefgegangen.") + " " + reportHint
     }

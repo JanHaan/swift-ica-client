@@ -61,17 +61,27 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
     /// Bytes DTLS adds to every datagram (record header 13 + AES-GCM explicit nonce 8 + tag 16, rounded up): taken off
     /// the packet size offered, so an EDT packet plus DTLS still fits the path.
     public static let dtlsOverhead = 40
+    /// The largest packet size we offer (docs/80 §8.8): the VDA sends at the negotiated size and we cannot probe its
+    /// direction, so a larger offer than the path carries loses its packets (VM over a 1280 path with 1500 offered: the
+    /// session died after the handshake [L]). 1280 is IPv6's minimum link MTU, which nearly every path carries.
+    public static let maxOffer = 1280
+    /// A lower ceiling for the offer (a path found narrower earlier in the session), or nil.
+    public let offerCap: Int?
 
     /// `host` is an IPv4 address or a name; the handshake carries the peer's IPv4 address (docs/80 §4.1), so with a name
     /// `peerIPv4` gives it.
+    /// `handshakeAttempts`: handshake packets before giving up (100 ms apart; the default config's 12 for the race).
     public init(host: String, port: UInt16, queue: DispatchQueue, config: EDTConnection.Config? = nil,
-                dtlsServerName: String? = nil, peerIPv4: [UInt8]? = nil) {
+                dtlsServerName: String? = nil, peerIPv4: [UInt8]? = nil, offerCap: Int? = nil, handshakeAttempts: Int? = nil) {
         self.host = host
         self.port = port
         self.queue = queue
         self.dtlsServerName = dtlsServerName
+        self.offerCap = offerCap
         let ip = peerIPv4 ?? host.split(separator: ".").compactMap { UInt8($0) }
-        edt = EDTConnection(config: config ?? EDTConnection.Config(peerIPv4: ip.count == 4 ? ip : [0, 0, 0, 0]))
+        var cfg = config ?? EDTConnection.Config(peerIPv4: ip.count == 4 ? ip : [0, 0, 0, 0])
+        if let handshakeAttempts { cfg.handshakeAttempts = handshakeAttempts }
+        edt = EDTConnection(config: cfg)
         // Don't fragment (D135): an oversized probe must be lost, not fragmented, or path MTU discovery would lie.
         let parameters: NWParameters
         if let name = dtlsServerName {
@@ -102,6 +112,13 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
             return Int(data.assumingMemoryBound(to: if_data.self).pointee.ifi_mtu)
         }
         return nil
+    }
+
+    /// The packet size offered (docs/80 §8.8): the route's interface MTU (so the VDA's packets fit our first hop, D135),
+    /// at most `maxOffer` and `cap`, minus the DTLS overhead; never below IPv4's 576.
+    public static func offer(interfaceMTU: Int?, dtls: Bool, cap: Int?) -> Int {
+        let limit = min(interfaceMTU ?? maxOffer, maxOffer) - (dtls ? dtlsOverhead : 0)
+        return max(576, min(limit, cap ?? limit))
     }
 
     private func now() -> Double {
@@ -140,20 +157,31 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
                 case .ready:
                     self.receiveLoop()
                     self.startTimer()
-                    // Offer the route's interface MTU (at most 1500), so the VDA's packets fit our first hop (D135).
                     let name = self.connection.currentPath?.availableInterfaces.first?.name
                     let mtu = name.flatMap(Self.interfaceMTU)
-                    let overhead = self.dtlsServerName == nil ? 0 : Self.dtlsOverhead
-                    let offer = min(1500, mtu ?? Int(self.edt.config.maxPacketSize)) - overhead
-                    self.log("EDT: route via \(name ?? "?") (MTU \(mtu.map(String.init) ?? "?"))\(overhead > 0 ? ", DTLS \(self.dtlsServerName!)" : ""): offering packet size \(offer)")
+                    let offer = Self.offer(interfaceMTU: mtu, dtls: self.dtlsServerName != nil, cap: self.offerCap)
+                    self.log("EDT: route via \(name ?? "?") (MTU \(mtu.map(String.init) ?? "?"))\(self.dtlsServerName.map { ", DTLS \($0)" } ?? "")"
+                             + ": offering packet size \(offer)\(self.offerCap.map { " (capped at \($0) after a narrower path)" } ?? "")")
                     self.edt.connect(now: self.now(), maxPacketSize: offer)
                 case .failed(let error):
                     finish(.failure(Failure.handshake("\(error)")))
                     self.fail(Failure.closed("\(error)"))
                 case .waiting(let error):
+                    // No usable path (offline, the interface gone): before the handshake a failed connect; after it a
+                    // dead link, so CGP suspends now and resumes on the next path (docs/80 §8.8).
                     finish(.failure(Failure.handshake("waiting: \(error)")))
+                    if self.isConnected { self.fail(Failure.closed("network path lost (\(error))")) } else { self.stop() }
                 default: break
                 }
+            }
+            // Diagnostics for network changes (§8.8): a UDP flow stays on its path; a change is handled by a resume.
+            connection.viabilityUpdateHandler = { [weak self] viable in
+                guard let self, self.isConnected, !self.finished else { return }
+                self.log("EDT: network path \(viable ? "usable again" : "not usable")")
+            }
+            connection.betterPathUpdateHandler = { [weak self] better in
+                guard let self, better, self.isConnected, !self.finished else { return }
+                self.log("EDT: a better network path is available (this connection keeps its path)")
             }
             connection.start(queue: queue)
             queue.asyncAfter(deadline: .now() + timeout) { [weak self] in

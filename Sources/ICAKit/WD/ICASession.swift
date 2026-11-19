@@ -70,6 +70,8 @@ public final class ICASession: @unchecked Sendable {
     public let port: UInt16
     /// Route, socket and framing chosen from the ICA file (docs/16 §4).
     public let plan: ICAConnectPlan
+    /// EDT for this session (docs/80 §8.8): mode, target and the log line.
+    public let edt: EDTChoice
     public var onEvent: (Event) -> Void = { _ in }
     /// Thinwire INIT (session queue), after the session's own handling. Use this instead of
     /// `thinwire.onInit`, which the session owns.
@@ -154,26 +156,12 @@ public final class ICASession: @unchecked Sendable {
         queue.setSpecific(key: Self.queueKey, value: true)
         transport = CGPTransport(host: host, port: port, tls: plan.tls, framing: plan.framing, queue: queue)
         transport.reconnectTicket = acr?.ticket
-        // EDT (D132): only with ICA_EDT=1, a direct CGP plan and HDX over UDP allowed. With TLS straight to the VDA, EDT
-        // runs inside DTLS on the TLS port (D148); never through a gateway (not tested there).
-        let hdxOverUDP = (ica["HDXoverUDP"] ?? "Off").lowercased() != "off"
-        if EDTFeature.enabled(), case .cgp = plan.framing, plan.tls, plan.route == .direct, hdxOverUDP {
-            // The handshake's peer address field wants the VDA's IPv4 (docs/80 §4.1): from `Address` when it is one.
-            let address = ica["Address"].map { String($0.split(separator: ":").first ?? "") } ?? ""
-            let ip = address.split(separator: ".").compactMap { UInt8($0) }
-            let port = ProcessInfo.processInfo.environment["ICA_EDT_PORT"].flatMap(UInt16.init) ?? plan.port
-            transport.edtTarget = .init(host: plan.host, port: port, dtlsServerName: plan.host, peerIPv4: ip.count == 4 ? ip : nil)
-        }
-        if EDTFeature.enabled(), case .cgp = plan.framing, !plan.tls, hdxOverUDP {
-            let udp = ica["UDPCGPPort"].flatMap { value -> (String, UInt16)? in
-                let parts = value.split(separator: ":")
-                guard parts.count == 2, let p = UInt16(parts[1]) else { return nil }
-                return (String(parts[0]), p)
-            } ?? (host, 2598)
-            // ICA_EDT_PORT overrides the UDP port (tests: a dead port shows the TCP fallback).
-            let port = ProcessInfo.processInfo.environment["ICA_EDT_PORT"].flatMap(UInt16.init) ?? udp.1
-            transport.edtTarget = .init(host: udp.0, port: port)
-        }
+        // EDT as the ICA file's HDXoverUDP says (docs/80 §8.8, D177): direct CGP routes only; plain UDP to UDPCGPPort,
+        // or DTLS on the TLS port with TLS straight to the VDA (D148). ICA_EDT overrides the file (tests).
+        edt = EDTChoice.choose(ica: ica, plan: plan, environment: ProcessInfo.processInfo.environment)
+        transport.edtTarget = edt.target
+        transport.edtMode = edt.mode
+        transport.edtNote = edt.note
         // T_sr without a server cap 9: the ICA file's SessionReliabilityTTL (§3.12.4).
         transport.srTimeoutFallback = ica["SessionReliabilityTTL"].flatMap(TimeInterval.init)
         transport.configureTestHooks(from: ProcessInfo.processInfo.environment)
@@ -509,15 +497,29 @@ public final class SystemCGPClock: CGPClock {
 /// ICA bytes go in through `send` and come out as `.data` events. Runs on one serial queue; events
 /// are delivered on it.
 public final class CGPTransport: @unchecked Sendable {
+    public enum Failure: Error, CustomStringConvertible {
+        /// `HDXoverUDP=On` and EDT did not answer: UDP to the server is blocked, or the server does not offer EDT.
+        case udpRequired(host: String, port: UInt16, why: String)
+        public var description: String {
+            switch self {
+            case .udpRequired(let host, let port, let why):
+                "the ICA file allows HDX over UDP only (HDXoverUDP=On), but EDT to \(host):\(port) did not answer (\(why))"
+            }
+        }
+    }
+
     /// Times from §3.12.2 and §3.12.4; tests shorten them.
     public struct Timing: Sendable {
         public var startDelay: TimeInterval = 3
         public var retryDelay: TimeInterval = 3
         public var connectTimeout: TimeInterval = 20
-        /// EDT handshake budget before falling back to TCP (D132; the VDA answers in milliseconds).
-        public var edtHandshakeTimeout: TimeInterval = 3
         /// EDT wins the start race if its handshake completes within max(this, 3 × the TCP connect time) (D135).
         public var edtRaceWindow: Duration = .milliseconds(300)
+        /// `HDXoverUDP=On`: the EDT handshake budget per connect, there being no TCP to fall back to (docs/80 §8.8).
+        public var edtOnlyTimeout: TimeInterval = 5
+        /// The first connection over EDT: no CGP bind response this long after the handshake → TCP (Preferred) or the
+        /// end (On); the VDA answers a bind within one round trip (docs/80 §8.8).
+        public var edtBindTimeout: TimeInterval = 5
         public var firstReadTimeout: TimeInterval = 20
         public var livenessInterval: TimeInterval = 5
         public var livenessMinimum: TimeInterval = 25
@@ -625,8 +627,8 @@ public final class CGPTransport: @unchecked Sendable {
     private let queueKey = DispatchSpecificKey<Bool>()
     let cgp = CGPSession()
     private var stream: ICAByteStream?
-    /// EDT (CGP over UDP, docs/80, D132): tried first when set (`ICA_EDT=1` and the ICA file allows HDX over UDP);
-    /// a failed EDT handshake falls back to TCP for the rest of the session, as the stock client does.
+    /// EDT (CGP over UDP, docs/80, D132): tried when set (the ICA file's `HDXoverUDP`, `EDTChoice`, docs/80 §8.8);
+    /// `edtMode` says whether TCP races it or EDT goes alone.
     public var edtTarget: EDTTarget?
 
     /// Where EDT goes: plain UDP to `host:port`, or DTLS with `dtlsServerName` (D148).
@@ -642,7 +644,15 @@ public final class CGPTransport: @unchecked Sendable {
             self.peerIPv4 = peerIPv4
         }
     }
+    /// EDT gave up for the rest of this session (no CGP answer over EDT after the handshake); TCP only from now on.
     private var edtFailed = false
+    /// `.preferred`: EDT races TCP; `.on`: EDT only (docs/80 §8.8). Used only with an `edtTarget`.
+    public var edtMode: EDTMode = .preferred
+    /// Why EDT is or is not used, logged at the start (`EDTChoice.note`).
+    public var edtNote: String?
+    /// A path found narrower than the negotiated packet size: later EDT connections offer at most this (§8.8).
+    private var edtOfferCap: Int?
+    private var edtBindWatch: CGPTimer?
     /// "TCP", "TLS" or "EDT": the transport of the current connection (any thread).
     public var transportKind: String { onQueue { stream?.kind == "TCP" && tls ? "TLS" : stream?.kind ?? "-" } }
     /// Bumped whenever the current connection is dropped; callbacks of older connections are ignored.
@@ -770,11 +780,11 @@ public final class CGPTransport: @unchecked Sendable {
 
     /// Connects and starts the receive loop; returns once the bind request is on the wire.
     public func start() async throws {
+        if let edtNote { log(edtNote) }
         let stream = try await openStream()
         perform { [self] in
             guard !closed else { return stream.close() }
-            log(stream.kind.hasPrefix("EDT") ? "\(stream.kind) connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)"
-                                     : "\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
+            logConnected(stream)
             install(stream)
             if case .raw(let socks) = framing {
                 // Raw ICA (docs/16 §4): no CGP, no session reliability.
@@ -786,36 +796,103 @@ public final class CGPTransport: @unchecked Sendable {
                 scheduleTestHooks()
                 return
             }
-            if let reconnectTicket {
-                write(cgp.bindRequest(reconnect: reconnectTicket))
-                log("→ CGP bind request for ACR (\(reconnectTicket), not a resume)")
-            } else if let ticket {
-                write(cgp.bindRequest(ticket: ticket))
-                log("→ CGP bind request (ticket \(ticket.count) chars)")
-            } else {
-                write(cgp.bindRequestWithoutTicket())
-                log("→ CGP bind request, direct (no ticket)")
-            }
+            writeFirstBind()
+            if stream.kind.hasPrefix("EDT") { watchEDTBind() }
             scheduleTestHooks()
+        }
+    }
+
+    private func logConnected(_ stream: ICAByteStream) {
+        log(stream.kind.hasPrefix("EDT") ? "\(stream.kind) connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)"
+                                         : "\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
+    }
+
+    private func writeFirstBind() {
+        if let reconnectTicket {
+            write(cgp.bindRequest(reconnect: reconnectTicket))
+            log("→ CGP bind request for ACR (\(reconnectTicket), not a resume)")
+        } else if let ticket {
+            write(cgp.bindRequest(ticket: ticket))
+            log("→ CGP bind request (ticket \(ticket.count) chars)")
+        } else {
+            write(cgp.bindRequestWithoutTicket())
+            log("→ CGP bind request, direct (no ticket)")
+        }
+    }
+
+    /// The first connection over EDT (docs/80 §8.8): an EDT handshake that completes while nothing else gets through
+    /// (the stock client's lab symptom, §2) must not hang the launch. No bind response in `edtBindTimeout` → the bind
+    /// again over TCP for the rest of the session (Preferred), or the end (On). Nothing but the bind was sent yet.
+    private func watchEDTBind() {
+        let current = generation
+        edtBindWatch?.cancel()
+        edtBindWatch = clock.schedule(after: timing.edtBindTimeout, wall: false, on: queue) { [weak self] in
+            guard let self, !self.closed, current == self.generation, !self.counters.bound, self.cgp.state == .binding else { return }
+            let why = "no CGP answer over EDT within \(Int(self.timing.edtBindTimeout)) s of the handshake"
+            if self.edtMode == .on {
+                return self.finish("EDT: \(why); HDXoverUDP=On allows no TCP")
+            }
+            self.log("EDT: \(why): TCP for the rest of this session")
+            self.edtFailed = true
+            self.dropStream()
+            let tcp = TLSStream(host: self.host, port: self.port, tls: self.tls, queue: self.queue)
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await tcp.connect(timeout: self.timing.connectTimeout)
+                    self.perform {
+                        guard !self.closed, self.stream == nil, self.cgp.state == .binding else { return tcp.close() }
+                        self.logConnected(tcp)
+                        self.install(tcp)
+                        self.cgp.beginConnection()
+                        self.writeFirstBind()
+                    }
+                } catch {
+                    self.perform { self.finish("TCP after EDT failed: \(error)") }
+                }
+            }
         }
     }
 
     /// EDT and TCP(+TLS) race (D135): both connect at once; EDT wins if its handshake completes within
     /// max(`edtRaceWindow`, 3 × the TCP connect time): two round trips against TCP's one, plus a lost handshake packet's
-    /// retry (live: 1.5× lost the race under 50–100 ms and 1–2 % loss). Else TCP is used and the EDT connection closed. Without an EDT
-    /// target (or after EDT failed in this session) TCP alone.
+    /// retry (live: 1.5× lost the race under 50–100 ms and 1–2 % loss). Else TCP is used and the EDT connection closed.
+    /// While TCP is still connecting (the server unreachable, e.g. a resume during an outage) EDT keeps trying its
+    /// handshake every 100 ms, so when the path comes back EDT answers before TCP's SYN retry (docs/80 §8.8).
+    /// `HDXoverUDP=On`: EDT alone, `Failure.udpRequired` when it does not answer. Without an EDT target (or after EDT
+    /// failed in this session) TCP alone (docs/80 §8.8).
     private func openStream() async throws -> ICAByteStream {
-        let tcp = TLSStream(host: host, port: port, tls: tls, queue: queue)
-        guard let target = edtTarget, !onQueue({ edtFailed }) else {
+        let (target, failed, cap) = onQueue { (edtTarget, edtFailed, edtOfferCap) }
+        guard let target, !failed else {
+            let tcp = TLSStream(host: host, port: port, tls: tls, queue: queue)
             try await tcp.connect(timeout: timing.connectTimeout)
             return tcp
         }
+        let only = edtMode == .on
         let edt = EDTStream(host: target.host, port: target.port, queue: queue, dtlsServerName: target.dtlsServerName,
-                            peerIPv4: target.peerIPv4)
+                            peerIPv4: target.peerIPv4, offerCap: cap,
+                            handshakeAttempts: Int((only ? timing.edtOnlyTimeout : timing.connectTimeout) * 10))
         edt.log = { [weak self] in self?.log($0) }
+        // Runs on the queue (EDT's callbacks do): the next connections of this session offer what the path carried.
+        edt.edt.onPathBelowNegotiated = { [weak self] size in self?.edtOfferCap = size }
         let started = ContinuousClock.now
+        func ms(_ d: Duration) -> Int { Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000) }
+        if only {
+            do {
+                try await edt.connect(timeout: timing.edtOnlyTimeout)
+            } catch {
+                throw Failure.udpRequired(host: target.host, port: target.port, why: "\(error)")
+            }
+            log("EDT handshake in \(ms(ContinuousClock.now - started)) ms (HDXoverUDP=On: no TCP)")
+            return edt
+        }
+        let tcp = TLSStream(host: host, port: port, tls: tls, queue: queue)
+        let edtState = RaceResult()
         let edtTask = Task { () -> Error? in
-            do { try await edt.connect(timeout: self.timing.edtHandshakeTimeout); return nil } catch { return error }
+            var failure: Error?
+            do { try await edt.connect(timeout: self.timing.connectTimeout) } catch { failure = error }
+            edtState.set((failure, ContinuousClock.now - started))
+            return failure
         }
         let tcpState = RaceResult()
         let tcpTask = Task { () -> (Error?, Duration) in
@@ -825,7 +902,6 @@ public final class CGPTransport: @unchecked Sendable {
             tcpState.set(result)
             return result
         }
-        func ms(_ d: Duration) -> Int { Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000) }
         // Wait for EDT within the window (re-evaluated once TCP is up).
         var tcpTime: Duration?
         while true {
@@ -835,8 +911,9 @@ public final class CGPTransport: @unchecked Sendable {
                 log("EDT won the race: handshake in \(ms(elapsed)) ms\(tcpTime.map { ", TCP connected in \(ms($0)) ms" } ?? "")")
                 return edt
             }
-            let limit = max(timing.edtRaceWindow, tcpTime.map { $0 * 3 } ?? .seconds(timing.edtHandshakeTimeout))
-            if ContinuousClock.now - started >= limit { break }
+            // Until TCP is up there is no limit: whichever connects first (EDT wins outright).
+            if let tcpTime, ContinuousClock.now - started >= max(timing.edtRaceWindow, tcpTime * 3) { break }
+            if edtState.value != nil, tcpTime == nil { break }   // EDT failed: wait for TCP below
             if tcpTime == nil, let done = tcpState.value {
                 if done.0 != nil { break }   // TCP failed: wait for EDT alone below
                 tcpTime = done.1
@@ -847,14 +924,13 @@ public final class CGPTransport: @unchecked Sendable {
         if tcpError == nil {
             edt.close()
             edtTask.cancel()
-            perform { [self] in
-                log("EDT lost the race: no handshake within \(ms(max(timing.edtRaceWindow, tcpElapsed * 3))) ms; TCP connected in \(ms(tcpElapsed)) ms")
-            }
+            let why = edtState.value?.0.map { "\($0)" } ?? "no handshake within \(ms(max(timing.edtRaceWindow, tcpElapsed * 3))) ms"
+            perform { [self] in log("EDT lost the race: \(why); TCP connected in \(ms(tcpElapsed)) ms") }
             return tcp
         }
-        // TCP failed: EDT if it still connects.
+        // TCP failed: EDT if it still connects. Both failing (e.g. offline during a resume) says nothing about EDT, so
+        // the next attempt races again.
         if await edtTask.value == nil { return edt }
-        perform { [self] in edtFailed = true }
         throw tcpError!
     }
 
@@ -1266,7 +1342,9 @@ public final class CGPTransport: @unchecked Sendable {
         attemptToken += 1
         let token = attemptToken
         onEvent(.resuming(attempt: attempt))
-        log("resume attempt \(attempt): connecting to \(edtTarget != nil && !edtFailed ? "\(edtTarget!.host):\(edtTarget!.port) (EDT)" : "\(host):\(port)")")
+        let via = edtTarget.flatMap { t in edtFailed ? nil : edtMode == .on ? "\(t.host):\(t.port) (EDT only)"
+                                                                       : "\(t.host):\(t.port) (EDT) and \(host):\(port)" }
+        log("resume attempt \(attempt): connecting to \(via ?? "\(host):\(port)")")
         Task { [weak self] in
             do {
                 guard let self else { return }
@@ -1408,7 +1486,7 @@ public final class CGPTransport: @unchecked Sendable {
         closed = true
         cgp.markClosed()
         stopTicker()
-        [deadlineTimer, attemptWork, firstReadTimer].forEach { $0?.cancel() }
+        [deadlineTimer, attemptWork, firstReadTimer, edtBindWatch].forEach { $0?.cancel() }
         attemptInProgress = false
         // Let queued writes (finish response, logoff) leave before the connection is cancelled.
         if let stream { clock.schedule(after: 0.5, wall: false, on: queue) { stream.close() } }

@@ -408,8 +408,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if autoLaunch == nil { launcher?.window?.orderOut(nil) }
             } catch {
                 vlog("launch failed: \(error)")
-                launcher?.setStatus(String(format: loc("%@ could not be opened. ", "%@ konnte nicht geöffnet werden. "), displayName(resource.name))
-                                    + UserMessage.text(for: error))
+                let shown = String(format: loc("%@ could not be opened. ", "%@ konnte nicht geöffnet werden. "), displayName(resource.name))
+                    + UserMessage.text(for: error)
+                vlog("launch failed, shown: \(shown)")
+                launcher?.setStatus(shown)
                 if let c = created, sessions.contains(where: { $0 === c }) {
                     sessions.removeAll { $0 === c }
                     clientNames[ObjectIdentifier(c)] = nil

@@ -2,12 +2,7 @@ import Foundation
 
 // EDT (HDX over UDP) wire layer, skeleton (docs/80-edt.md, D130). Built from our own captures of the stock client
 // (§3–§6 there, tags [B]) and the public UDT draft (draft-gg-udt-03, [P]). Parts never seen on the wire are marked
-// [I] and kept minimal. Everything is big-endian. Off by default (`EDTFeature`); no transport uses it yet.
-
-/// `ICA_EDT=1` turns EDT experiments on; default off (D130).
-public enum EDTFeature {
-    public static func enabled(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool { env["ICA_EDT"] == "1" }
-}
+// [I] and kept minimal. Everything is big-endian. Whether a session uses EDT: `EDTChoice` (docs/80 §8.8).
 
 public enum EDTWireError: Error, Equatable, CustomStringConvertible {
     case tooShort(Int)

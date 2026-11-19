@@ -7,7 +7,7 @@ import ICAKit
 /// C:\Users\Public\edt-noise.ps1, a 1024×640 window of random noise redrawn every 50 ms, for `seconds` (default 30).
 /// Noise does not compress, so the host sends as much as the link carries. The transport's received bytes (CGP framing
 /// included) are sampled every second while the noise window is up: mean and median rate. Then `exit`, logoff.
-/// Run with and without ICA_EDT=1 under the same `icalab.sh net set` profile to compare.
+/// Run as the file says (EDT with `HDXoverUDP=Preferred`) and with ICA_EDT=0 (TCP) under the same `icalab.sh net set` profile to compare.
 func runBulkProbe(ica: ICAFile, seconds: Int) async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment

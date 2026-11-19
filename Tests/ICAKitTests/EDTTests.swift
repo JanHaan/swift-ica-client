@@ -379,28 +379,4 @@ private func ackFrom(_ vda: FakeVDA, next: UInt32, number: UInt32 = 1) -> [UInt8
     #expect(EDTConnection.rate([0.001, 0.001], minimum: 4) == 0)
 }
 
-@Test func edtFeatureIsOffByDefault() {
-    #expect(!EDTFeature.enabled([:]))
-    #expect(EDTFeature.enabled(["ICA_EDT": "1"]))
-}
-
-// EDT target selection in ICASession (D148): plain UDP for a direct CGP file, DTLS on the TLS port for a direct TLS file,
-// nothing through a gateway. ICA_EDT=1 is set in the process for this test only (other sessions built meanwhile only
-// gain a target they never connect).
-@Test func edtTargetFollowsThePlan() throws {
-    func ica(_ lines: [String]) -> ICAFile {
-        ICAFile(text: "[WFClient]\nVersion=2\n[ApplicationServers]\nNotepad=\n[Notepad]\n" + lines.joined(separator: "\n") + "\nHDXoverUDP=Preferred\n")!
-    }
-    setenv("ICA_EDT", "1", 1)
-    defer { unsetenv("ICA_EDT") }
-    let plain = try ICASession(ica: ica(["Address=192.0.2.12:1494", "CGPAddress=*:2598", "UDPCGPPort=192.0.2.12:2598"]),
-                               configuration: .init())
-    #expect(plain.transport.edtTarget?.port == 2598 && plain.transport.edtTarget?.dtlsServerName == nil)
-    let tls = try ICASession(ica: ica(["Address=192.0.2.12:1494", "SSLEnable=On", "SSLProxyHost=vda.example:443", "CGPAddress=*:2598"]),
-                             configuration: .init())
-    #expect(tls.transport.edtTarget?.host == "vda.example" && tls.transport.edtTarget?.port == 443)
-    #expect(tls.transport.edtTarget?.dtlsServerName == "vda.example" && tls.transport.edtTarget?.peerIPv4 == [192, 0, 2, 12])
-    let gateway = try ICASession(ica: ica(["Address=;40;STA1;AA", "SSLEnable=On", "SSLProxyHost=gateway.example:443",
-                                           "CGPSecurityTicket=On", "CGPAddress=*:2598"]), configuration: .init())
-    #expect(gateway.transport.edtTarget == nil)
-}
+// Mode and target selection: EDTPolicyTests.swift (docs/80 §8.8).
