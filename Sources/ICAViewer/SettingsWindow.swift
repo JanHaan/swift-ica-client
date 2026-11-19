@@ -12,7 +12,7 @@ import ICAKit
 /// applies at the next connect, as does printing (docs/97 §6, PDF mode: receive jobs from the host's Citrix PDF
 /// Printer; which action the job window offers first) and session audio (docs/98 §10.4: play session sounds,
 /// default on; the volume follows macOS; the microphone, default on per §10.4, opens only while the host records) and
-/// the camera (docs/98b §10.5: default off; opens only between the host's PLAY and STOP; which camera, by unique id,
+/// the camera (docs/98b §10.5: default on since D169; opens only between the host's PLAY and STOP; which camera, by unique id,
 /// "Automatic" = the system default; listing the devices never opens one or asks for permission).
 /// Dock apps (docs/99 §12.2, D63): "One Dock entry per app" (default on; applies at the next start of ICA Viewer;
 /// ICA_HELPER_APPS=0/1 overrides it) and the launcher's global shortcut (⌃⌥⌘L, two other letters, or off;

@@ -29,6 +29,7 @@ The webcam is **on by default**. To use it, for example for a video call in a re
 If you have several cameras, pick one in **Settings > Devices** in the list below **Pass the camera to the session** (the default is **Automatic (system default)**).
 
 - The camera is used only while a remote app uses it. A camera icon appears in the menu bar. Click it to see **Camera: in use** and **Disable Camera for This Session**.
+- If a remote app ends while it uses the camera (for example, it crashes), the camera can stay on until another remote app starts it or you choose **Disable Camera for This Session**.
 - Remote apps see it as **Citrix HDX Web Camera**. It was tried with 32-bit and 64-bit Windows apps and with Microsoft Edge.
 - If you refused the permission, ICA Viewer says so and offers **Open Privacy Settings**; allow ICA Viewer under **System Settings > Privacy & Security > Camera**.
 - To never pass the camera, clear **Pass the camera to the session** in **Settings > Devices** ([Settings](12-settings.md#audio-and-camera)); the change applies from the next time you connect.
