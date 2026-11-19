@@ -107,9 +107,12 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
         public var sessionGuid: String?
         public var skippedCommands: [UInt8: Int] = [:]
         public var malformed = 0
-        /// URL requests (0x0E) received, and replies sent as (opened) in order.
+        /// URL requests (0x0E) received, replies sent, and the latest `urlRepliesKept` replies as (opened) in order
+        /// (bounded: a host can send any number of requests, L-22).
         public var urlRequests = 0
+        public var urlRepliesSent = 0
         public var urlReplies: [Bool] = []
+        public static let urlRepliesKept = 64
     }
 
     public let channelName = ControlWire.channelName
@@ -145,7 +148,11 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
     /// The CGP link is down (output is queued for the resume): timeouts wait for the link.
     private var linkDown = false
     /// URL requests in arrival order with their answer once known; answers leave in this order (docs/56 §3.2).
-    private var urlReplies: [(id: Int, opened: Bool?)] = []
+    /// The answers of requests `urlBase…` from `urlHead` on (nil: not decided yet). Indexed by id, so an answer costs
+    /// O(1) however many requests wait behind a slow one (L-22).
+    private var urlAnswers: [Bool?] = []
+    private var urlHead = 0
+    private var urlBase = 1
     private var nextURLId = 1
 
     public init(config: Config = Config()) {
@@ -256,7 +263,9 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
         let waiting = queued, sent = outstanding
         queued = []
         outstanding = []
-        urlReplies = []
+        urlAnswers = []
+        urlHead = 0
+        urlBase = nextURLId
         ownPending = false
         waiting.forEach { finish($0, .notSent("the session ended first")) }
         sent.filter { $0.completion != nil }.forEach { finish($0, .sessionEnded) }
@@ -346,7 +355,7 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
         diagnostics.urlRequests += 1
         let id = nextURLId
         nextURLId += 1
-        urlReplies.append((id, nil))
+        urlAnswers.append(nil)
         guard let url = URLRedirectWire.url(fromPayload: p) else {
             diagnostics.malformed += 1
             log("← open URL #\(id): \(p.count) B, unreadable; the session opens it")
@@ -362,13 +371,22 @@ public final class ControlEngine: VirtualChannelEngine, VirtualChannelModule {
 
     /// Records the answer for request `id` (the first one counts) and sends every answer at the head of the queue.
     private func answerURL(_ id: Int, _ opened: Bool) {
-        guard state != .ended, let i = urlReplies.firstIndex(where: { $0.id == id }), urlReplies[i].opened == nil else { return }
-        urlReplies[i].opened = opened
-        while let first = urlReplies.first, let answer = first.opened {
-            urlReplies.removeFirst()
+        let i = urlHead + (id - urlBase)
+        guard state != .ended, id >= urlBase, i < urlAnswers.count, urlAnswers[i] == nil else { return }
+        urlAnswers[i] = opened
+        while urlHead < urlAnswers.count, let answer = urlAnswers[urlHead] {
+            let sentId = urlBase
+            urlHead += 1
+            urlBase += 1
+            diagnostics.urlRepliesSent += 1
             diagnostics.urlReplies.append(answer)
+            if diagnostics.urlReplies.count > Diagnostics.urlRepliesKept { diagnostics.urlReplies.removeFirst() }
             output?(.channel(Data(URLRedirectWire.reply(opened: answer))))
-            log("→ open URL #\(first.id): " + (answer ? "opened on this Mac" : "not opened; the session opens it"))
+            log("→ open URL #\(sentId): " + (answer ? "opened on this Mac" : "not opened; the session opens it"))
+        }
+        if urlHead >= 1024, urlHead * 2 >= urlAnswers.count {
+            urlAnswers.removeFirst(urlHead)
+            urlHead = 0
         }
     }
 

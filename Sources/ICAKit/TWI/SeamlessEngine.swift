@@ -44,6 +44,9 @@ public final class SeamlessEngine: VirtualChannelEngine {
     public private(set) var malformedCount = 0
     public private(set) var droppedWhileInactive = 0
     public var unknownMessageCount: Int { unknownTypeCounts.values.reduce(0, +) }
+    /// Chunked icons and bitmaps dropped by the reassembly caps (F-10), and the bytes waiting for their last chunk.
+    public var droppedChunkBlobs: Int { chunks.dropped }
+    var pendingChunkBytes: Int { chunks.pendingBytes }
 
     private var framer = TWIStreamFramer()
     private var chunks = TWIChunkAssembler()

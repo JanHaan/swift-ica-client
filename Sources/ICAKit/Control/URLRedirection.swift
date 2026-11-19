@@ -88,8 +88,10 @@ public enum URLRedirectFilter {
         return .open(url)
     }
 
-    /// `localhost` (and `*.localhost`, RFC 6761), loopback 127/8 and ::1, the unspecified 0.0.0.0 and ::, link-local
-    /// 169.254/16 and fe80::/10, also IPv4-mapped. Private ranges (10/8, 192.168/16, …) stay allowed: intranet hosts.
+    /// `localhost` (and `*.localhost`, RFC 6761), loopback 127/8, "this network" 0/8 (0.0.0.0 reaches the Mac's own
+    /// services), link-local 169.254/16 and fe80::/10, all of ::/96 (::1, ::, and the deprecated IPv4-compatible
+    /// `::127.0.0.1`), and IPv4-mapped forms of the IPv4 ones (L-21). Private ranges (10/8, 192.168/16, …) stay allowed:
+    /// intranet hosts.
     static func isLocal(host raw: String) -> Bool {
         var host = raw.lowercased()
         if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
@@ -99,7 +101,7 @@ public enum URLRedirectFilter {
         if let zone = host.firstIndex(of: "%") { host = String(host[..<zone]) }
         if let v6 = IPv6Address(host) {
             let b = [UInt8](v6.rawValue)
-            if b == [UInt8](repeating: 0, count: 15) + [1] || b.allSatisfy({ $0 == 0 }) { return true }
+            if b[0..<12].allSatisfy({ $0 == 0 }) { return true }   // ::/96: ::, ::1, IPv4-compatible
             if b[0] == 0xFE, b[1] & 0xC0 == 0x80 { return true }
             if b[0..<10].allSatisfy({ $0 == 0 }), b[10] == 0xFF, b[11] == 0xFF { return isLocal(v4: Array(b[12...])) }
             return false
@@ -140,7 +142,7 @@ public enum URLRedirectFilter {
     }
 
     static func isLocal(v4 b: [UInt8]) -> Bool {
-        b[0] == 127 || b.allSatisfy { $0 == 0 } || (b[0] == 169 && b[1] == 254)
+        b[0] == 127 || b[0] == 0 || (b[0] == 169 && b[1] == 254)
     }
 
     /// The scheme before the first `:`, lowercased, if it is a valid RFC 3986 scheme of at least two characters (a

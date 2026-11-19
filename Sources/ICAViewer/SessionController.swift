@@ -323,6 +323,7 @@ final class SessionController: NSObject {
         session.seamless.onEvent = { [weak self] event in
             DispatchQueue.main.async { self?.handle(event) }
         }
+        session.seamless.model.onLimit = { line in vlog(line) }   // TWI caps reached (docs/50 §7.2, L-18)
         session.onEvent = { [weak self] event in
             switch event {
             case .closed(let reason): DispatchQueue.main.async { self?.sessionClosed(reason) }
@@ -758,8 +759,12 @@ final class SessionController: NSObject {
             let exe = AppNaming.executableName(key: app.key, executablePath: app.executablePath)
             if appResources[app.key] == nil {
                 let wasReconnected = launchNaming.reconnected
+                // The remembered mappings matter only while a launch could take this app: looking them up for every app
+                // on every new app was O(apps²) hashes (security review L-18).
                 var remembered: [String: String] = [:]
-                for key in apps.keys { remembered[key] = RememberedAppResources.shared.resource(for: key) }
+                if launchNaming.awaitsNew(app.key) {
+                    for key in apps.keys { remembered[key] = RememberedAppResources.shared.resource(for: key) }
+                }
                 let outcome = launchNaming.appAdded(key: app.key, executable: exe, publishedName: app.publishedName,
                                                     remembered: remembered, at: Date())
                 if launchNaming.reconnected, !wasReconnected {
@@ -788,7 +793,8 @@ final class SessionController: NSObject {
         case .appRemoved(let app):
             apps[app.key] = nil
         case .processEnded(let pid):
-            endedProcesses.insert(pid)
+            // Bounded like the TWI model's set (L-18); a pid missed after a flood only keeps the session parked.
+            if endedProcesses.count < WindowModel.maxProcesses { endedProcesses.insert(pid) }
             vlog("TWI process \(String(pid, radix: 16)) ended")
             if appWindowCount == 0, !lastAppWindows.isEmpty, !ended { lastAppWindowGone() }
         default:

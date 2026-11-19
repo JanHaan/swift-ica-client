@@ -75,6 +75,8 @@ public final class EDTConnection {
         public var dataSent = 0, dataRetransmitted = 0, dataReceived = 0, duplicatesReceived = 0, outOfOrder = 0
         public var acksSent = 0, acksReceived = 0, ack2Received = 0, naksSent = 0, naksReceived = 0, rtos = 0
         public var keepAlivesReceived = 0, unknownControl = 0
+        /// Data packets at or beyond our advertised flow window, dropped unbuffered (F-08).
+        public var beyondWindow = 0
         public var bytesDelivered = 0, bytesSent = 0
         public var description: String {
             "data out \(dataSent) (+\(dataRetransmitted) rtx, \(bytesSent) B), in \(dataReceived) (\(duplicatesReceived) dup, "
@@ -148,6 +150,8 @@ public final class EDTConnection {
     // Receiver.
     private var rcvNext: UInt32?
     private var buffered: [UInt32: [UInt8]] = [:]
+    /// The highest sequence number buffered out of order (nil when everything received was delivered).
+    private var rcvHighest: UInt32?
     private var rcvLoss: [UInt32: Double] = [:]
     private var lastAckSeq: UInt32?
     private var lastAckAt: Double = 0
@@ -307,17 +311,30 @@ public final class EDTConnection {
             stats.duplicatesReceived += 1
             return
         }
+        // UDT's receiver buffer (F-08): a packet at or beyond the window we advertised is dropped, so a peer (or an
+        // injected datagram) cannot make us buffer or walk gaps without bound. A correct peer never sends one; the
+        // packet is lost to it, and its retransmission comes once the window has moved.
+        if d >= Int(config.flowWindow) {
+            stats.beyondWindow += 1
+            if stats.beyondWindow == 1 || stats.beyondWindow % 1000 == 0 {
+                log("EDT data \(d) packets ahead of the next expected, beyond the flow window \(config.flowWindow): dropped (\(stats.beyondWindow) so far)")
+            }
+            return
+        }
         rcvLoss[seq] = nil
         if d > 0 {
             stats.outOfOrder += 1
             buffered[seq] = payload
-            // New gap(s) up to seq: report at once.
+            // A new gap opens only past the highest packet received so far: report it at once. Walking from there (not
+            // from the next expected) keeps the work per packet bounded by how far the highest moves (F-08).
+            let highest = rcvHighest ?? Self.add(expected, -1)
+            guard Self.diff(seq, highest) > 0 else { return }   // fills an old gap
+            rcvHighest = seq
             var newLoss: [UInt32] = []
-            var s = expected
+            var s = Self.add(highest, 1)
             while Self.diff(seq, s) > 0 {
                 if buffered[s] == nil, rcvLoss[s] == nil { newLoss.append(s) }
                 s = Self.add(s, 1)
-                if newLoss.count > 4096 { break }
             }
             for l in newLoss { rcvLoss[l] = now }
             if !newLoss.isEmpty { sendNak(newLoss, server: server, now: now) }
@@ -330,6 +347,7 @@ public final class EDTConnection {
             next = Self.add(next, 1)
         }
         rcvNext = next
+        if let h = rcvHighest, Self.diff(next, h) > 0 { rcvHighest = nil }
     }
 
     private func deliverBytes(_ p: [UInt8]) {
@@ -429,7 +447,8 @@ public final class EDTConnection {
             stats.naksReceived += 1
             if stats.naksReceived == 1 { log("EDT first NAK from the peer: body \(body.count) B \(hex(body.prefix(24)))") }
             var lost = 0
-            for s in EDTLossList.decode(body) where inFlight[s] != nil {
+            // Only what is in flight can be lost: the ranges are clipped to it (F-09).
+            for s in EDTLossList.decode(body, from: sndUna, to: sndNext) where inFlight[s] != nil {
                 lossList.insert(s)
                 lost += 1
             }
@@ -685,23 +704,53 @@ public enum EDTLossList {
         return out
     }
 
+    /// Most sequence numbers `decode(_:)` returns for one body (F-09): a 1,280-byte NAK of 160 ranges once expanded to
+    /// ten million.
+    public static let maxDecoded = 65_536
+
+    /// The sequence numbers of a loss list, at most `maxDecoded`.
     public static func decode(_ body: [UInt8]) -> [UInt32] {
         var out: [UInt32] = []
-        var i = 0
-        func u32(_ k: Int) -> UInt32 { UInt32(body[k]) << 24 | UInt32(body[k + 1]) << 16 | UInt32(body[k + 2]) << 8 | UInt32(body[k + 3]) }
-        while i + 4 <= body.count {
-            let v = u32(i)
-            if v & 0x8000_0000 != 0, i + 8 <= body.count {
-                let first = v & 0x7FFF_FFFF, last = u32(i + 4)
-                var s = first
-                var n = 0
-                while EDTConnection.diff(last, s) >= 0, n < 65536 { out.append(s); s = EDTConnection.add(s, 1); n += 1 }
-                i += 8
-            } else {
-                out.append(v & 0x7FFF_FFFF)
-                i += 4
-            }
+        forEachRange(body) { first, last in
+            var s = first
+            while EDTConnection.diff(last, s) >= 0, out.count < maxDecoded { out.append(s); s = EDTConnection.add(s, 1) }
+            return out.count < maxDecoded
         }
         return out
+    }
+
+    /// The sequence numbers of a loss list within `[from, to)` (31-bit, wrapping): each range is clipped to that interval
+    /// before it is walked, so the work is bounded by the interval, not by what the peer claims (F-09).
+    public static func decode(_ body: [UInt8], from lower: UInt32, to upper: UInt32) -> [UInt32] {
+        let span = EDTConnection.diff(upper, lower)
+        guard span > 0 else { return [] }
+        var out: [UInt32] = []
+        forEachRange(body) { first, last in
+            // Offsets from `lower`, clipped to [0, span).
+            let a = max(0, EDTConnection.diff(first, lower)), b = min(span - 1, EDTConnection.diff(last, lower))
+            if a <= b, EDTConnection.diff(last, first) >= 0 {
+                for k in a...b { out.append(EDTConnection.add(lower, k)) }
+            }
+            return out.count < span
+        }
+        return out
+    }
+
+    /// Calls `body` with each (first, last) of the list (a single number as (n, n)) until it returns false.
+    private static func forEachRange(_ list: [UInt8], _ body: (UInt32, UInt32) -> Bool) {
+        var i = 0
+        func u32(_ k: Int) -> UInt32 { UInt32(list[k]) << 24 | UInt32(list[k + 1]) << 16 | UInt32(list[k + 2]) << 8 | UInt32(list[k + 3]) }
+        while i + 4 <= list.count {
+            let v = u32(i)
+            let keepGoing: Bool
+            if v & 0x8000_0000 != 0, i + 8 <= list.count {
+                keepGoing = body(v & 0x7FFF_FFFF, u32(i + 4) & 0x7FFF_FFFF)
+                i += 8
+            } else {
+                keepGoing = body(v & 0x7FFF_FFFF, v & 0x7FFF_FFFF)
+                i += 4
+            }
+            if !keepGoing { return }
+        }
     }
 }

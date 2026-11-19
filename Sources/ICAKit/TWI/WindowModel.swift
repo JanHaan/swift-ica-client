@@ -106,6 +106,21 @@ public final class WindowModel {
     /// Last non-zero foreground window, to re-activate when the client regains focus.
     public private(set) var lastForegroundWindow: UInt32?
     public private(set) var droppedIconCount = 0
+    /// Windows and processes refused by the per-session caps (docs/50 §7.2, security review L-18).
+    public private(set) var refusedWindowCount = 0
+    public private(set) var refusedProcessCount = 0
+    /// One line when a cap is first reached in this session (the owner logs it).
+    public var onLimit: ((String) -> Void)?
+
+    /// Per-session caps (docs/50 §7.2, L-18): every TWI message walks the windows, so their number bounds the work. A
+    /// real session has tens; 4,096 is far above any desktop and keeps a flood from making each message cost seconds.
+    public static let defaultMaxWindows = 4096
+    public static let maxProcesses = 4096
+    /// The window cap in effect (tests lower it).
+    public var maxWindows = WindowModel.defaultMaxWindows
+    /// Icon types kept per window (the host sends two: small and big), and windows whose icons arrived before them.
+    public static let maxIconsPerWindow = 8
+    public static let maxPendingIconWindows = 64
 
     private var pendingIcons: [UInt32: [(UInt32, TWIIcon)]] = [:]
     private var events: [SeamlessEvent] = []
@@ -113,6 +128,8 @@ public final class WindowModel {
     public init() {}
 
     public var orderedWindows: [TWIWindow] { creationOrder.compactMap { windows[$0] } }
+    /// Window id → number of icons held for a window not created yet (tests).
+    var pendingIconsForTests: [UInt32: Int] { pendingIcons.mapValues(\.count) }
 
     public static let noGroup = "_NONE_"
     public static let sessionAppKey = "session"
@@ -160,13 +177,22 @@ public final class WindowModel {
 
     /// Completed icon (single message or reassembled chunks).
     public func setIcon(windowId: UInt32, type: UInt32, blob: Data) {
-        let icon = TWIIcon(type: type, blob: blob)
         guard var w = windows[windowId] else {
-            pendingIcons[windowId, default: []].append((type, icon))
+            // Kept for a window that may still come, within the caps (L-18); the same type replaces the earlier one.
+            var list = pendingIcons[windowId] ?? []
+            droppedIconCount += 1
+            guard pendingIcons[windowId] != nil || pendingIcons.count < Self.maxPendingIconWindows else { return }
+            list.removeAll { $0.0 == type }
+            guard list.count < Self.maxIconsPerWindow else { return }
+            list.append((type, TWIIcon(type: type, blob: blob)))
+            pendingIcons[windowId] = list
+            return
+        }
+        let icon = TWIIcon(type: type, blob: blob)
+        guard store(icon, in: &w) else {
             droppedIconCount += 1
             return
         }
-        store(icon, in: &w)
         windows[windowId] = w
         events.append(.windowChanged(w, .icon))
         events.append(.iconChanged(windowId: windowId, icon))
@@ -191,13 +217,24 @@ public final class WindowModel {
         reset()
     }
 
-    private func store(_ icon: TWIIcon, in w: inout TWIWindow) {
+    /// False when the window already holds `maxIconsPerWindow` other icon types (the icon is dropped).
+    @discardableResult
+    private func store(_ icon: TWIIcon, in w: inout TWIWindow) -> Bool {
+        guard w.icons[icon.type] != nil || w.icons.count < Self.maxIconsPerWindow else { return false }
         w.icons[icon.type] = icon
         if w.primaryIconType == nil { w.primaryIconType = icon.type }
+        return true
     }
 
     private func create(_ c: TWICreate) {
         guard c.id != 0, windows[c.id] == nil else { return }
+        guard windows.count < maxWindows else {
+            refusedWindowCount += 1
+            if refusedWindowCount == 1 {
+                onLimit?("TWI: more than \(maxWindows) windows in this session; further windows are not shown until some close")
+            }
+            return
+        }
         var pid: UInt32? = (c.processId ?? 0) == 0 ? nil : c.processId
         var appId: String? = (c.appId?.isEmpty ?? true) ? nil : c.appId
         if let owner = windows[c.ownerId], c.ownerId != 0 {
@@ -246,6 +283,8 @@ public final class WindowModel {
     private func change(_ ch: TWIChange) {
         guard ch.id != 0 else { return }
         guard var w = windows[ch.id] else {
+            // At the window cap, an unknown window stays unknown: no RESEND_WINDOW for it (it would only be refused).
+            guard windows.count < maxWindows else { return }
             if ch.mask == .full {
                 create(TWICreate(
                     source: .v1, id: ch.id, flags: ch.flags, style: ch.style ?? 0, exStyle: ch.exStyle ?? 0,
@@ -289,6 +328,13 @@ public final class WindowModel {
     }
 
     private func processCreated(_ p: TWIProcessInfo) {
+        guard processes[p.processId] != nil || processes.count < Self.maxProcesses else {
+            refusedProcessCount += 1
+            if refusedProcessCount == 1 {
+                onLimit?("TWI: more than \(Self.maxProcesses) processes in this session; further ones are not tracked")
+            }
+            return
+        }
         processes[p.processId] = p
         endedProcesses.remove(p.processId)
         events.append(.processCreated(p))
@@ -305,7 +351,8 @@ public final class WindowModel {
 
     /// The process entry stays so that windows keep their group; it is marked as ended.
     private func processEnded(_ pid: UInt32) {
-        endedProcesses.insert(pid)
+        // The event always goes out (a window's pid may never have had PROCESS_CREATED); the set stays bounded (L-18).
+        if processes[pid] != nil || endedProcesses.count < Self.maxProcesses { endedProcesses.insert(pid) }
         events.append(.processEnded(processId: pid))
     }
 

@@ -415,36 +415,60 @@ public enum TWIMessageParser {
     }
 }
 
-/// Reassembles chunked icons (0x3e) and bitmaps (0x42).
+/// Reassembles chunked icons (0x3e) and bitmaps (0x42). Bounded (security review F-10, docs/50 §7.2): a blob larger
+/// than its cap, or a new blob while `maxPending` of its kind are open, is dropped (counted in `dropped`), so a host
+/// that never sends the last chunk cannot grow memory without end.
 struct TWIChunkAssembler {
+    /// An icon is at most 512×512 at 32 bpp (`TWIIcon`) plus its mask and header: 2 MiB is more than enough.
+    static let maxIconBytes = 2 << 20
+    /// WINDOW_BITMAP's purpose is unknown (docs/50 §2.3.8); a window-sized 32-bit picture of 4096×4096 at most.
+    static let maxBitmapBytes = 64 << 20
+    /// Blobs of one kind being reassembled at the same time.
+    static let maxPending = 16
+
     private struct Key: Hashable { var window: UInt32, process: UInt32, type: UInt32 }
     private var icons: [Key: Data] = [:]
     private var bitmaps: [UInt32: Data] = [:]
+    private(set) var dropped = 0
 
     mutating func reset() { icons.removeAll(); bitmaps.removeAll() }
     var pendingCount: Int { icons.count + bitmaps.count }
+    var pendingBytes: Int { icons.values.reduce(0) { $0 + $1.count } + bitmaps.values.reduce(0) { $0 + $1.count } }
+
+    /// Appends `data` to the blob under `key` (a first chunk starts it again), within the caps; false: dropped.
+    private static func accumulate<K: Hashable>(_ table: inout [K: Data], _ key: K, _ data: Data, first: Bool, cap: Int) -> Bool {
+        if table[key] == nil, table.count >= maxPending { return false }
+        let current = first ? 0 : table[key]?.count ?? 0
+        guard current + data.count <= cap else {
+            table[key] = nil
+            return false
+        }
+        if first { table[key] = data } else { table[key, default: Data()].append(data) }
+        return true
+    }
 
     /// Returns the complete icon blob once the last chunk has arrived.
     mutating func add(_ c: TWIIconChunk) -> (windowId: UInt32, iconType: UInt32, blob: Data)? {
         let key = Key(window: c.windowId, process: c.processId, type: c.iconType)
-        if c.isFirst && c.hasMore {
-            icons[key] = c.data
-            return nil
-        }
         if c.hasMore {
-            icons[key, default: Data()].append(c.data)   // continuation without a start also accumulates
+            // A continuation without a start also accumulates.
+            if !Self.accumulate(&icons, key, c.data, first: c.isFirst, cap: Self.maxIconBytes) { dropped += 1 }
             return nil
         }
         var blob = c.data
         if var pending = icons.removeValue(forKey: key) { pending.append(c.data); blob = pending }
+        guard blob.count <= Self.maxIconBytes else { dropped += 1; return nil }
         return (c.windowId, c.iconType, blob)
     }
 
     mutating func add(_ c: TWIBitmapChunk) -> (windowId: UInt32, data: Data)? {
-        if c.isFirst && c.hasMore { bitmaps[c.windowId] = c.data; return nil }
-        if c.hasMore { bitmaps[c.windowId, default: Data()].append(c.data); return nil }
+        if c.hasMore {
+            if !Self.accumulate(&bitmaps, c.windowId, c.data, first: c.isFirst, cap: Self.maxBitmapBytes) { dropped += 1 }
+            return nil
+        }
         var blob = c.data
         if var pending = bitmaps.removeValue(forKey: c.windowId) { pending.append(c.data); blob = pending }
+        guard blob.count <= Self.maxBitmapBytes else { dropped += 1; return nil }
         return (c.windowId, blob)
     }
 }
