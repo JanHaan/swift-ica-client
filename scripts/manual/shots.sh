@@ -202,19 +202,24 @@ x=$HOME/test/xfer
 # A copy of more than 50 MB from the session is fetched in the background, with a progress window. It goes last
 # because the transfer to the session is slow when the lab impairs the network; a miss is soft (the old image stays).
 big_copy() {
-    has_win "File Explorer" "" || ax cgwindows "File Explorer" | grep -q . || { soft clipboard-progress "no File Explorer"; return; }
+    # After the restart's reconnect the Explorer window ("Temp") can sit in another helper: the reconnect's launch
+    # took the first re-announced TWI app for its resource (seen: owner "Notepad"). Find it by its title.
+    local fe="File Explorer"
+    has_win "$fe" "" || fe=$(ax cgwindows 2>/dev/null | awk -F'\t' '$5 == "Temp" {print $2; exit}')
+    [ -n "$fe" ] || { soft clipboard-progress "no File Explorer"; return; }
+    note "big copy into the Explorer window of «${fe}»"
         head -c 60000000 /dev/urandom >"$x/Training video.bin"
         guirun open -R "$x/Training video.bin"; sleep 2
         ax key cmd+c >/dev/null; sleep 6
         n=$(($(wc -l <"$LOG") + 1))
         for try in 1 2 3; do   # the paste is retried when Explorer did not start reading
-            ax raise "File Explorer" role=AXWindow >/dev/null; ax click "File Explorer" role=AXWindow >/dev/null; sleep 2
+            ax raise "$fe" role=AXWindow title=Temp >/dev/null; ax click "$fe" role=AXWindow title=Temp >/dev/null; sleep 2
             ax key ctrl+v >/dev/null
             wait_for 90 sh -c "tail -n +$n '$LOG' | grep -q 'host opens file'" && break
         done
         wait_for 300 sh -c "tail -n +$n '$LOG' | grep -q 'file 0 served ([0-9]\{7,\}'"; sleep 3
         printf 'sentinel-%s' "$RANDOM" | guirun pbcopy; sleep 6
-        ax raise "File Explorer" role=AXWindow >/dev/null; sleep 1
+        ax raise "$fe" role=AXWindow title=Temp >/dev/null; sleep 1
         ax key ctrl+c >/dev/null      # the pasted file is still the only selection
         got=0
         for i in $(seq 1 30); do
