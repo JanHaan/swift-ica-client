@@ -25,6 +25,9 @@ Your account may have none assigned, or the sign-in did not finish. Choose **Fil
 **An app opened in the same session as another one.**
 That is normal: apps of the same user share one session, which is why the second app starts quickly and needs no new sign-in. ICA Viewer shows a message when a particular app has to run in the session of another.
 
+**"This server accepts only UDP connections (HDX over UDP), and UDP does not get through on this network."**
+Your organization's server is set to connect over UDP only, and the network you are on blocks UDP. Try another network, or ask your IT department to open the UDP port the message names. When the server also allows TCP, ICA Viewer falls back to it by itself.
+
 **A link opens in a browser on the server, not on my Mac.**
 That happens when the server does not hand links over (ask your IT department about the Citrix policy "Host to client redirection"), when the link is not a web link, when your Mac cannot reach its server, or after many links in a short time. Some apps open links in the server's default browser directly; those always stay on the server.
 
@@ -62,7 +65,7 @@ While remote apps are open, ICA Viewer lives in the menu bar and each app has it
 English and German, following the Mac's language.
 
 **Is it a replacement for the official Citrix Workspace app?**
-No. It is an independent project, tested against a limited set of servers. Some features of the official app are missing: for example smart card or SAML sign-in, USB devices, and UDP transport. If you depend on those, use the official app.
+No. It is an independent project, tested against a limited set of servers. Some features of the official app are missing: for example smart card or SAML sign-in, USB devices, and UDP transport through a gateway. If you depend on those, use the official app.
 
 **Where are the logs?**
 `~/Library/Logs/ICAViewer`. Do not post them as they are; use [Report a Problem](13-report-a-problem.md), which removes names and addresses.

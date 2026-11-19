@@ -44,7 +44,7 @@ product and not a replacement for the official client. Expect gaps; see [Status]
 
 The screenshots come from a test lab (macOS VM, example user and apps).
 
-## What it does (0.10.1)
+## What it does (0.11.0)
 
 - **Sign in** through a gateway (user name, password, one-time code) or to a StoreFront store
   directly; optional Keychain storage with Touch ID; Sign Out.
@@ -56,6 +56,9 @@ The screenshots come from a test lab (macOS VM, example user and apps).
 - **Client drive, PDF printing, audio playback, the microphone and the webcam** (both on by default; used
   only while a remote app records or uses the camera, after macOS asks once), Retina-sharp display, keyboard
   layout of the Mac with dead keys and the emoji picker.
+- **Links** in remote apps open in the Mac's browser, the session follows the **Mac's time zone**, full colour
+  (YUV 4:4:4) on Apple silicon, and **HDX over UDP** (EDT) on direct connections, each as the server's
+  settings allow.
 - A Mac-style interface (Settings panes, menus, VoiceOver), English and German, and a scrubbed
   **Report a Problem** (Help menu): nothing is sent unless you submit it, and you see exactly what it
   contains first.
@@ -69,9 +72,10 @@ the official clients.
   not been tried on a real Wi-Fi drop, and a keyboard layout switch has been checked in a test
   VM, not by hand.
 - **Limits:** a published desktop has a fixed size and one screen; HTML on the clipboard is filtered by
-  the server; large copies are slow where the server paces file transfers.
-- **Not implemented:** SAML, smart card and FIDO2 sign-in, USB devices, links opening on the Mac,
-  Teams optimization, press-and-hold accents and Mac input methods (Chinese, Japanese, Korean). HDX over UDP exists as an experimental, switched-off code path.
+  the server; large copies are slow where the server paces file transfers; HDX over UDP works on direct
+  connections only, not through a gateway.
+- **Not implemented:** SAML, smart card and FIDO2 sign-in, USB devices, links from the Mac into the session,
+  Teams optimization, press-and-hold accents and Mac input methods (Chinese, Japanese, Korean).
 
 ## Requirements
 

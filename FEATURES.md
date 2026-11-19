@@ -1,7 +1,7 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
 ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
-Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.10.1 as
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.11.0 as
 of 2026-11-19; how each feature behaves is described in the README and under `docs/`.
 
 ## At a glance
@@ -10,13 +10,14 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
   gateway, seamless apps as native Mac windows with their own Dock entries, several apps in one
   session, a published desktop in one window, reconnect and survival of network drops, Thinwire and
   H.264 graphics, Retina scaling, text, image, rich text and file clipboard, a shared client drive,
-  audio playback, the microphone, the webcam (32- and 64-bit apps and Edge), PDF printing, links opening in the Mac's browser, the keyboard layout announced at sign-in, sign-out, and an
-  indicator for features the server refuses.
+  audio playback, the microphone, the webcam (32- and 64-bit apps and Edge), PDF printing, links opening in the Mac's
+  browser, the Mac's time zone, full colour (YUV 4:4:4), UDP transport (EDT) on direct connections as the ICA file
+  says, the keyboard layout announced at sign-in, sign-out, and an indicator for features the server refuses.
 - **Built, not yet verified by hand:** the automatic reconnect after a long drop is verified in the lab, a
   by-hand Wi-Fi test is open.
 - **Main gaps:** several monitors for a desktop, HTML on the clipboard (the
-  server filters it), SAML, smart card and FIDO2, USB devices, UDP transport (an experimental path
-  exists, off), Teams optimization.
+  server filters it), SAML, smart card and FIDO2, USB devices, UDP transport through a gateway, Teams
+  optimization.
 
 ## How to read the tables
 
@@ -243,7 +244,7 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 1. **Several monitors in a published desktop**, and more than one fixed-size window for it.
 2. **File transfer** beyond clipboard files and the shared folder; HTML on the clipboard (filtered by the server).
 3. **Authentication** beyond ExplicitForms with TOTP and plain StoreFront forms (SAML, smart card, FIDO2),
-   USB devices, and HDX over UDP (experimental and off).
+   USB devices, and HDX over UDP through a gateway (direct connections only).
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,
 Citrix Cloud, App Protection, EPA, GACS, auto-update.
