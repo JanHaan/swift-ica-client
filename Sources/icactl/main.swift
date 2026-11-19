@@ -465,6 +465,23 @@ case "htmlprobe":
         fail("\(error)")
     }
 
+case "tzprobe":
+    // icactl tzprobe [resource] — the client time zone in the session (docs/30 §4.4, TZProbe.swift): caps 0x08/0x26 with
+    // this process's zone (TZ=… for another), tz-show.ps1 in the lab's Command Prompt reports the session's zone over the
+    // clipboard; logoff. ICA_TZPROBE_EXPECT=client|server, ICA_TZPROBE_SEND=0. Lab only (ICA_ALLOW_ANY_RESOURCE=1).
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("tzprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
+    let tzApp = testApp(args.first ?? "Command Prompt", builtIn: TestApp(resource: "Notepad", executables: ["notepad.exe"]), command: "tzprobe")
+    let store = storeClient()
+    do {
+        let resources = try await store.resources()
+        guard let resource = resources.first(where: { $0.name == tzApp.resource }) else { fail("no resource named \(tzApp.resource)") }
+        guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
+        try http.saveCookies(to: cookiePath)
+        try await runTZProbe(ica: ica, app: tzApp)
+    } catch {
+        fail("\(error)")
+    }
+
 case "policyprobe":
     // icactl policyprobe [resource] — which redirections the host opens for this user (backlog 1.9, PolicyProbe.swift):
     // clipboard, drives (empty read-only folder), printers, audio playback announced; no input; logoff. Lab only
@@ -846,6 +863,8 @@ default:
                                          ICA_AUDIOTEST_MIC=tone: also announce the capture device, fed by a 440 Hz sine
       icactl camprobe [resource]         lab: HDX webcam end to end in "Command Prompt" with the synthetic test pattern; the
                                          VDA checker cam-grab.ps1 (32-bit VLC) grabs 6 s; ch 18 log, §13 verdict, logoff
+      icactl tzprobe [resource]          lab: the client time zone in the session (caps 0x08/0x26, TZ=… for another zone);
+                                         tz-show.ps1 in "Command Prompt" reports the session's zone; PASS/FAIL; logoff
       icactl camtest [resource]          webcam channel test in "Notepad" or "Sound ABC": CTXMM module, BIND exchange,
                                          contexts on ch 18 (ICA_CAMTEST_OBSERVE s after connect, default 90); no input;
                                          synthetic test pattern only (never the camera), H.264 to .session/camtest.h264

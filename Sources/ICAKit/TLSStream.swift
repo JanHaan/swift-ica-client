@@ -17,6 +17,8 @@ public final class TLSStream: @unchecked Sendable {
     }
 
     private let connection: NWConnection
+    /// The negotiated TLS version and cipher suite once connected; nil for plain TCP.
+    public private(set) var tlsInfo: TLSInfo?
     /// The queue all connection callbacks (and `startReceiving` handlers) run on.
     public let queue: DispatchQueue
 
@@ -47,9 +49,11 @@ public final class TLSStream: @unchecked Sendable {
                 if case .failure = result { connection.cancel() }
                 continuation.resume(with: result)
             }
-            connection.stateUpdateHandler = { state in
+            connection.stateUpdateHandler = { [weak self] state in
                 switch state {
-                case .ready: finish(.success(()))
+                case .ready:
+                    if let self { self.tlsInfo = TLSInfo(self.connection) }
+                    finish(.success(()))
                 case .failed(let error): finish(.failure(Failure.failed("\(error)")))
                 case .waiting(let error): finish(.failure(Failure.failed("waiting: \(error)")))
                 case .cancelled: finish(.failure(Failure.closed))

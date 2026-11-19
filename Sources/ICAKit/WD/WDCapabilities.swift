@@ -113,6 +113,12 @@ public struct WDCapabilityPolicy: Sendable {
     /// (live, D84 run 1).
     public var acrReplyBody: [UInt8] = WDCapabilityPolicy.acrStockBody
 
+    /// Caps 0x08 and 0x26 (docs/30 §4.4): when the server offers them, this zone goes back in the stock client's form
+    /// (Windows key name, bias, transition rules; 0x26 adds the IANA name). The VDA uses it if its policy "Use local time
+    /// of client" says so. Resolved at each INIT_REQUEST, so a later connection of the same session sends the zone of
+    /// that moment. nil = left out (the session keeps the server's zone).
+    public var timeZone: TimeZone? = .autoupdatingCurrent
+
     public static let acrStockBody: [UInt8] = [0x02, 0x00, 0x80, 0x00] + [UInt8](repeating: 0, count: 8)
     public static let acrReferenceBody = [UInt8](repeating: 0, count: 12)
 
@@ -140,12 +146,17 @@ public struct WDCapabilityPolicy: Sendable {
 
     /// For each server capability (in server order) that we also support, the negotiated value.
     /// Duplicates keep the first; cap 0x05 is appended at the end, as the reference client does.
-    public func negotiate(server: [WDCapability]) -> [WDCapability] {
+    public func negotiate(server: [WDCapability], now: Date = Date()) -> [WDCapability] {
         var out: [WDCapability] = []
         var seen: Set<UInt16> = []
+        let zone = timeZone.map { WDTimeZone($0, now: now) }
         for cap in server where !seen.contains(cap.id) {
             var result: WDCapability?
             switch cap.id {
+            case WDCapability.timeZone where zone != nil:
+                result = WDCapability(id: cap.id, body: zone!.capability08Body)
+            case WDTimeZone.extendedCapability where zone != nil:
+                result = WDCapability(id: cap.id, body: zone!.capability26Body)
             case WDCapability.reducer:
                 let flags = (cap.u16(at: 0) ?? 0) & reducerFlags
                 result = WDCapability(id: cap.id, body: [UInt8(flags & 0xff), UInt8(flags >> 8)])

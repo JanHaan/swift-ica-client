@@ -32,6 +32,8 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     /// cross the network in clear (security review F-04).
     private var secureHosts: Set<String> = []
     private let secureLock = NSLock()
+    /// "host version, suite" already logged (`didFinishCollecting`); under `secureLock`.
+    private var loggedTLS: Set<String> = []
 
     public enum Failure: Error, CustomStringConvertible, Equatable {
         /// A plain HTTP request to a host this client reached over HTTPS before.
@@ -155,6 +157,20 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             return (.cancelAuthenticationChallenge, nil)
         }
         return (.useCredential, URLCredential(trust: trust))
+    }
+
+    /// The negotiated TLS version and cipher suite of each new connection (task metrics), once per host and
+    /// parameters: a later connection with the same result is not logged again. Host names only, no secrets.
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        for t in metrics.transactionMetrics where !t.isReusedConnection && t.resourceFetchType == .networkLoad {
+            guard let version = t.negotiatedTLSProtocolVersion, let suite = t.negotiatedTLSCipherSuite,
+                  let host = t.request.url?.host?.lowercased() else { continue }
+            let info = TLSInfo(version: version, cipherSuite: suite)
+            secureLock.lock()
+            let fresh = loggedTLS.insert("\(host) \(info)").inserted
+            secureLock.unlock()
+            if fresh { trace("TLS: \(host) \(info)") }
+        }
     }
 
     // MARK: Transport security (security review F-04)

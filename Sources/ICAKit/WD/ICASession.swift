@@ -181,6 +181,11 @@ public final class ICASession: @unchecked Sendable {
                 self.dropMonitor.terminate(reason)
                 self.transport.expectServerClose("WD TERMINATE \(reason)")
             case .connected: self.dropMonitor.connectResponseSent()
+            case .initResponseSent(_, let negotiated):
+                // Caps 0x08/0x26 (docs/30 §4.4): the VDA's policy decides whether the session uses the zone.
+                if negotiated.contains(where: { $0.id == WDCapability.timeZone }), let zone = self.wd.configuration.policy.timeZone {
+                    self.onEvent(.log("time zone sent: \(WDTimeZone(zone)) (used if the server's policy takes the client's zone)"))
+                }
             case .packet(let p):
                 self.dropMonitor.hostPacket()
                 self.packetRing.received(p)
@@ -803,8 +808,10 @@ public final class CGPTransport: @unchecked Sendable {
     }
 
     private func logConnected(_ stream: ICAByteStream) {
-        log(stream.kind.hasPrefix("EDT") ? "\(stream.kind) connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)"
-                                         : "\(tls ? "TLS" : "TCP") connected to \(host):\(port)")
+        // Version and cipher suite once per connection (first connection, EDT fallback and every resume).
+        let security = stream.tlsInfo.map { ": \($0)" } ?? ""
+        log(stream.kind.hasPrefix("EDT") ? "\(stream.kind) connected to \(edtTarget!.host):\(edtTarget!.port) (UDP)\(security)"
+                                         : "\(tls ? "TLS" : "TCP") connected to \(host):\(port)\(security)")
     }
 
     private func writeFirstBind() {
@@ -1361,6 +1368,7 @@ public final class CGPTransport: @unchecked Sendable {
 
     private func attemptConnected(_ stream: ICAByteStream, token: Int) {
         guard token == attemptToken, attemptInProgress, !closed, cgp.state == .suspended else { return stream.close() }
+        logConnected(stream)
         install(stream)
         cgp.beginConnection()
         // Signature and resume bind in one write; state 6 (§3.12.4 step 2).

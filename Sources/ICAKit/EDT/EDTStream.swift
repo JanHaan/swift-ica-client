@@ -15,6 +15,8 @@ public protocol ICAByteStream: AnyObject {
     func abort()
     /// Test hook: neither read nor write for `duration` seconds.
     func blackhole(for duration: TimeInterval)
+    /// The negotiated TLS/DTLS version and cipher suite once connected; nil for plain TCP/UDP.
+    var tlsInfo: TLSInfo? { get }
     /// "TCP", "TLS" or "EDT" for logs.
     var kind: String { get }
 }
@@ -98,6 +100,8 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
 
     /// True once the EDT handshake completed (queue).
     public private(set) var isConnected = false
+    /// DTLS version and cipher suite once the DTLS handshake is done (queue); nil without DTLS.
+    public private(set) var tlsInfo: TLSInfo?
 
     /// MTU of a network interface (link-layer `if_data`), e.g. 1280 for Tailscale's utun.
     public static func interfaceMTU(_ name: String) -> Int? {
@@ -155,6 +159,7 @@ public final class EDTStream: ICAByteStream, @unchecked Sendable {
                 guard let self else { return }
                 switch state {
                 case .ready:
+                    if self.dtlsServerName != nil { self.tlsInfo = TLSInfo(self.connection) }
                     self.receiveLoop()
                     self.startTimer()
                     let name = self.connection.currentPath?.availableInterfaces.first?.name

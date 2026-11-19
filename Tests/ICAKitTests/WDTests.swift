@@ -50,7 +50,9 @@ func bytes(hex: String) -> [UInt8] {
     var parser = WDStreamParser()
     let payload = parser.feed(bytes(hex: liveInitRequestHex)).packets[0].payload
     let request = try WDInitRequest(payload: payload)
-    let negotiated = WDCapabilityPolicy().negotiate(server: request.capabilities)
+    var policy = WDCapabilityPolicy()
+    policy.timeZone = nil   // caps 0x08/0x26: TimeZoneTests
+    let negotiated = policy.negotiate(server: request.capabilities)
     #expect(WDCapabilityBlock.serialize(negotiated) == [
         0x00, 0x06, 0x04, 0x00,
         0x06, 0x00, 0x02, 0x00, 0x04, 0x00,              // reducer: server 0x07 & ours 0x0C = V3
