@@ -85,9 +85,9 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
 | TLS 1.0 / 1.1 | No | Yes | No | Yes | Yes | No | No | ? | |
 | Survives short network drops (session reliability) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Up to the server's timeout, typically 180 s |
 | Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | Yes | Web: matrix no, HTML5 2607 yes. Ours: after a longer outage the app is relaunched through the store, which brings the session back by itself (verified in the lab: a 240 s outage, and a 60 s outage with resume in the VM); direct, gateway-less sessions get no reconnect ticket from the VDA, so the store relaunch is the long-outage path. A by-hand Wi-Fi test is still open |
-| UDP transport (EDT) | Yes | Yes | Yes | Partly | Yes | Yes | Yes | No | Web: matrix no, HTML5 2603 mentions EDT Reliable. Ours: experimental, off by default; built including DTLS and verified in the lab (4.6 to 8 times the throughput of TCP under latency and loss) |
+| UDP transport (EDT) | Yes | Yes | Yes | Partly | Yes | Yes | Yes | Partly | Web: matrix no, HTML5 2603 mentions EDT Reliable. Ours: from 0.11.0 follows the ICA file's HDXoverUDP (Off: TCP; Preferred: EDT races TCP, TCP within 300 ms if UDP does not answer; On: EDT only, with a message if UDP is blocked), on direct connections with session reliability, also over DTLS; not through a gateway. Verified in the lab, including resume after outages (1.5 to 8 times the throughput of TCP under latency and loss) |
 | EDT lossy mode | Yes | Yes | Yes | ? | Yes | Yes | Yes | No | Release notes only |
-| DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11. Ours: experimental, off by default; built including DTLS and verified in the lab (4.6 to 8 times the throughput of TCP under latency and loss) |
+| DTLS 1.2 (EDT through the gateway) | Yes | Yes | Yes | No | No | Partly | No | No | iOS 24.7 lists it, matrix says no. Mac dropped DTLS 1.0 in 2603.11. Ours: DTLS 1.2 straight to the VDA (lab verified, see the row above), not through a gateway |
 | Direct VDA connection (HDX Direct) | Yes | Yes | Yes | Partly | Partly | ? | Partly | No | Release notes only; Web, ChromeOS, Android mention it in passing |
 | ICA stream compression (server → client) | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | Ours: on by default (Settings › Network), about a quarter of the data in a live test; client → server stays uncompressed |
 | Multi-port ICA | Yes | No | Yes | No | No | No | No | No | |
@@ -98,9 +98,9 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | Thinwire classic | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| H.264 | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: 4:2:0 decode verified in the lab; 4:4:4 is not requested |
-| H.265 / AV1 | Yes | Partly | Partly | ? | ? | ? | ? | No | Mac, Linux: H.265 only |
-| Full colour (YUV 4:4:4) | Yes | Yes | ? | ? | ? | ? | ? | No | |
+| H.264 | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: 4:2:0 and 4:4:4 decode verified in the lab |
+| H.265 / AV1 | Yes | Partly | Partly | ? | ? | ? | ? | No | Mac, Linux: H.265 only. Ours: not offered; the lab VDA (no GPU) sends H.264 even with the H.265 policy on, to the stock client too |
+| Full colour (YUV 4:4:4) | Yes | Yes | ? | ? | ? | ? | ? | Yes | Ours: from 0.11.0, offered only when the Mac's hardware decoder passes a test decode at start (Apple silicon does; the software decoder refuses 4:4:4). With the server's visually-lossless policy about 7 times less bandwidth and 4 times less CPU than lossless bitmaps (lab) |
 | Hardware video decoding | Yes | Yes | Yes | No | No | No | Yes | Yes | Ours: VideoToolbox, the H.264 path |
 | Desktop composition redirection | Yes | No | No | No | No | No | No | No | |
 | Several monitors as one desktop | Yes | Yes | Yes | Yes | Yes | Partly | Partly | Yes | iOS, Android: external monitor only. Ours: size fixed per session |
