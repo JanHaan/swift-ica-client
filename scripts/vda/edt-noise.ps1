@@ -1,6 +1,6 @@
 # Moving test content for the lab VDA (bulkprobe D135, chromaprobe D155, backlog 2.2). Recreates mac-D's
 # C:\Users\Public\edt-noise.ps1 (lost with the golden @v3 rebuild) with the same interface, plus a deterministic mode.
-# Installed by scripts/vda/install.sh. In a session: powershell -nop -ep bypass -file C:\Users\Public\edt-noise.ps1
+# Installed by scripts/vda/install.sh and by icalab's `icalab.sh extras` (step vda-edt, a copy). In a session: powershell -nop -ep bypass -file C:\Users\Public\edt-noise.ps1
 #   [-Seconds 30] [-Pattern noise|scroll]
 # A window titled "edt-noise" with a 1024×640 client area, redrawn every 50 ms, closed after -Seconds.
 #   noise:  fresh random RGB per pixel every frame (incompressible; bulk throughput).
