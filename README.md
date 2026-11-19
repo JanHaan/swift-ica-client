@@ -83,7 +83,17 @@ the official clients.
 Download `swift-ica-client-<version>.dmg` from the
 [Releases](https://github.com/JanHaan/swift-ica-client/releases) page, open it and drag ICAViewer
 to Applications. It is a universal binary (Apple silicon and Intel), signed with a Developer ID and
-notarized by Apple. Each release lists the DMG's SHA-256. The manual's
+notarized by Apple. Each release lists the DMG's SHA-256.
+
+Or install it with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask janhaan/tap/icaviewer
+brew upgrade --cask icaviewer             # update (quit ICA Viewer first)
+brew uninstall --zap --cask icaviewer     # remove the app, settings, logs and caches
+```
+
+ICA Viewer does not check for updates by itself. The manual's
 [installation chapter](manual/01-installation.md) has the details.
 
 ## Reporting problems

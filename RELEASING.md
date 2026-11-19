@@ -63,6 +63,7 @@ Run it in the scrubbed tree so the shipped build identity matches the public his
       --title "ICAViewer <version>" --notes-file <notes>
   ```
 - [ ] Download the asset from GitHub and compare its SHA-256 with the file.
+- [ ] Update the Homebrew cask: `scripts/release-cask.sh <version>` downloads the release DMG, compares its SHA-256 with the `.sha256` asset, rewrites version and sha256 in `../homebrew-tap/Casks/icaviewer.rb`, runs `brew style` on the file (it taps nothing) and commits in the tap. Look at the commit, then push it: `git -C ../homebrew-tap push` (or rerun with `--push`). The cask must never point at a release that does not exist yet.
 - [ ] Record the release (commits, hashes, results) in the private decision log.
 
 ## Notes

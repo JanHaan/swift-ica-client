@@ -10,7 +10,7 @@ This manual shows what the app does today. It is regenerated for every release, 
 
 ## Quick start
 
-1. Install the app: open the disk image and drag **ICAViewer** to **Applications** ([Installation](01-installation.md)).
+1. Install the app: open the disk image and drag **ICAViewer** to **Applications**, or use Homebrew ([Installation](01-installation.md)).
 2. Open it and enter your gateway or store address, then your user name and password ([Signing in](02-signing-in.md)).
 3. Type in the launcher to find an app and press Return ([The launcher](03-launcher.md)).
 4. Work in the app's window. Press ⌃⌥⌘L at any time to bring the launcher back ([Working with remote apps](04-remote-apps.md)).
@@ -21,7 +21,7 @@ This manual shows what the app does today. It is regenerated for every release, 
 
 | Chapter | What it covers |
 |---|---|
-| [1. Installation](01-installation.md) | The disk image, first start, requirements, updating and removing |
+| [1. Installation](01-installation.md) | The disk image or Homebrew, first start, requirements, updating and removing |
 | [2. Signing in](02-signing-in.md) | Gateway with one-time code, StoreFront directly, saving your login, Touch ID |
 | [3. The launcher](03-launcher.md) | Finding and starting apps, reconnecting to running sessions |
 | [4. Working with remote apps](04-remote-apps.md) | Windows, Dock entries, menu bar, ⌃⌥⌘L, quitting one app |
