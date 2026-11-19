@@ -1,8 +1,8 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
 ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
-Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.9.0 as
-of 2026-11-18; how each feature behaves is described in the README and under `docs/`.
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.10.0 as
+of 2026-11-19; how each feature behaves is described in the README and under `docs/`.
 
 ## At a glance
 
@@ -123,7 +123,7 @@ of 2026-11-18; how each feature behaves is described in the README and under `do
 | Keyboard layout sync to a Windows VDA | Yes | Yes | Yes | No | No | Yes | Yes | Yes | Ours: the Mac's input source at sign-in (DE, US, UK, FR, CH, NL, ES, IT, Dvorak and more); after a switch, characters go as text; verified headless and in the macOS test VM |
 | Keyboard layout sync to a Linux VDA | Yes | Yes | Yes | No | No | Yes | Yes | ? | |
 | Scancode keyboard mode | Yes | Yes | Yes | Yes | Yes | No | No | Yes | |
-| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters (€, @; such an Option never acts as Alt), and printable keys while the Mac layout differs from the logon layout; Cmd and Ctrl shortcuts stay keys, placed by the session's layout (D141, D160) |
+| Unicode keyboard mode | No | Yes | Yes | Yes | Yes | Yes | Yes | Partly | Ours: Option-composed characters (€, @; such an Option never acts as Alt), dead keys composed by the Mac layout (ê, ñ), the emoji picker (Emoji & Symbols; typing in its search field not yet), and printable keys while the Mac layout differs from the logon layout; Cmd and Ctrl shortcuts stay keys, letters and + - , . placed by the session's layout (D141, D160, D167). Not built: press-and-hold accents and Mac input methods |
 | Local input method for Chinese, Japanese, Korean | Yes | Yes | No | Yes | Yes | Yes | Yes | No | CTXIME |
 | Server input method for Chinese, Japanese, Korean | Yes | Yes | Yes | Yes | Yes | Yes | Yes | ? | Ours: needs only key events |
 | Mouse and wheel | Likely | Likely | Likely | Likely | Likely | Likely | Likely | Yes | |
