@@ -10,11 +10,11 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
   gateway, seamless apps as native Mac windows with their own Dock entries, several apps in one
   session, a published desktop in one window, reconnect and survival of network drops, Thinwire and
   H.264 graphics, Retina scaling, text, image, rich text and file clipboard, a shared client drive,
-  audio playback, the microphone, the webcam (32- and 64-bit apps and Edge), PDF printing, the keyboard layout announced at sign-in, sign-out, and an
+  audio playback, the microphone, the webcam (32- and 64-bit apps and Edge), PDF printing, links opening in the Mac's browser, the keyboard layout announced at sign-in, sign-out, and an
   indicator for features the server refuses.
 - **Built, not yet verified by hand:** the automatic reconnect after a long drop is verified in the lab, a
   by-hand Wi-Fi test is open.
-- **Main gaps:** links opening on the Mac, several monitors for a desktop, HTML on the clipboard (the
+- **Main gaps:** several monitors for a desktop, HTML on the clipboard (the
   server filters it), SAML, smart card and FIDO2, USB devices, UDP transport (an experimental path
   exists, off), Teams optimization.
 
@@ -81,7 +81,7 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
 | Feature | Win | Mac | Linux | Web | ChromeOS | iOS | Android | Ours | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | TLS to the gateway | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| TLS 1.3 | Yes | Yes | Yes | No | Yes | Yes | Yes | Built | Ours: system TLS offers 1.3; the negotiated version is not logged |
+| TLS 1.3 | Yes | Yes | Yes | No | Yes | Yes | Yes | Yes | Ours: system TLS; the log names the version and cipher of every connection (from 0.11.0). Lab: StoreFront and the VDA TLS 1.3 (AES-256-GCM), EDT over DTLS 1.2 (ECDHE-RSA AES-256-GCM) |
 | TLS 1.0 / 1.1 | No | Yes | No | Yes | Yes | No | No | ? | |
 | Survives short network drops (session reliability) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Up to the server's timeout, typically 180 s |
 | Reconnects after longer drops (auto client reconnect) | Yes | Yes | Yes | Partly | Yes | No | Yes | Yes | Web: matrix no, HTML5 2607 yes. Ours: after a longer outage the app is relaunched through the store, which brings the session back by itself (verified in the lab: a 240 s outage, and a 60 s outage with resume in the VM); direct, gateway-less sessions get no reconnect ticket from the VDA, so the store relaunch is the long-outage path. A by-hand Wi-Fi test is still open |
@@ -140,8 +140,8 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
 | Local folder in the session (client drive) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Ours: one shared folder as drive M, verified live (the read bug is fixed) |
 | File transfer (upload, download) | Likely | Likely | Likely | Likely | Likely | ? | ? | No | Not a matrix row. Ours: under investigation |
 | Open a local file in a remote app | Yes | Partly | Yes | No | Yes | Yes | Yes | No | Mac: matrix no, but Mac 2411 added file type association |
-| Links in remote apps open on the client | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Host-to-client URL redirection |
-| Links in both directions | Yes | Yes | Yes | No | No | No | No | No | Bidirectional redirection; Mac since 2603 |
+| Links in remote apps open on the client | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Host-to-client URL redirection. Mac: seen in the stock client's own traffic (http/https only, after a reachability check, no prompt). Ours: from 0.11.0, when the server's policy "Host to client redirection" is on, http/https links open in the Mac's default browser; other schemes, local addresses, unreachable servers and more than 5 links in 30 s stay in the session (docs/56); verified in the lab |
+| Links in both directions | Yes | Yes | Yes | No | No | No | No | No | Bidirectional redirection (browser extensions on both sides); Mac since 2603. Ours: host to client only (row above) |
 
 ## Devices
 
@@ -159,7 +159,7 @@ of 2026-11-19; how each feature behaves is described in the README and under `do
 | Location | Yes | Partly | No | No | No | Yes | Yes | No | Mac 2607 preview; matrix says no |
 | Mobile device features (mobility pack) | Yes | No | No | Yes | Yes | Yes | Yes | No | |
 | Battery status in the session | Likely | ? | Yes | ? | ? | ? | ? | No | Release notes only (Linux 2503) |
-| Client time zone in the session | Likely | Likely | Likely | Yes | Likely | Likely | Likely | No | Not a matrix row. Ours: sends back the server's time zone |
+| Client time zone in the session | Likely | Yes | Likely | Yes | Likely | Likely | Likely | Yes | Not a matrix row. Mac: seen in the stock client's own traffic. Ours: from 0.11.0 the Mac's time zone (Windows name, offset, daylight-time rules), used when the server's policy "Use local time of client" says so (Windows Server VDAs also need "Allow time zone redirection"); verified in the lab for 6 zones incl. half-hour offsets and southern daylight time |
 | COM / serial ports | Likely | ? | ? | ? | ? | ? | ? | No | |
 
 ## Meetings and media
@@ -243,7 +243,7 @@ Ordered for daily use through a gateway with mail and line-of-business applicati
 1. **Several monitors in a published desktop**, and more than one fixed-size window for it.
 2. **File transfer** beyond clipboard files and the shared folder; HTML on the clipboard (filtered by the server).
 3. **Authentication** beyond ExplicitForms with TOTP and plain StoreFront forms (SAML, smart card, FIDO2),
-   USB devices, links opening on the Mac, and HDX over UDP (experimental and off).
+   USB devices, and HDX over UDP (experimental and off).
 
 Not listed because they matter only in particular deployments: smart card, FIDO2, pass-through,
 Citrix Cloud, App Protection, EPA, GACS, auto-update.
