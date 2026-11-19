@@ -1,7 +1,7 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
 ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
-Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.10.0 as
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.10.1 as
 of 2026-11-19; how each feature behaves is described in the README and under `docs/`.
 
 ## At a glance
