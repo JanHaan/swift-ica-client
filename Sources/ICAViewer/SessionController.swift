@@ -120,8 +120,9 @@ final class SessionController: NSObject {
     /// resource (Dock icon and menu title, docs/99 Phase 0), unless it is a logon or system process, names itself as
     /// another app, or is not the executable the launch names (`AppNaming.mayBeLaunchedApp`, docs/99 §12.15).
     /// The session's own launch is awaited too (`AwaitedLaunch.ownLaunch`): its first real app after the logon phase
-    /// (File Explorer for "Explorer Citrix ABC", rundll32 for "Sound ABC") is that resource.
-    private var awaitingApps: [AwaitedLaunch] = []
+    /// (File Explorer for "Explorer Citrix ABC", rundll32 for "Sound ABC") is that resource, unless the host's
+    /// enumeration showed the session already ran apps (a reconnect, D172: then only an app publishing that name).
+    private var launchNaming = LaunchNaming()
     /// The own launch's entry is dropped this long after the logon phase if no app matched it.
     static let ownLaunchWindow: TimeInterval = 60
     private var logonPhaseOver = false
@@ -158,8 +159,8 @@ final class SessionController: NSObject {
         self.name = name
         appNames = [name]
         shareKey = SessionShareKey(ica: ica)
-        awaitingApps = [AwaitedLaunch(resource: name, hint: AppNaming.launchHint(initialProgram: ica["InitialProgram"] ?? ""),
-                                      alias: AppNaming.launchAlias(initialProgram: ica["InitialProgram"] ?? ""), ownLaunch: true)]
+        launchNaming = LaunchNaming(own: AwaitedLaunch(resource: name, hint: AppNaming.launchHint(initialProgram: ica["InitialProgram"] ?? ""),
+                                                       alias: AppNaming.launchAlias(initialProgram: ica["InitialProgram"] ?? ""), ownLaunch: true))
         scalingSettings = ScalingSettings.load()
         let screens = desktopMode ? Self.desktopScreen(fullScreen: ProcessInfo.processInfo.environment["ICAVIEWER_DESKTOP_FULLSCREEN"] == "1")
                                   : Self.currentScreens()
@@ -685,7 +686,10 @@ final class SessionController: NSObject {
             vlog("TWI metrics: frame \(m.frameThickness.x),\(m.frameThickness.y) dialog \(m.dialogFrameThickness.x),\(m.dialogFrameThickness.y) caption \(m.captionHeight) button \(m.captionButtonWidth)")
         case .seamlessStateChanged(let active):
             vlog("TWI seamless active: \(active)")
-            if active { scheduleReconnectWindowCheck() }
+            if active {
+                launchNaming.enumerated(at: Date())
+                scheduleReconnectWindowCheck()
+            }
         case .windowAdded(let w):
             infos[w.id] = w
             noteActivity()
@@ -749,19 +753,33 @@ final class SessionController: NSObject {
             if let published = app.publishedName, !published.isEmpty {
                 RememberedAppResources.shared.confirm(app.key, publishedName: published)
             }
-            // The first new app after a shared launch is that resource, unless it names itself as another one.
+            // The first new app after a shared launch is that resource, unless it names itself as another one or a
+            // remembered mapping says otherwise; re-announced apps are never the own launch (LaunchNaming, D172).
             let exe = AppNaming.executableName(key: app.key, executablePath: app.executablePath)
-            if appResources[app.key] == nil,
-               let i = AppNaming.firstMatch(awaitingApps, key: app.key, executable: exe, publishedName: app.publishedName, at: Date()) {
-                let entry = awaitingApps.remove(at: i)
-                appResources[app.key] = entry.resource
-                vlog("\(entry.ownLaunch ? "launch" : "session sharing"): TWI app \(logName(app.key)) is \(logName(entry.resource))")
-                if app.publishedName?.isEmpty ?? true { confirmMappingLater(app.key, entry.resource, executable: exe) }
-                if HelperManager.enabled { HelperManager.shared.identityChanged(self, appKey: app.key) }
-            } else if awaitingApps.contains(where: { !$0.known.contains(app.key) }) {
-                vlog("session sharing: TWI app \(logName(app.key)) is not taken for the pending launch"
-                     + (AppNaming.isSystemProcess(exe) ? " (logon or system process)"
-                        : app.publishedName.map { $0.isEmpty ? "" : " (it names itself \(logName($0)))" } ?? " (launch not started yet, or another app)"))
+            if appResources[app.key] == nil {
+                let wasReconnected = launchNaming.reconnected
+                var remembered: [String: String] = [:]
+                for key in apps.keys { remembered[key] = RememberedAppResources.shared.resource(for: key) }
+                let outcome = launchNaming.appAdded(key: app.key, executable: exe, publishedName: app.publishedName,
+                                                    remembered: remembered, at: Date())
+                if launchNaming.reconnected, !wasReconnected {
+                    vlog("launch: TWI app \(logName(app.key)) ran before this connection (re-announced): the launch takes only an app named \(logName(name))")
+                }
+                switch outcome {
+                case .taken(let entry):
+                    appResources[app.key] = entry.resource
+                    vlog("\(entry.ownLaunch ? "launch" : "session sharing"): TWI app \(logName(app.key)) is \(logName(entry.resource))")
+                    if app.publishedName?.isEmpty ?? true { confirmMappingLater(app.key, entry.resource, executable: exe) }
+                    if HelperManager.enabled { HelperManager.shared.identityChanged(self, appKey: app.key) }
+                case .notTaken(let blockedBy):
+                    vlog("session sharing: TWI app \(logName(app.key)) is not taken for the pending launch"
+                         + (AppNaming.isSystemProcess(exe) ? " (logon or system process)"
+                            : blockedBy.map { " (remembered mapping: \(logName($0)))" }
+                            ?? app.publishedName.map { $0.isEmpty ? "" : " (it names itself \(logName($0)))" }
+                            ?? " (launch not started yet, re-announced, or another app)"))
+                case .none:
+                    break
+                }
             }
             DockIcon.shared.scheduleRefresh()
         case .appChanged(let app):
@@ -1387,7 +1405,7 @@ final class SessionController: NSObject {
         if apps.count == 1, let only = apps.keys.first, appResources[only] == nil, AppNaming.isOwnApp(key: only, resource: name) {
             appResources[only] = name
         }
-        awaitingApps.append(entry)
+        launchNaming.add(entry)
         vlog("session sharing: starting \(logName(resource)) in the session of \(appNames.map(logName).joined(separator: ", ")) over CTXCTL"
              + (controlReady ? "" : " (queued until the channel is ready)"))
         session.launchInSession(launch) { [weak self] result in
@@ -1396,9 +1414,7 @@ final class SessionController: NSObject {
                 vlog("session sharing: \(logName(resource)): \(result)")
                 if result == .started {
                     // Only apps that appear from now on can be this resource (the logon console came before, live).
-                    if let i = self.awaitingApps.firstIndex(where: { $0.resource == resource && !$0.ownLaunch && $0.startedAt == nil }) {
-                        self.awaitingApps[i].startedAt = Date()
-                    }
+                    self.launchNaming.sharedLaunchStarted(resource, at: Date())
                     if !self.appNames.contains(resource) { self.appNames.append(resource) }
                     // The app's window follows over TWI; hold off a logoff a little longer for it.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.sharedLaunchDone(resource, started: true) }
@@ -1415,10 +1431,10 @@ final class SessionController: NSObject {
     private func endLogonPhase() {
         guard !logonPhaseOver else { return }
         logonPhaseOver = true
-        guard let i = awaitingApps.firstIndex(where: \.ownLaunch) else { return }
-        awaitingApps[i].startedAt = Date()
+        launchNaming.logonPhaseEnded(at: Date())
+        guard launchNaming.awaitsOwnLaunch else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.ownLaunchWindow) { [weak self] in
-            self?.awaitingApps.removeAll(where: \.ownLaunch)
+            self?.launchNaming.dropOwnLaunch()
         }
     }
 
@@ -1428,6 +1444,7 @@ final class SessionController: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.mappingConfirmDelay) { [weak self] in
             guard let self, !self.ended, self.appResources[key] == resource, self.apps[key] != nil,
                   self.windows.values.contains(where: { $0.isApp && $0.info.appKey == key }) else { return }
+            // Only adds: a remembered mapping is never replaced by this one (AppResourceMap.remember, D172).
             RememberedAppResources.shared.remember(key, is: resource, executable: executable)
         }
     }
@@ -1435,7 +1452,7 @@ final class SessionController: NSObject {
     private func sharedLaunchDone(_ resource: String, started: Bool) {
         sharedLaunchesBusy = max(0, sharedLaunchesBusy - 1)
         // Failed: its app will not come. Started: its time for the first TWI app is over (an app found removed it).
-        if let i = awaitingApps.firstIndex(where: { $0.resource == resource && !$0.ownLaunch }) { awaitingApps.remove(at: i) }
+        launchNaming.sharedLaunchEnded(resource)
         guard sharedLaunchesBusy == 0, logoffDeferred, !ended else { return }
         logoffDeferred = false
         if appWindowCount == 0, !lastAppWindows.isEmpty {

@@ -66,10 +66,34 @@ import Testing
         #expect(!c2)
         #expect(map.resource(store: store, key: "aumid:Microsoft.Windows.Explorer") == "Files App")
         #expect(map.resource(store: other, key: "aumid:Microsoft.Windows.Explorer") == nil)
-        // Another key for the same resource replaces the old one.
-        map.remember(store: store, key: "exe:C:\\Windows\\explorer.exe", resource: "files app", executable: nil)
-        #expect(map.resource(store: store, key: "aumid:Microsoft.Windows.Explorer") == nil)
-        #expect(map.resource(store: store, key: "exe:C:\\Windows\\explorer.exe") == "files app")
+        // D172: a launch mapping only adds. Another key for the same resource is not recorded while the old one stands.
+        let c3 = map.remember(store: store, key: "exe:C:\\Windows\\explorer.exe", resource: "files app", executable: nil)
+        #expect(!c3)
+        #expect(map.resource(store: store, key: "aumid:Microsoft.Windows.Explorer") == "Files App")
+        #expect(map.resource(store: store, key: "exe:C:\\Windows\\explorer.exe") == nil)
+        // Same key, same resource: its executable may be filled in.
+        let c4 = map.remember(store: store, key: "aumid:Microsoft.Windows.Explorer", resource: "files app", executable: "explorer.exe")
+        #expect(c4)
+    }
+
+    /// The 0.10.0 bug: a wrong guess (Explorer is "Text App") must not replace the remembered "Files App"; once the
+    /// real app publishes its name, a wrong entry goes and the right one can be learnt.
+    @Test func aGuessNeverReplacesARememberedMapping() {
+        var map = AppResourceMap()
+        let explorer = "aumid:Microsoft.Windows.Explorer"
+        map.remember(store: store, key: explorer, resource: "Files App", executable: "explorer.exe")
+        let changed = map.remember(store: store, key: explorer, resource: "Text App", executable: "explorer.exe")
+        #expect(!changed)
+        #expect(map.resource(store: store, key: explorer) == "Files App")
+        // A wrong entry from 0.10.0 (Explorer → Text App) heals when Text App's own app names itself.
+        var old = AppResourceMap()
+        old.remember(store: store, key: explorer, resource: "Text App", executable: "explorer.exe")
+        let refused = old.remember(store: store, key: explorer, resource: "Files App", executable: "explorer.exe")
+        #expect(!refused)
+        old.confirm(store: store, key: "app:Text App", publishedName: "Text App")
+        let learnt = old.remember(store: store, key: explorer, resource: "Files App", executable: "explorer.exe")
+        #expect(learnt)
+        #expect(old.resource(store: store, key: explorer) == "Files App")
     }
 
     /// A wrong mapping (Explorer → Calc App) goes as soon as the real app names itself.
@@ -163,18 +187,31 @@ import Testing
 @Suite struct OwnLaunchTests {
     let t0 = Date(timeIntervalSinceReferenceDate: 10_000)
 
-    /// Feeds TWI app additions (seconds after t0) to the own launch, as SessionController does; logon ends at `logonEnd`.
-    func run(_ resource: String, logonEnd: TimeInterval, hint: String? = nil,
+    /// Feeds TWI app additions (seconds after t0) to the own launch, as SessionController does; logon ends at
+    /// `logonEnd`, the host's seamless (re)activations come at `enumerations`.
+    func run(_ resource: String, logonEnd: TimeInterval, hint: String? = nil, alias: String? = nil, enumerations: [TimeInterval] = [],
+             remembered: [String: String] = [:],
              _ apps: [(at: TimeInterval, key: String, exe: String?, published: String?)]) -> [String: String] {
-        var pending = [AwaitedLaunch(resource: resource, hint: hint, ownLaunch: true)]
+        var naming = LaunchNaming(own: AwaitedLaunch(resource: resource, hint: hint, alias: alias, ownLaunch: true))
         var mapped: [String: String] = [:]
-        var ended = false
-        for app in apps.sorted(by: { $0.at < $1.at }) {
-            if !ended, app.at >= logonEnd { pending[0].startedAt = t0.addingTimeInterval(logonEnd); ended = true }
-            guard mapped[app.key] == nil,
-                  let i = AppNaming.firstMatch(pending, key: app.key, executable: app.exe, publishedName: app.published,
-                                               at: t0.addingTimeInterval(app.at)) else { continue }
-            mapped[app.key] = pending.remove(at: i).resource
+        var present: Set<String> = []
+        enum Event { case logon, enumeration, app(key: String, exe: String?, published: String?) }
+        var events: [(at: TimeInterval, order: Int, event: Event)] = [(logonEnd, 0, .logon)]
+        events += enumerations.map { ($0, 1, .enumeration) }
+        events += apps.map { ($0.at, 2, .app(key: $0.key, exe: $0.exe, published: $0.published)) }
+        for (at, _, event) in events.sorted(by: { ($0.at, $0.order) < ($1.at, $1.order) }) {
+            let now = t0.addingTimeInterval(at)
+            switch event {
+            case .logon: naming.logonPhaseEnded(at: now)
+            case .enumeration: naming.enumerated(at: now)
+            case .app(let key, let exe, let published):
+                present.insert(key)
+                guard mapped[key] == nil else { continue }
+                if case .taken(let entry) = naming.appAdded(key: key, executable: exe, publishedName: published,
+                                                            remembered: remembered.filter { present.contains($0.key) }, at: now) {
+                    mapped[key] = entry.resource
+                }
+            }
         }
         return mapped
     }
@@ -231,8 +268,100 @@ import Testing
                                             alias: "Browser App_1", launchStarted: true))
         #expect(!AppNaming.mayBeLaunchedApp(executable: nil, publishedName: "Browser App_1", resource: "Browser App", hint: nil,
                                             alias: "Browser App_1", launchStarted: false))
-        let pending = [AwaitedLaunch(resource: "Browser App", alias: "Browser App_1", startedAt: Date(timeIntervalSince1970: 0), ownLaunch: true)]
-        #expect(AppNaming.firstMatch(pending, key: "app:Browser App_1", executable: nil, publishedName: "Browser App_1",
-                                     at: Date(timeIntervalSince1970: 2)) == 0)
+        var naming = LaunchNaming(own: AwaitedLaunch(resource: "Browser App", alias: "Browser App_1", ownLaunch: true))
+        naming.logonPhaseEnded(at: Date(timeIntervalSince1970: 0))
+        let outcome = naming.appAdded(key: "app:Browser App_1", executable: nil, publishedName: "Browser App_1", remembered: [:],
+                                      at: Date(timeIntervalSince1970: 2))
+        #expect(outcome == .taken(AwaitedLaunch(resource: "Browser App", alias: "Browser App_1",
+                                                startedAt: Date(timeIntervalSince1970: 0), ownLaunch: true)))
+        // On a reconnect it is still taken, re-announced at once: a published name is no guess.
+        #expect(run("Browser App", logonEnd: 6.77, alias: "Browser App_1", enumerations: [7.84], [
+            (7.91, "aumid:Microsoft.Windows.Explorer", "explorer.exe", nil),
+            (8.14, "app:Browser App_1", nil, "Browser App_1"),
+        ]) == ["app:Browser App_1": "Browser App"])
+    }
+
+    // MARK: D172, a reconnect to running apps (0.10.0 known issue)
+
+    let explorer = "aumid:Microsoft.Windows.Explorer"
+
+    /// The bad manual run (manual-20261119-085226): after an ICA Viewer restart, a reconnect through "Text App"; the
+    /// logon phase ended at 6.77 s, the host answered PAUSE/RESUME at 7.84 s and re-announced Explorer at 7.91 s,
+    /// past the 0.5 s grace. Explorer must not become "Text App"; Text App names itself.
+    @Test func reconnectWithExistingWindowsTakesNoGuess() {
+        let apps: [(at: TimeInterval, key: String, exe: String?, published: String?)] = [
+            (5.94, "exe:%systemroot%\\system32\\logonui.exe", "logonui.exe", nil),
+            (7.91, explorer, "explorer.exe", nil),
+            (8.14, "app:Draw App", nil, "Draw App"),
+            (8.16, "app:Text App", nil, "Text App"),
+            (8.18, "app:Paint App", nil, "Paint App"),
+            (8.20, explorer, "explorer.exe", nil),        // the window again after the reset
+            (30.0, "exe:C:\\Tools\\later.exe", "later.exe", nil),   // a new app later is no guess either
+        ]
+        #expect(run("Text App", logonEnd: 6.77, enumerations: [7.84], apps) == ["app:Text App": "Text App"])
+        // The same when the first re-announced app is not the earliest of the burst (chained within 0.5 s each).
+        #expect(run("Text App", logonEnd: 6.77, enumerations: [7.0], [
+            (7.3, "app:Draw App", nil, "Draw App"),
+            (7.7, explorer, "explorer.exe", nil),
+        ]).isEmpty)
+        // A plain reconnect (no logon UI): the apps come before the logon phase counts as over (3 s after host init).
+        #expect(run("Files App", logonEnd: 3.0, [
+            (0.05, "app:Text App", nil, "Text App"),
+            (0.07, explorer, "explorer.exe", nil),
+            (5.0, "exe:C:\\Tools\\later.exe", "later.exe", nil),
+        ]).isEmpty)
+        var naming = LaunchNaming(own: AwaitedLaunch(resource: "Text App", ownLaunch: true))
+        naming.logonPhaseEnded(at: t0)
+        naming.enumerated(at: t0.addingTimeInterval(1.07))
+        _ = naming.appAdded(key: explorer, executable: "explorer.exe", publishedName: nil, remembered: [:], at: t0.addingTimeInterval(1.14))
+        #expect(naming.reconnected && naming.awaitsOwnLaunch)
+    }
+
+    /// A fresh logon, also one the timing rule calls a reconnect pattern (the lab logs on in 1–2 s): the enumeration
+    /// after the logon lists no app, so the first real app later is the launch.
+    @Test func freshLaunchStillTakesTheFirstRealApp() {
+        // Lab, manual run: logon phase end 27.55 s, seamless reactivated 27.64 s, the app at 29.28 s.
+        #expect(run("Files App", logonEnd: 27.55, enumerations: [27.64], [
+            (26.29, "exe:%systemroot%\\system32\\logonui.exe", "logonui.exe", nil),
+            (27.80, "exe:%systemroot%\\system32\\ctfmon.exe", "ctfmon.exe", nil),   // system: no reconnect evidence
+            (29.28, explorer, "explorer.exe", nil),
+        ]) == [explorer: "Files App"])
+        var naming = LaunchNaming(own: AwaitedLaunch(resource: "Files App", ownLaunch: true))
+        naming.logonPhaseEnded(at: t0)
+        _ = naming.appAdded(key: explorer, executable: "explorer.exe", publishedName: nil, remembered: [:], at: t0.addingTimeInterval(2))
+        #expect(!naming.reconnected)
+    }
+
+    /// A remembered mapping beats a guess: an app remembered as another resource, or a second app for a resource
+    /// whose remembered app is in the session, is not taken; an unremembered or matching one is.
+    @Test func rememberedMappingBeatsAGuess() {
+        // Fresh logon for "Text App"; Explorer is remembered as "Files App" and comes first.
+        #expect(run("Text App", logonEnd: 10, remembered: [explorer: "Files App"], [
+            (12.0, explorer, "explorer.exe", nil),
+            (13.0, "exe:C:\\Tools\\text.exe", "text.exe", nil),
+        ]) == ["exe:C:\\Tools\\text.exe": "Text App"])
+        // Remembered as this very resource: taken.
+        #expect(run("Files App", logonEnd: 10, remembered: [explorer: "files app"], [(12.0, explorer, "explorer.exe", nil)])
+                == [explorer: "Files App"])
+        // The resource's remembered app is already here (a second Files App launch): another new app is not it.
+        var again = LaunchNaming()
+        again.add(AwaitedLaunch(resource: "Files App", known: [explorer]))
+        again.sharedLaunchStarted("Files App", at: t0)
+        let second = again.appAdded(key: "exe:C:\\Tools\\other.exe", executable: "other.exe", publishedName: nil,
+                                    remembered: [explorer: "Files App"], at: t0.addingTimeInterval(1))
+        #expect(second == .notTaken(remembered: "Files App"))
+        // A shared launch: the same rule, and the outcome names the remembered resource for the log.
+        var naming = LaunchNaming()
+        naming.add(AwaitedLaunch(resource: "Text App", known: ["app:Draw App"]))
+        naming.sharedLaunchStarted("Text App", at: t0)
+        let blocked = naming.appAdded(key: explorer, executable: "explorer.exe", publishedName: nil,
+                                      remembered: [explorer: "Files App"], at: t0.addingTimeInterval(1))
+        #expect(blocked == .notTaken(remembered: "Files App"))
+        let taken = naming.appAdded(key: "exe:C:\\Tools\\text.exe", executable: "text.exe", publishedName: nil,
+                                    remembered: [explorer: "Files App"], at: t0.addingTimeInterval(2))
+        #expect(taken == .taken(AwaitedLaunch(resource: "Text App", known: ["app:Draw App"], startedAt: t0)))
+        #expect(naming.pending.isEmpty)
+        let unrelated = naming.appAdded(key: "app:Draw App", executable: nil, publishedName: "Draw App", remembered: [:], at: t0)
+        #expect(unrelated == .none)
     }
 }

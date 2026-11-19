@@ -89,16 +89,6 @@ public enum AppNaming {
         return !isSystemProcess(executable)
     }
 
-    /// The first pending launch that a newly added TWI app (`key`) is, if any (docs/99 §12.15).
-    public static func firstMatch(_ pending: [AwaitedLaunch], key: String, executable: String?, publishedName: String?,
-                                  at now: Date) -> Int? {
-        pending.firstIndex { entry in
-            !entry.known.contains(key)
-                && mayBeLaunchedApp(executable: executable, publishedName: publishedName, resource: entry.resource,
-                                    hint: entry.hint, alias: entry.alias, launchStarted: entry.eligible(at: now))
-        }
-    }
-
     /// The key is the app of `resource`: `app:<resource>` (the TWI published name), compared as store names are.
     public static func isOwnApp(key: String, resource: String) -> Bool {
         key.hasPrefix("app:") && normalized(String(key.dropFirst(4))) == normalized(resource) && !normalized(resource).isEmpty
@@ -169,11 +159,109 @@ public struct AwaitedLaunch: Equatable, Sendable {
     }
 }
 
+/// Which awaited launch a TWI app is, as the host announces apps (docs/99 §12.15, D172): the session's own launch
+/// and shared launches. `SessionController` feeds it the TWI events; it holds no time of its own, so the
+/// order-dependent cases are unit-tested.
+///
+/// A reconnect re-announces the apps that already ran, all at once; none of them is new. Live bug (0.10.0): after
+/// an ICA Viewer restart, a reconnect through "Notepad" took the File Explorer window, re-announced 1.1 s after the
+/// logon phase ended (the host's answer to PAUSE/RESUME came late), for "Notepad" and remembered it so.
+public struct LaunchNaming: Sendable {
+    /// Apps added less than this after the host's latest enumeration (or the previous app of it) are re-announced.
+    public static let burstGap: TimeInterval = AwaitedLaunch.ownLaunchGrace
+
+    public private(set) var pending: [AwaitedLaunch]
+    /// A re-announced app (other than a logon or system process) showed the session already ran apps: the own launch
+    /// takes only an app that publishes its name, never the first real app.
+    public private(set) var reconnected = false
+    /// The host's latest enumeration (the logon phase's end, a seamless (re)activation) or the latest app within it.
+    private var burstAt: Date?
+
+    public init(own: AwaitedLaunch? = nil) {
+        pending = own.map { [$0] } ?? []
+    }
+
+    public var awaitsOwnLaunch: Bool { pending.contains(where: \.ownLaunch) }
+
+    /// Whether a pending launch went out before `key` was known (an app added now could be it).
+    public func awaitsNew(_ key: String) -> Bool { pending.contains { !$0.known.contains(key) } }
+
+    /// A shared launch went out (CTXCTL).
+    public mutating func add(_ launch: AwaitedLaunch) { pending.append(launch) }
+
+    /// The host reported the shared launch of `resource` started (status 0): apps added from now on may be it.
+    public mutating func sharedLaunchStarted(_ resource: String, at now: Date) {
+        if let i = pending.firstIndex(where: { $0.resource == resource && !$0.ownLaunch && $0.startedAt == nil }) {
+            pending[i].startedAt = now
+        }
+    }
+
+    /// The shared launch of `resource` failed, or its time for an app is over.
+    public mutating func sharedLaunchEnded(_ resource: String) {
+        if let i = pending.firstIndex(where: { $0.resource == resource && !$0.ownLaunch }) { pending.remove(at: i) }
+    }
+
+    /// The logon phase is over: the own launch counts as started, and the host's enumeration follows.
+    public mutating func logonPhaseEnded(at now: Date) {
+        if let i = pending.firstIndex(where: \.ownLaunch), pending[i].startedAt == nil { pending[i].startedAt = now }
+        burstAt = now
+    }
+
+    /// The host (re)activated seamless mode (TWI): it enumerates its apps and windows again.
+    public mutating func enumerated(at now: Date) { burstAt = now }
+
+    /// The own launch's time for an app is over.
+    public mutating func dropOwnLaunch() { pending.removeAll(where: \.ownLaunch) }
+
+    public enum Outcome: Equatable, Sendable {
+        /// No launch awaited an app like this one.
+        case none
+        /// The app is this launch (removed from `pending`).
+        case taken(AwaitedLaunch)
+        /// A launch was awaited, but this app is not it; `remembered`: the key is remembered as that other resource,
+        /// or another app of the session is remembered as the awaited one.
+        case notTaken(remembered: String?)
+    }
+
+    /// A TWI app was added. `remembered`: the remembered resource of each app key in the session (this one included).
+    public mutating func appAdded(key: String, executable: String?, publishedName: String?, remembered: [String: String],
+                                  at now: Date) -> Outcome {
+        let own = pending.first(where: \.ownLaunch)
+        let inBurst = burstAt.map { now.timeIntervalSince($0) < Self.burstGap } ?? false
+        if inBurst { burstAt = now }
+        if let own, inBurst || !own.eligible(at: now), !AppNaming.isSystemProcess(executable) { reconnected = true }
+        let published = publishedName.flatMap { $0.isEmpty ? nil : $0 }
+        var blockedBy: String?
+        let index = pending.firstIndex { entry in
+            guard !entry.known.contains(key) else { return false }
+            if let published {
+                // A published name is no guess: it is the launch exactly when it names the resource (or its alias).
+                return AppNaming.mayBeLaunchedApp(executable: executable, publishedName: published, resource: entry.resource,
+                                                  hint: entry.hint, alias: entry.alias,
+                                                  launchStarted: entry.ownLaunch || entry.eligible(at: now))
+            }
+            if entry.ownLaunch, reconnected { return false }
+            guard AppNaming.mayBeLaunchedApp(executable: executable, publishedName: nil, resource: entry.resource,
+                                             hint: entry.hint, alias: entry.alias, launchStarted: entry.eligible(at: now))
+            else { return false }
+            // A remembered mapping beats a guess: this key is another app, or the resource's app is already here.
+            let wanted = AppNaming.normalized(entry.resource)
+            if let mine = remembered[key], AppNaming.normalized(mine) != wanted { blockedBy = mine; return false }
+            if remembered.contains(where: { $0.key != key && AppNaming.normalized($0.value) == wanted }) {
+                blockedBy = entry.resource; return false
+            }
+            return true
+        }
+        if let index { return .taken(pending.remove(at: index)) }
+        return awaitsNew(key) ? .notTaken(remembered: blockedBy) : .none
+    }
+}
+
 /// TWI app key → published resource, learnt from session sharing (`session sharing: TWI app «…» is «…»`) and
 /// remembered per store across runs (docs/99 §12.15). Keys and stores are stored only as hashes; the resource
 /// name is stored as the Dock shows it (it already is a bundle name). File mode 0600 in the app's support folder.
-/// An app that announces a published name confirms itself: any other key remembered for that resource goes (a
-/// wrong mapping cannot outlive the real app's first appearance).
+/// A launch mapping never replaces an entry (`remember`). An app that announces a published name confirms itself:
+/// any other key remembered for that resource goes (a wrong mapping cannot outlive the real app's appearance).
 public struct AppResourceMap: Codable, Equatable, Sendable {
     public struct Entry: Codable, Equatable, Sendable {
         public var resource: String
@@ -191,16 +279,19 @@ public struct AppResourceMap: Codable, Equatable, Sendable {
 
     public func resource(store: String, key: String) -> String? { stores[store]?[Self.keyID(key)]?.resource }
 
-    /// Records `key` → `resource` (a confirmed mapping); another key remembered for the same resource in this store
-    /// is dropped (one app per resource). A system or logon process is never recorded. Returns whether anything
-    /// changed.
+    /// Records `key` → `resource` (a confirmed launch mapping, which is still a guess, D172): it only adds an entry.
+    /// Nothing changes while `key` is remembered as another resource or another key is remembered for `resource`
+    /// (one app per resource); such an entry goes only when the real app publishes its name (`confirm`). A system or
+    /// logon process is never recorded. Returns whether anything changed.
     @discardableResult
     public mutating func remember(store: String, key: String, resource: String, executable: String?) -> Bool {
         guard !AppNaming.isSystemProcess(executable) else { return false }
         let id = Self.keyID(key)
         var map = stores[store] ?? [:]
+        let wanted = AppNaming.normalized(resource)
+        if let own = map[id], AppNaming.normalized(own.resource) != wanted { return false }
+        if map.contains(where: { $0.key != id && AppNaming.normalized($0.value.resource) == wanted }) { return false }
         let before = map
-        map = map.filter { $0.key == id || AppNaming.normalized($0.value.resource) != AppNaming.normalized(resource) }
         map[id] = Entry(resource: resource, executable: executable?.lowercased())
         stores[store] = map
         return map != before
