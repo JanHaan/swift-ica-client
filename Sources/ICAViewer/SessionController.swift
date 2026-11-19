@@ -1319,7 +1319,7 @@ final class SessionController: NSObject {
 
     // MARK: Webcam (docs/98b)
 
-    /// Camera on (Settings, default off; ICA_WEBCAM overrides): announce CTXMM; nil: no module, no HDX camera.
+    /// Camera on (Settings, default on since D169; ICA_WEBCAM overrides): announce CTXMM; nil: no module, no HDX camera.
     static func webcamConfig() -> WebcamEngine.Config? {
         let settings = WebcamSettings.load()
         guard let config = settings.engineConfig else {

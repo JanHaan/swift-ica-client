@@ -129,10 +129,19 @@ func webcamCreate(major: UInt32 = 1, minor: UInt32 = 1, devicePath: String? = ""
         #expect(modules[0].indices.contains { i in i + bind.count <= modules[0].count && Array(modules[0][i..<i + bind.count]) == bind })
     }
 
-    @Test func settingDefaultsOffAndAnnouncesNothing() {
-        let defaults = UserDefaults(suiteName: "webcam-test-\(UUID().uuidString)")!
-        #expect(!WebcamSettings.defaultEnabled)
-        #expect(WebcamSettings.load(defaults: defaults, env: [:]).engineConfig == nil)
+    /// docs/98b §10.5, D169: on by default; the environment and a stored value win; off announces nothing.
+    @Test func settingDefaultsOnAndStoredOffWins() {
+        let name = "webcam-test-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        #expect(WebcamSettings.defaultEnabled)
+        #expect(WebcamSettings.load(defaults: defaults, env: [:]).enabled)
+        #expect(WebcamSettings.load(defaults: defaults, env: [:]).engineConfig != nil)
+        #expect(WebcamSettings.load(defaults: defaults, env: ["ICA_WEBCAM": "0"]).engineConfig == nil)
+        var off = WebcamSettings()
+        off.enabled = false
+        off.save(to: defaults)
+        #expect(WebcamSettings.load(defaults: defaults, env: [:]).engineConfig == nil)   // a stored off beats the default
         #expect(WebcamSettings.load(defaults: defaults, env: ["ICA_WEBCAM": "1"]).engineConfig != nil)
         var on = WebcamSettings()
         on.enabled = true

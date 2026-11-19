@@ -21,10 +21,17 @@ To never pass the microphone, clear **Pass the microphone to the session** in **
 
 ## Webcam
 
-The webcam is **off by default**. In **Settings > Devices**, tick **Pass the camera to the session** and, if you have several cameras, pick one in the list below it (the default is **Automatic (system default)**). macOS asks for permission the first time a remote app starts the camera.
+The webcam is **on by default**. To use it, for example for a video call in a remote app:
+
+1. Start a session and start the camera in the remote app.
+2. The first time, macOS asks whether ICA Viewer may use the camera. Click **Allow**. The remote app waits for your answer.
+
+If you have several cameras, pick one in **Settings > Devices** in the list below **Pass the camera to the session** (the default is **Automatic (system default)**).
 
 - The camera is used only while a remote app uses it. A camera icon appears in the menu bar. Click it to see **Camera: in use** and **Disable Camera for This Session**.
-- **Only 32-bit Windows apps can use this webcam path.** Modern 64-bit apps (for example Windows Camera, Teams or browsers) will not see the camera.
+- Remote apps see it as **Citrix HDX Web Camera**. It was tried with 32-bit and 64-bit Windows apps and with Microsoft Edge.
+- If you refused the permission, ICA Viewer says so and offers **Open Privacy Settings**; allow ICA Viewer under **System Settings > Privacy & Security > Camera**.
+- To never pass the camera, clear **Pass the camera to the session** in **Settings > Devices** ([Settings](12-settings.md#audio-and-camera)); the change applies from the next time you connect.
 - The camera passes through as video that ICA Viewer encodes on your Mac. It has not been tried with every kind of camera.
 
 The lab used for this manual has no microphone or camera, so these two features have no screenshots.

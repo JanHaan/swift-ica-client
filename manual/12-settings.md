@@ -59,7 +59,7 @@ Secrets are stored only in the Keychain on this Mac, never in iCloud. See [Signi
 
 - **Play session sounds** (on by default). The volume follows the Mac.
 - **Pass the microphone to the session** (on by default): only while a session app records; macOS asks the first time. See [Audio, microphone and webcam](08-audio-video.md).
-- **Pass the camera to the session** (off by default), with a list of cameras (**Automatic (system default)** or a named camera). Only while a session app uses it; 32-bit apps only. See [Audio, microphone and webcam](08-audio-video.md).
+- **Pass the camera to the session** (on by default), with a list of cameras (**Automatic (system default)** or a named camera). Only while a session app uses it; macOS asks the first time. See [Audio, microphone and webcam](08-audio-video.md).
 
 ## Display
 

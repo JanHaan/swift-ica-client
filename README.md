@@ -53,8 +53,9 @@ The screenshots come from a test lab (macOS VM, example user and apps).
 - **Sessions survive trouble:** short network drops, automatic reconnect after longer ones, a
   Connection Center to reconnect, disconnect or log off, and a notice for features the server blocks.
 - **Clipboard:** text, images, rich text, and files and folders both ways (large copies with progress).
-- **Client drive, PDF printing, audio playback and the microphone** (on by default; used only while a
-  remote app records, after macOS asks once), Retina-sharp display, keyboard layout of the Mac.
+- **Client drive, PDF printing, audio playback, the microphone and the webcam** (both on by default; used
+  only while a remote app records or uses the camera, after macOS asks once), Retina-sharp display, keyboard
+  layout of the Mac.
 - A Mac-style interface (Settings panes, menus, VoiceOver), English and German, and a scrubbed
   **Report a Problem** (Help menu): nothing is sent unless you submit it, and you see exactly what it
   contains first.
@@ -64,8 +65,8 @@ The screenshots come from a test lab (macOS VM, example user and apps).
 Verified live means run against a test lab. See [FEATURES.md](FEATURES.md) for the comparison with
 the official clients.
 
-- **Not verified:** the **webcam** with a real camera. The automatic reconnect after a long outage has
-  not been tried by hand on a real Wi-Fi drop, and a keyboard layout switch has been checked in a test
+- **Not verified by hand:** the automatic reconnect after a long outage has
+  not been tried on a real Wi-Fi drop, and a keyboard layout switch has been checked in a test
   VM, not by hand.
 - **Limits:** a published desktop has a fixed size and one screen; HTML on the clipboard is filtered by
   the server; large copies are slow where the server paces file transfers.

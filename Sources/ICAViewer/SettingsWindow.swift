@@ -48,8 +48,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     static let micHint = Text(en: "Only while a session app records.", de: "Nur während eine Sitzungs-App aufnimmt.")
     static let cameraTitle = Text(en: "Pass the camera to the session", de: "Kamera an die Sitzung weitergeben")
     static let cameraAutomatic = Text(en: "Automatic (system default)", de: "Automatisch (Systemstandard)")
-    static let cameraHint = Text(en: "Only while a session app uses it; 32-bit apps only.",
-                                 de: "Nur während eine Sitzungs-App sie nutzt; nur 32-Bit-Apps.")
+    static let cameraHint = Text(en: "Only while a session app uses it.", de: "Nur während eine Sitzungs-App sie nutzt.")
     static let compressTitle = Text(en: "Compress screen data", de: "Bildschirmdaten komprimieren")
     static let compressHint = Text(en: "The server sends about a quarter of the data; useful on slow connections. Applies at the next connect.",
                                    de: "Der Server sendet etwa ein Viertel der Daten; hilfreich bei langsamen Verbindungen. Gilt ab der nächsten Verbindung.")

@@ -1,11 +1,12 @@
 import Foundation
 
-/// The camera setting (docs/98b §10.5): pass the camera to the session, default **off** until verified live. When off,
-/// the CTXMM module is not announced, so the host shows no HDX camera. The camera choice (by unique id, automatic =
+/// The camera setting (docs/98b §10.5): pass the camera to the session, default **on** (D169, the user's decision after
+/// D166/D168 verified it live; macOS's own prompt at the first use is the consent). When off, the CTXMM module is not
+/// announced, so the host shows no HDX camera. A stored value wins over the default. The camera choice (by unique id, automatic =
 /// system default) is read when a session starts. Both apply at the next connect.
 public struct WebcamSettings: Equatable, Sendable {
-    /// §10.5: "default off until verified live".
-    public static let defaultEnabled = false
+    /// §10.5: on by default (D169), as the microphone (D163).
+    public static let defaultEnabled = true
 
     public enum Source: String, Sendable {
         /// The Mac camera (app only).
