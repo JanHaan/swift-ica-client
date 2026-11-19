@@ -517,17 +517,18 @@ case "camprobe":
     }
 
 case "chromaprobe":
-    // icactl chromaprobe [seconds] — 4:2:0 vs 4:4:4 H.264 on moving content (backlog 1.4, ChromaProbe.swift): mac-D's
+    // icactl chromaprobe [seconds] [noise|scroll] — 4:2:0 vs 4:4:4 H.264 on moving content (backlog 1.4, ChromaProbe.swift): mac-D's
     // noise window in the lab's "Command Prompt"; chroma inside vs across 2×2 blocks; logoff. Lab only.
     guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("chromaprobe needs ICA_ALLOW_ANY_RESOURCE=1 (lab)") }
     let chromaSeconds = args.first.flatMap(Int.init) ?? 24
+    let chromaPattern = args.dropFirst().first ?? "noise"   // noise | scroll (scripts/vda/edt-noise.ps1)
     let store = storeClient()
     do {
         let resources = try await store.resources()
         guard let resource = resources.first(where: { $0.name == "Command Prompt" }) else { fail("no resource named Command Prompt") }
         guard let ica = ICAFile(text: try await testLaunchICA(store, resource)) else { fail("not an ICA file") }
         try http.saveCookies(to: cookiePath)
-        try await runChromaProbe(ica: ica, seconds: chromaSeconds)
+        try await runChromaProbe(ica: ica, seconds: chromaSeconds, pattern: chromaPattern)
     } catch {
         fail("\(error)")
     }

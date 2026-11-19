@@ -485,7 +485,7 @@ final class SessionController: NSObject {
         let display = session.wd.configuration.display
         layout.logLines.forEach(vlog)
         if let note = layout.note { vlog("scaling: \(scalingNoteText(note, context: .current, english: true))") }
-        vlog("session \(logName(name)): \(layout.monitors.count) screen(s), display \(display.width)x\(display.height), cap 0x20 \(display.monitors.isEmpty ? [display.scalePercent] : display.monitors.map(\.scalePercent)) %, monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264)")
+        vlog("session \(logName(name)): \(layout.monitors.count) screen(s), display \(display.width)x\(display.height), cap 0x20 \(display.monitors.isEmpty ? [display.scalePercent] : display.monitors.map(\.scalePercent)) %, monitors \(session.seamless.monitors.map { "\($0.bounds.left),\($0.bounds.top) \($0.bounds.width)x\($0.bounds.height)" }), h264 caps \(display.advertiseH264), yuv444 \(display.advertiseH264 && (display.yuv444 ?? VideoDecodeSupport.advertiseYUV444))")
         try await session.start()
     }
 

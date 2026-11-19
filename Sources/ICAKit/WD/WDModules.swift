@@ -196,6 +196,9 @@ public struct WDDisplay: Sendable {
     /// Advertise the H.264 capability group (0x0D, 0x16, 0x17, 0x18, 0x1A, 0x1C). Off = only the
     /// "compatible mode" group, as a client without an H.264 decoder would send.
     public var advertiseH264 = true
+    /// Advertise YUV 4:4:4 H.264 (cap 0x1E, docs/40 §3.5.1; only with the H.264 group). Nil = when this Mac decodes
+    /// it (`VideoDecodeSupport.h264YUV444`, a real decode tested once per process) and `ICA_TW_YUV444` is not 0.
+    public var yuv444: Bool?
 
     public init(width: Int = 1920, height: Int = 1080) {
         self.width = width
@@ -484,7 +487,7 @@ public enum WDModules {
         return WDBuild.thinwire(sub: 0x1D, [UInt8(data.count & 0xff), UInt8(data.count >> 8)] + data)
     }
 
-    public static func thinwireCapabilities(scalePercent: UInt16, monitors: [WDMonitor], h264: Bool) -> [UInt8] {
+    public static func thinwireCapabilities(scalePercent: UInt16, monitors: [WDMonitor], h264: Bool, yuv444: Bool = false) -> [UInt8] {
         let scales = monitors.count > 1 ? monitors.map(\.scalePercent) : [scalePercent]
         var dpi: [UInt8] = [0x02, 0x00, UInt8(scales.count), 0x00]
         for sc in scales { dpi += [UInt8(sc & 0xff), UInt8(sc >> 8)] }
@@ -512,6 +515,9 @@ public enum WDModules {
             [0x08, 0x00, 0x17, 0x00, 0x02, 0x00, 0x00, 0x00],
             [0x05, 0x00, 0x1A, 0x00, 0x00],
         ] }
+        // H.264 colour formats: 0x05 as the HTML5 client sends with YUV 4:4:4 on (docs/40 §2.3, §3.5.1); the VDA then
+        // may send High 4:4:4 Predictive (0xC8 colour format 8). The stock Mac client sends 0x0D (bit 0x08 unknown).
+        if h264 && yuv444 { entries.append([0x06, 0x00, 0x1E, 0x00, 0x05, 0x00]) }
         return [0x00, UInt8(entries.count), 0x04, 0x00] + entries.flatMap { $0 }
     }
 
@@ -537,7 +543,8 @@ public enum WDModules {
         w.u8(0)
         w.u32(UInt32((1 << bits) / 12))
         w.u32(0)
-        let caps = thinwireCapabilities(scalePercent: display.scalePercent, monitors: display.monitors, h264: display.advertiseH264)
+        let caps = thinwireCapabilities(scalePercent: display.scalePercent, monitors: display.monitors, h264: display.advertiseH264,
+                                        yuv444: display.yuv444 ?? VideoDecodeSupport.advertiseYUV444)
         w.u16(UInt16(caps.count))
         w.reference(caps)
         return w.bytes()

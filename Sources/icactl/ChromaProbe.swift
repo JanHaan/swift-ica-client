@@ -10,7 +10,11 @@ import ICAKit
 /// **across** block borders (session coordinates). 4:2:0 shares one chroma sample per 2×2 block, so the inside
 /// difference collapses (ratio ≪ 1); 4:4:4 keeps independent chroma per pixel (ratio ≈ 1). Also reports H.264 pictures
 /// and decoder errors. No input besides the one command line; logoff at the end.
-func runChromaProbe(ica: ICAFile, seconds: Int) async throws {
+/// `pattern` scroll (backlog 2.2): the window shows scripts/vda/edt-noise.ps1's deterministic scrolling texture
+/// instead; every sampled window crop is matched against it (`ChromaMetric.matchScroll`) for a PSNR, after the window
+/// closed. Bytes received and this process's CPU time over the window are reported too (the VideoToolbox decoder
+/// service's CPU is not included).
+func runChromaProbe(ica: ICAFile, seconds: Int, pattern: String = "noise") async throws {
     setvbuf(stdout, nil, _IOLBF, 0)
     let env = ProcessInfo.processInfo.environment
     var config = WinstationDriver.Configuration()
@@ -62,9 +66,16 @@ func runChromaProbe(ica: ICAFile, seconds: Int) async throws {
     let found = await waitFor(session, 150) { logon.isFresh && consoleUp }
     let fresh = await onSession(session) { logon.isFresh }
     var ratios: [Double] = []
+    var crops: [(rgba: [UInt8], width: Int, height: Int)] = []
+    var window: (bytes: Int, cpu: Double, wall: Double)?
+    func cpuSeconds() -> Double {
+        var u = rusage()
+        getrusage(RUSAGE_SELF, &u)
+        return Double(u.ru_utime.tv_sec + u.ru_stime.tv_sec) + Double(u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1e6
+    }
     if found {
         try await Task.sleep(nanoseconds: 3_000_000_000)
-        let command = "powershell -nop -ep bypass -file C:\\Users\\Public\\edt-noise.ps1 -Seconds \(seconds)"
+        let command = "powershell -nop -ep bypass -file C:\\Users\\Public\\edt-noise.ps1 -Seconds \(seconds) -Pattern \(pattern)"
         say("type: \(command)")
         session.sendInput { wd in
             for unit in command.utf16 { wd.keyUnicode(unit, flags: []); wd.keyUnicode(unit, flags: .up) }
@@ -74,6 +85,7 @@ func runChromaProbe(ica: ICAFile, seconds: Int) async throws {
         if await waitFor(session, 30, { noiseWindow != nil }) {
             try await Task.sleep(nanoseconds: 2_000_000_000)
             let start = Date()
+            let (b0, c0) = (await onSession(session) { session.transport.status.bytesReceived }, cpuSeconds())
             while Date().timeIntervalSince(start) < Double(seconds) - 4, !session.isClosed {
                 let sample = await onSession(session) { () -> (Double, Double)? in
                     guard let id = noiseWindow, let w = seamless.model.windows[id], let fb = session.thinwire.framebuffer else { return nil }
@@ -94,12 +106,20 @@ func runChromaProbe(ica: ICAFile, seconds: Int) async throws {
                     try? png.write(to: url)
                     say("sample crop: \(url.path)")
                 }
+                if pattern == "scroll", crops.count < 12, let crop = await onSession(session, { () -> (rgba: [UInt8], width: Int, height: Int)? in
+                    guard let id = noiseWindow, let w = seamless.model.windows[id], let fb = session.thinwire.framebuffer else { return nil }
+                    let r = w.windowRect
+                    let c = fb.rgba(rect: TWRect(Int(r.left), Int(r.top), Int(r.right - r.left), Int(r.bottom - r.top)))
+                    return c.pixels.isEmpty ? nil : (c.pixels, c.rect.width, c.rect.height)
+                }) { crops.append(crop) }
                 if let (inside, across) = sample, across > 0 {
                     ratios.append(inside / across)
                     say(String(format: "chroma neighbour difference: inside 2×2 %.2f, across %.2f, ratio %.2f", inside, across, inside / across))
                 }
                 try await Task.sleep(nanoseconds: 2_000_000_000)
             }
+            let (b1, c1) = (await onSession(session) { session.transport.status.bytesReceived }, cpuSeconds())
+            window = (b1 - b0, c1 - c0, Date().timeIntervalSince(start))
         } else {
             say("no noise window within 30 s")
         }
@@ -124,10 +144,33 @@ func runChromaProbe(ica: ICAFile, seconds: Int) async throws {
     }
     let st = await onSession(session) { session.thinwire.stats }
     let median = ratios.sorted().dropFirst(ratios.count / 2).first ?? .nan
+    var psnrs: [Double] = [], stripes: [Double] = []
+    if let c = crops.first {
+        let url = sessionDir.appendingPathComponent("chromaprobe-crop-\(c.width)x\(c.height).rgba")
+        try? Data(c.rgba).write(to: url)
+        say("first window crop (raw RGBA): \(url.path)")
+    }
+    for (i, c) in crops.enumerated() {
+        if let m = ChromaMetric.matchScroll(rgba: c.rgba, width: c.width, height: c.height) {
+            psnrs.append(m.psnr); stripes.append(m.psnrStripes)
+            say(String(format: "scroll crop %d: texture at row %d, phase %d: PSNR %.1f dB (hash rows %.1f, stripe rows %.1f), %d px",
+                       i, m.top, m.phase, m.psnr, m.psnrNoise, m.psnrStripes, m.pixels))
+        } else {
+            say("scroll crop \(i): pattern not found")
+        }
+    }
     let verdict = ratios.isEmpty ? "no samples" : median < 0.5 ? "4:2:0-like (chroma shared per 2×2 block)" : "4:4:4-like (chroma per pixel)"
     say("\n=== chromaprobe summary ===")
     say("Thinwire: \(st.frames) frames, \(st.pictures) H.264 pictures, errors \(st.errors), resyncs \(st.resyncs); decoder log lines \(decoderLines.count)")
     say(String(format: "chroma ratio median %.2f over %d samples: %@", median, ratios.count, verdict))
+    if let window {
+        say(String(format: "noise window: %.1f s, received %d B (%.2f Mbit/s), process CPU %.2f s (%.0f %% of one core)",
+                   window.wall, window.bytes, Double(window.bytes) * 8 / window.wall / 1e6, window.cpu, window.cpu / window.wall * 100))
+    }
+    if !psnrs.isEmpty {
+        let mid = psnrs.sorted()[psnrs.count / 2], midS = stripes.sorted()[stripes.count / 2]
+        say(String(format: "scroll PSNR median %.1f dB (stripe rows %.1f dB) over %d of %d crops", mid, midS, psnrs.count, crops.count))
+    }
     say("end: \(ending)")
     let pass = fresh && !ratios.isEmpty && st.errors == 0 && ending.hasPrefix("logged off")
     say(String(format: "RESULT: %@ chromaprobe: %d H.264 pictures, errors %d, chroma ratio %.2f (%@), end: %@",

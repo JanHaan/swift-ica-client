@@ -706,7 +706,7 @@ public final class ThinwireEngine: VirtualChannelEngine {
         }
         guard let fb = framebuffer else { return logOnce("nofb", "Thinwire: drawing before INIT ignored") }
         if img.format >> 4 == 6 {
-            if img.colorFormat == 8 { logOnce("yuv444", "Thinwire: YUV 4:4:4 frames are not supported; decoding anyway") }
+            if img.colorFormat == 8 { logOnce("yuv444", "Thinwire: YUV 4:4:4 video (0xC8 colour format 8)") }
             let key = TWRect(img.origin.x, img.origin.y, img.width, img.height)
             let decoder: TWH264Decoder
             if let d = decoders[key] {
@@ -730,7 +730,9 @@ public final class ThinwireEngine: VirtualChannelEngine {
                 rects = [TWRect(0, 0, img.width, img.height)]
             }
             for rc in rects {
-                fb.draw(picture: picture, srcRect: rc, to: TWPoint(img.origin.x + rc.x, img.origin.y + rc.y))
+                // Colour format 8 (YUV 4:4:4) comes with red and blue exchanged (docs/40 §3.5.1, backlog 2.2).
+                fb.draw(picture: picture, srcRect: rc, to: TWPoint(img.origin.x + rc.x, img.origin.y + rc.y),
+                        swapRedBlue: img.colorFormat == 8)
             }
             pictureDecoded = true
         } else {

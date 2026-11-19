@@ -4,11 +4,12 @@ import Foundation
 public enum ThinwireCapabilities {
     /// The recommended client capability blob of §7 (with the u16 first-entry offset after the count,
     /// §9.5): v1's default set minus JPEG, selective H.264,
-    /// multi-monitor, YUV 4:4:4 and (for profile 2) text tracking.
+    /// multi-monitor, YUV 4:4:4 (unless `yuv444`) and (for profile 2) text tracking.
     /// - Parameters:
     ///   - profile: 2 (full-screen H.264) or 3 (H.264 plus lossless text overlays).
     ///   - dpiScale: 100 × the display scale factor, at least 100.
-    public static func recommendedBlob(profile: UInt32 = 2, dpiScale: UInt16 = 100) -> Data {
+    ///   - yuv444: add cap 0x1E (`05 00`, YUV 4:4:4 H.264), as `WDModules.thinwireCapabilities(yuv444:)`.
+    public static func recommendedBlob(profile: UInt32 = 2, dpiScale: UInt16 = 100, yuv444: Bool = false) -> Data {
         var entries: [(UInt16, [UInt8])] = [
             (0x20, [0x02, 0x00, 0x01, 0x00, UInt8(max(dpiScale, 100) & 0xff), UInt8(max(dpiScale, 100) >> 8)]),
             (0x04, []), (0x03, []), (0x08, []), (0x0E, []), (0x19, []),
@@ -21,6 +22,7 @@ public enum ThinwireCapabilities {
             (0x17, [UInt8(profile & 0xff), UInt8((profile >> 8) & 0xff), UInt8((profile >> 16) & 0xff), UInt8(profile >> 24)]),
             (0x1A, [0x00]),
         ]
+        if yuv444 { entries.append((0x1E, [0x05, 0x00])) }
         if profile >= 3 { entries.append((0x1B, [0x00, 0x00])) }
         var w = ByteWriter()
         w.u8(0)

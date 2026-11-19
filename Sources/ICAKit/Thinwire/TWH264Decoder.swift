@@ -7,6 +7,7 @@ import VideoToolbox
 /// Accepts Annex-B or 4-byte length-prefixed (AVCC) payloads, detected per payload, and feeds
 /// VideoToolbox AVCC samples. Parameter sets come from the stream; a change recreates the session.
 /// Decoding is synchronous: `decode` returns the picture for the payload, if any.
+/// Output: NV12 for 4:2:0 streams, '444v' (biplanar 4:4:4) when the SPS says chroma_format_idc 3 (§3.5.1).
 final class TWH264Decoder {
     enum Framing: String { case annexB = "Annex-B", avcc = "AVCC" }
 
@@ -18,6 +19,9 @@ final class TWH264Decoder {
     private var parametersChanged = false
     var log: ((String) -> Void)?
     private(set) var framesDecoded = 0
+    /// The SPS of the current session, and whether VideoToolbox runs it in hardware.
+    private(set) var spsInfo: H264SPSInfo?
+    private(set) var usingHardware: Bool?
 
     deinit { invalidate() }
 
@@ -170,8 +174,12 @@ final class TWH264Decoder {
             return false
         }
         formatDescription = fd
+        let info = H264SPSInfo.parse(sps)
+        spsInfo = info
+        // 4:4:4 keeps its own chroma plane; anything else is decoded to NV12 as before.
+        let yuv444 = info?.chromaFormatIdc == 3
         let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferPixelFormatTypeKey: yuv444 ? kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
         ]
         var s: VTDecompressionSession?
@@ -183,8 +191,12 @@ final class TWH264Decoder {
         }
         VTSessionSetProperty(s, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         session = s
+        var hw: CFTypeRef?
+        usingHardware = VTSessionCopyProperty(s, key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, allocator: nil,
+                                              valueOut: &hw) == noErr ? (hw as? Bool) : nil
         let dims = CMVideoFormatDescriptionGetDimensions(fd)
-        log?("Thinwire H.264: decoder session \(dims.width)x\(dims.height), \(framing?.rawValue ?? "?") framing")
+        let profile = info.map { "profile \($0.profileIdc), \($0.chromaFormatIdc == 3 ? "4:4:4" : $0.chromaFormatIdc == 1 ? "4:2:0" : "chroma \($0.chromaFormatIdc)")" } ?? "SPS ?"
+        log?("Thinwire H.264: decoder session \(dims.width)x\(dims.height), \(profile), \(usingHardware.map { $0 ? "hardware" : "software" } ?? "?"), \(framing?.rawValue ?? "?") framing")
         return true
     }
 

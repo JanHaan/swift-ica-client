@@ -173,6 +173,24 @@ public final class Framebuffer {
         return UnsafeRawPointer(back + y * rowBytes + x * 4).loadUnaligned(as: UInt32.self).littleEndian
     }
 
+    /// Front-surface pixels of `rect` (clipped) as R, G, B, A bytes, row-major, no colour management (probes).
+    public func rgba(rect: TWRect) -> (pixels: [UInt8], rect: TWRect) {
+        let r = rect.intersection(TWRect(0, 0, width, height))
+        guard !r.isEmpty, let surface = ioSurface else { return ([], r) }
+        IOSurfaceLock(surface, .readOnly, nil)
+        defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+        let front = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: UInt8.self), rb = IOSurfaceGetBytesPerRow(surface)
+        var out = [UInt8](repeating: 255, count: r.width * r.height * 4)
+        for row in 0..<r.height {
+            let src = front + (r.y + row) * rb + r.x * 4
+            for x in 0..<r.width {
+                let o = (row * r.width + x) * 4
+                out[o] = src[4 * x + 2]; out[o + 1] = src[4 * x + 1]; out[o + 2] = src[4 * x]
+            }
+        }
+        return (out, r)
+    }
+
     /// Snapshot of the front surface (or a sub-rect) as a CGImage (copies the pixels).
     public func makeImage(rect: CGRect? = nil) -> CGImage? {
         let r = (rect.map { TWRect(Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)) } ?? TWRect(0, 0, width, height))
@@ -311,8 +329,10 @@ public final class Framebuffer {
         markDirty(d)
     }
 
-    /// Copies `srcRect` of a decoded video picture to `dst`. Accepts BGRA or NV12 (420v/420f).
-    func draw(picture pb: CVPixelBuffer, srcRect: TWRect, to dst: TWPoint) {
+    /// Copies `srcRect` of a decoded video picture to `dst`. Accepts BGRA, NV12 (420v/420f) or biplanar 4:4:4 (444v/444f).
+    /// `swapRedBlue`: the picture carries red where blue belongs and vice versa, as the VDA's YUV 4:4:4 video does
+    /// (0xC8 colour format 8, docs/40 §3.5.1).
+    func draw(picture pb: CVPixelBuffer, srcRect: TWRect, to dst: TWPoint, swapRedBlue: Bool = false) {
         let pw = CVPixelBufferGetWidth(pb), ph = CVPixelBufferGetHeight(pb)
         var s = srcRect.intersection(TWRect(0, 0, pw, ph))
         // Clip against the surface too.
@@ -334,7 +354,16 @@ public final class Framebuffer {
                 }
             }
         case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
-            convertNV12(pb, fullRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, s: s, d: d)
+            convertNV12(pb, fullRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, s: s, d: d, swapRedBlue: swapRedBlue)
+        case kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_444YpCbCr8BiPlanarFullRange:
+            guard let yp = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let cp = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
+            let yrb = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), crb = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+            withPixels { p, rb in
+                Framebuffer.convert444(y: yp.assumingMemoryBound(to: UInt8.self) + s.y * yrb + s.x, yRowBytes: yrb,
+                                       cbcr: cp.assumingMemoryBound(to: UInt8.self) + s.y * crb + s.x * 2, cbcrRowBytes: crb,
+                                       bgra: p + d.y * rb + d.x * 4, bgraRowBytes: rb, width: s.width, height: s.height,
+                                       fullRange: format == kCVPixelFormatType_444YpCbCr8BiPlanarFullRange, swapRedBlue: swapRedBlue)
+            }
         default:
             return
         }
@@ -356,9 +385,32 @@ public final class Framebuffer {
         return info
     }
 
+    /// Biplanar 4:4:4 (a Y plane, then one interleaved Cb,Cr pair per pixel) → opaque BGRA, BT.601 as for NV12
+    /// (docs/40 §5.1: 1.164, 1.596, 0.392, 0.813, 2.017 in limited range), 8-bit fixed point. vImage has no
+    /// biplanar 4:4:4 converter.
+    static func convert444(y: UnsafePointer<UInt8>, yRowBytes: Int, cbcr: UnsafePointer<UInt8>, cbcrRowBytes: Int,
+                           bgra: UnsafeMutablePointer<UInt8>, bgraRowBytes: Int, width: Int, height: Int, fullRange: Bool,
+                           swapRedBlue: Bool = false) {
+        // Limited: 298/256 = 1.164, 409 = 1.598, 100 = 0.391, 208 = 0.813, 516 = 2.016. Full: 256, 359, 88, 183, 454.
+        let (ys, yo, kr, kgb, kgr, kb) = fullRange ? (256, 0, 359, 88, 183, 454) : (298, 16, 409, 100, 208, 516)
+        @inline(__always) func clamp(_ v: Int) -> UInt8 { UInt8(truncatingIfNeeded: v < 0 ? 0 : v > 255 ? 255 : v) }
+        let bo = swapRedBlue ? 2 : 0, ro = swapRedBlue ? 0 : 2
+        for row in 0..<height {
+            let yr = y + row * yRowBytes, cr = cbcr + row * cbcrRowBytes, out = bgra + row * bgraRowBytes
+            for x in 0..<width {
+                let l = (Int(yr[x]) - yo) * ys + 128
+                let u = Int(cr[2 * x]) - 128, v = Int(cr[2 * x + 1]) - 128
+                out[4 * x + bo] = clamp((l + kb * u) >> 8)
+                out[4 * x + 1] = clamp((l - kgb * u - kgr * v) >> 8)
+                out[4 * x + ro] = clamp((l + kr * v) >> 8)
+                out[4 * x + 3] = 255
+            }
+        }
+    }
+
     /// NV12 region → BGRA. The region is widened to even coordinates for the chroma grid,
     /// converted into a scratch buffer, and the exact rect is copied out.
-    private func convertNV12(_ pb: CVPixelBuffer, fullRange: Bool, s: TWRect, d: TWRect) {
+    private func convertNV12(_ pb: CVPixelBuffer, fullRange: Bool, s: TWRect, d: TWRect, swapRedBlue: Bool = false) {
         guard var info = conversionInfo(fullRange: fullRange),
               let y0p = CVPixelBufferGetBaseAddressOfPlane(pb, 0),
               let c0p = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
@@ -370,7 +422,7 @@ public final class Framebuffer {
         let yrb = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), crb = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
         var srcY = vImage_Buffer(data: y0p + ay * yrb + ax, height: vImagePixelCount(ah), width: vImagePixelCount(aw), rowBytes: yrb)
         var srcC = vImage_Buffer(data: c0p + (ay / 2) * crb + ax, height: vImagePixelCount(ah / 2), width: vImagePixelCount(aw / 2), rowBytes: crb)
-        let permute: [UInt8] = [3, 2, 1, 0]
+        let permute: [UInt8] = swapRedBlue ? [3, 0, 1, 2] : [3, 2, 1, 0]   // ARGB → BGRA, or → RGBA
         let direct = ax == s.x && ay == s.y && aw == s.width && ah == s.height
         if direct {
             withPixels { p, rb in
