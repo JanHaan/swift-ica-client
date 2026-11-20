@@ -21,6 +21,8 @@ done
 cask=$tap/Casks/icaviewer.rb
 [ -f "$cask" ] || { echo "no $cask (set ICA_TAP_DIR)" >&2; exit 1; }
 git -C "$tap" diff --quiet HEAD -- || { echo "the tap has uncommitted changes; commit or stash them first" >&2; exit 1; }
+# The tap holds other formulae too (pushed from elsewhere): start from its current main, never overwrite it.
+git -C "$tap" pull -q --rebase origin main || { echo "could not bring the tap up to date with origin/main" >&2; exit 1; }
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 dmg=swift-ica-client-$version.dmg
@@ -68,7 +70,7 @@ else
     git -C "$tap" log --oneline -1
 fi
 if [ $push = 1 ]; then
-    git -C "$tap" push
+    git -C "$tap" pull -q --rebase origin main && git -C "$tap" push
 else
     echo "not pushed: review, then run 'git -C $tap push' (or rerun with --push)"
 fi
