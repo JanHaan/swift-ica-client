@@ -52,6 +52,8 @@ Tick **Remember in Keychain** before you sign in. ICA Viewer then keeps your pas
 
 If the app starts without a saved login, or the server asks you to sign in again, choose **File > Sign In…**.
 
+Your sign-in at the server ends after a while (at a gateway often after about 90 minutes). When you next open an app, open the Connection Center or click its Refresh, ICA Viewer signs you in again by itself with the saved login (Touch ID or the Mac password may be asked) and carries on. Without a saved login, or if the server does not accept it, the sign-in window opens.
+
 ## Sign out
 
 **File > Sign Out** ends your sign-in at the server (the store and, if you came through one, the gateway) and removes the sign-in cookies from your Mac. Sessions that are already open are not touched; they keep running. **Forget All Saved Credentials** in **Settings > Account** does the same and also deletes the saved password and TOTP secret.

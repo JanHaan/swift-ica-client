@@ -156,12 +156,12 @@ func runLaunchAfterIdle(_ args: [String]) async {
     // 3. The idle: no request at all.
     say(String(format: "idle %.1f min: no requests until %@", minutes,
                ISO8601DateFormatter().string(from: Date().addingTimeInterval(minutes * 60))))
-    var left = minutes * 60
-    while left > 0 {
-        let step = min(left, 600)
-        try? await Task.sleep(for: .seconds(step))
-        left -= step
-        if left > 0 { say(String(format: "idle: %.1f min left", left / 60)) }
+    // Against a deadline: a background process's sleeps run late (timer coalescing; 95 min took 101 on 2026-11-20).
+    let idleEnd = Date().addingTimeInterval(minutes * 60)
+    while case let left = idleEnd.timeIntervalSinceNow, left > 0 {
+        try? await Task.sleep(for: .seconds(min(left, 600)))
+        let rest = idleEnd.timeIntervalSinceNow
+        if rest > 1 { say(String(format: "idle: %.1f min left", rest / 60)) }
     }
 
     // 4. The first requests after the idle, at the same moment.
