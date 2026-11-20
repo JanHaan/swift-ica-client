@@ -667,9 +667,14 @@ final class HostFileDownload {
         let missingNote = missing > 0 ? " " + loc("\(missing) files could not be copied.", "\(missing) Dateien konnten nicht kopiert werden.") : ""
         if publish(urls, startCount) {
             window?.finish(loc("The files are ready: paste them in Finder.", "Die Dateien sind bereit: im Finder einsetzen.") + missingNote, closeAfter: missing > 0 ? nil : 4)
+        } else if let moved = Self.saveToDownloads(folder) {
+            window?.finish(loc("The Mac clipboard changed meanwhile, so the files were saved to Downloads.",
+                               "Die Mac-Zwischenablage hat sich inzwischen geändert, die Dateien wurden daher in Downloads gesichert.") + missingNote,
+                           reveal: moved)
         } else {
-            window?.finish(loc("The files are ready, but the Mac clipboard changed meanwhile.", "Die Dateien sind bereit, aber die Mac-Zwischenablage hat sich inzwischen geändert.") + missingNote,
-                           reveal: folder)
+            window?.finish(loc("The files are ready, but the Mac clipboard changed meanwhile and they could not be saved to Downloads.",
+                               "Die Dateien sind bereit, aber die Mac-Zwischenablage hat sich inzwischen geändert und sie konnten nicht in Downloads gesichert werden.") + missingNote,
+                           reveal: [folder])
         }
         end()
     }
@@ -694,6 +699,19 @@ final class HostFileDownload {
         w?.finish(loc("The session ended before the files were copied.", "Die Sitzung wurde beendet, bevor die Dateien kopiert waren."))
     }
 
+    /// The staging folder's items into ~/Downloads (the staging folder is removed at quit); nil if that failed.
+    private static func saveToDownloads(_ folder: URL) -> [URL]? {
+        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return nil }
+        do {
+            let moved = try ClipboardFileSaver.move(from: folder, to: downloads)
+            vlog("clipboard files: the Mac clipboard changed during the download: \(moved.count) items saved to Downloads")
+            return moved
+        } catch {
+            vlog("clipboard files: saving to Downloads failed: \(error)")
+            return nil
+        }
+    }
+
     private func end() {
         if Self.current === self { Self.current = nil }
         ended()
@@ -713,6 +731,9 @@ final class HostFileDownload {
 /// (and "Show in Finder" when the files could not go on the clipboard). A floating utility panel outside the window
 /// cycle; closing it while the copy runs cancels it.
 final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
+    /// The buttons' target and the panel's delegate are this object, which the controller drops at `end()` while the
+    /// result is still on screen: a visible window keeps itself alive here until it is closed.
+    private static let open = ObjectKeeper()
     var onCancel: () -> Void = {}
     private let panel: NSPanel
     private let label = NSTextField(wrappingLabelWithString: "")
@@ -771,6 +792,7 @@ final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
             panel.setContentSize(panel.contentView?.fittingSize ?? NSSize(width: 420, height: 130))
             panel.center()
         }
+        Self.open.keep(self)
         panel.orderFrontRegardless()
     }
 
@@ -806,7 +828,7 @@ final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
         show()
     }
 
-    func finish(_ text: String, reveal: URL? = nil, closeAfter: TimeInterval? = nil) {
+    func finish(_ text: String, reveal: [URL]? = nil, closeAfter: TimeInterval? = nil) {
         running = false
         label.stringValue = text
         bar.isHidden = true
@@ -814,15 +836,16 @@ final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
         primary.keyEquivalent = "\r"
         buttons(primary: "OK", { [weak self] in self?.close() },
                 secondary: reveal == nil ? nil : loc("Show in Finder", "Im Finder zeigen"), {
-                    if let reveal { NSWorkspace.shared.activateFileViewerSelecting([reveal]) }
+                    if let reveal { NSWorkspace.shared.activateFileViewerSelecting(reveal) }
                 })
         show()
-        if let closeAfter { DispatchQueue.main.asyncAfter(deadline: .now() + closeAfter) { [weak self] in if self?.running == false { self?.close() } } }
+        if let closeAfter { DispatchQueue.main.asyncAfter(deadline: .now() + closeAfter) { if !self.running { self.close() } } }
     }
 
     func close() {
         running = false
         panel.orderOut(nil)
+        Self.open.release(self)
     }
 
     @objc private func primaryClicked() { primaryAction() }
@@ -830,7 +853,7 @@ final class ClipboardDownloadWindow: NSObject, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if running || !secondary.isHidden && primary.title == loc("Copy", "Kopieren") { onCancel() }
-        panel.orderOut(nil)
+        close()
         return false
     }
 }
