@@ -66,7 +66,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         self.service = service
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = loc("Sign In", "Anmelden")
+        window.title = Self.title(for: nil)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -92,6 +92,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         form = LogonForm.demo()
         draft = ["login": Demo.username, "passwd": Demo.password, "passwd1": ""]
         gatewayField.stringValue = "https://" + Demo.gateway
+        window?.title = Self.title(for: URL(string: "https://" + Demo.gateway))
         remember = false
         render()
         showWindow(nil)
@@ -128,6 +129,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         draft = [:]
         let host = service.gateway?.host
         gatewayField.stringValue = Self.shown(service.gateway, kind: service.accountKind)
+        window?.title = Self.title(for: service.gateway)
         remember = host.map { credentials.saved(host: $0).hasPassword } ?? false
         askSecret = false
         showWindow(nil)
@@ -150,6 +152,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
                 await MainActor.run {
                     self?.logon = logon
                     self?.gatewayField.stringValue = Self.shown(service.gateway, kind: service.accountKind)
+                    self?.window?.title = Self.title(for: service.gateway)
                 }
                 let form = try await logon.begin()
                 guard let self, !Task.isCancelled else { return }
@@ -354,6 +357,11 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         cancel(nil)
         return false
+    }
+
+    /// The window title for the address the credentials go to (nil: not known yet).
+    static func title(for url: URL?) -> String {
+        LoginSettings.signInTitle(for: url, german: loc("en", "de") == "de")
     }
 
     /// The address as shown in the field: a gateway by host, a store with its path (and scheme if plain HTTP).
@@ -650,6 +658,9 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         stack.widthAnchor.constraint(equalToConstant: 440).isActive = true
         window.contentView = stack
         window.setContentSize(stack.fittingSize)
+        // The form is rebuilt for every step: Tab and Shift-Tab follow the visual order of the new fields.
+        window.autorecalculatesKeyViewLoop = true
+        window.recalculateKeyViewLoop()
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         updateSubmitState()
         if demo { submitButton?.isEnabled = true; return }

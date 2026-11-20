@@ -38,6 +38,17 @@ public struct LoginSettings: Equatable {
         accountKind == .storeFront ? Self.storeFrontURL(from: gatewayURL) : Self.gatewayURL(from: gatewayURL)
     }
 
+    /// The sign-in window's title (a password manager's auto-type matches on it): "Sign In to host — ICA Viewer",
+    /// the host only (no scheme, no path, the port only when it is not the scheme's default); without an address
+    /// "Sign In — ICA Viewer". `german` selects "Bei host anmelden" / "Anmelden".
+    public static func signInTitle(for url: URL?, german: Bool) -> String {
+        guard let host = url?.host, !host.isEmpty else { return german ? "Anmelden — ICA Viewer" : "Sign In — ICA Viewer" }
+        let isHTTP = url?.scheme?.lowercased() == "http"
+        let port = url?.port.flatMap { $0 == (isHTTP ? 80 : 443) ? nil : ":\($0)" } ?? ""
+        let shown = host + port
+        return german ? "Bei \(shown) anmelden — ICA Viewer" : "Sign In to \(shown) — ICA Viewer"
+    }
+
     /// A typed address before probing: a gateway root, unless it names a store path or plain HTTP (docs/16 §3).
     public static func accountURL(from text: String) -> URL? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -8,7 +8,7 @@ Enter the address of a **gateway** and ICA Viewer signs in through it. Enter the
 
 ## Enter the address
 
-1. Open ICA Viewer. The **Sign In** window asks for the address.
+1. Open ICA Viewer. The **Sign In** window asks for the address. Its title is "Sign In — ICA Viewer"; once the address is known it reads "Sign In to *host* — ICA Viewer", which a password manager can match.
 2. Type the address of your gateway (for example `gateway.example.com`) or of your store (for example `storefront.example.com/Citrix/StoreWeb`). You get this from your IT department.
 3. Press Return or click **Continue**.
 
