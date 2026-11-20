@@ -1,6 +1,6 @@
 # ICA Viewer User Manual
 
-Version <!-- version -->0.11.1<!-- /version -->
+Version <!-- version -->0.11.2<!-- /version -->
 
 ICA Viewer is a Mac app for working with Windows apps that your organization publishes through Citrix. Each remote app opens in its own Mac window, with its own Dock icon, and works with Cmd-Tab, Mission Control and your window switcher like any local app.
 

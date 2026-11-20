@@ -44,7 +44,7 @@ product and not a replacement for the official client. Expect gaps; see [Status]
 
 The screenshots come from a test lab (macOS VM, example user and apps).
 
-## What it does (0.11.1)
+## What it does (0.11.2)
 
 - **Sign in** through a gateway (user name, password, one-time code) or to a StoreFront store
   directly; optional Keychain storage with Touch ID; Sign Out.

@@ -53,4 +53,4 @@ Your organization decides which of these the server allows. If a feature is bloc
 - Try plain text first to see whether the clipboard connection works at all.
 - Check that the file or folder is in the *selection* of the app you copy from before you press the copy shortcut.
 - Check that the feature is not blocked by the server (Connection Center).
-- A changed Mac clipboard replaces what you copied in the session. If you copy something else on the Mac while a large copy runs, ICA Viewer finishes the copy but does not overwrite your new clipboard.
+- A changed Mac clipboard replaces what you copied in the session. If you copy something else on the Mac while a large copy runs, ICA Viewer finishes the copy but does not overwrite your new clipboard: it saves the files in your **Downloads** folder instead, and **Show in Finder** shows them there.
