@@ -97,9 +97,11 @@ public enum LogonStep: Sendable {
 /// A forms logon conversation (Common Forms protocol): NetScaler nFactor at the gateway (`GatewayLogon`) or explicit
 /// authentication at a StoreFront store (`StoreFrontLogon`, docs/16 §2). The login window drives either.
 public protocol FormLogonFlow {
+    /// The client the logon runs on: for a sign-in beside a running session its own (`HTTPClient.signInClient`),
+    /// whose cookies the session takes over on success (docs/10 D.6.3).
+    var http: HTTPClient { get }
     func begin() async throws -> LogonForm
     func submit(_ form: LogonForm, values: [String: String], button: String?) async throws -> LogonStep
-    func cancel(_ form: LogonForm) async
 }
 
 /// Logon at a NetScaler Gateway with nFactor ("ExplicitForms" / Common Forms protocol).
@@ -207,12 +209,6 @@ public struct GatewayLogon: FormLogonFlow {
             _ = try await send("GET", "cgi/setclient?wica")
         }
         return next
-    }
-
-    /// Abandons a logon in progress (best effort).
-    public func cancel(_ form: LogonForm) async {
-        guard let path = form.cancelPostBack else { return }
-        _ = try? await send("POST", path, headers: Self.headers)
     }
 
     /// Non-interactive logon. Never re-posts a password: if the gateway asks again for a credential

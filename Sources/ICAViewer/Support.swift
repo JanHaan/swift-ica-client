@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ICAKit
+import LocalAuthentication
 
 /// Project paths. The viewer is a personal tool built from this checkout: `.env` and `.session/` live
 /// in the checkout (override with ICA_ROOT / ICA_ENV). Without ICA_ROOT the checkout is the nearest
@@ -301,21 +302,45 @@ final class StoreService: @unchecked Sendable {
     /// A gateway account (or one not probed yet, which counts as a gateway): its sessions connect over TLS only,
     /// never plain TCP (ICAConnectPlan.refusal, security review F-05). Main thread.
     nonisolated(unsafe) static var sessionsRequireTLS = true
-    /// The login window; set by the app delegate. Throws if the user cancels.
-    var interactiveLogon: (@MainActor () async throws -> Void)?
+    /// The login window; set by the app delegate. `autoSubmit` false: never submit a complete prefill by itself (the
+    /// saved login was just refused). `note`: shown above the first form. Throws `LoginCancelled` if the user cancels.
+    var interactiveLogon: (@MainActor (_ autoSubmit: Bool, _ note: String?) async throws -> Void)?
+    /// Every store request of the account renews an expired sign-in through this, one renewal at a time (docs/10 D.6).
+    private(set) lazy var renewal: SignInRenewal = {
+        let renewal = SignInRenewal { [weak self] expiry in try await self?.renew(expiry) }
+        renewal.log = { vlog($0) }
+        return renewal
+    }()
+    /// The silent renewal was refused (wrong password, a code not accepted): until a sign-in succeeds, renewals
+    /// go to the window and it does not submit the saved login by itself (repeated wrong passwords lock accounts).
+    private var silentRefused = false
     var store: StoreClient? {
         guard let gateway else { return nil }
+        var client: StoreClient
         if accountKind == .storeFront {
             // Direct store (docs/16 §2): an expired store session signs in again (login window or .env).
-            return StoreClient(http: http, directBase: gateway) { [weak self] in try await self?.logon() }
+            client = StoreClient(http: http, directBase: gateway) { [weak self] in try await self?.logon() }
+        } else {
+            client = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
         }
-        return StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+        if !Demo.enabled { client.renewal = renewal }
+        return client
     }
 
-    /// The forms logon for the account: nFactor at the gateway, or explicit authentication at the store.
+    /// The forms logon for the account: nFactor at the gateway, or explicit authentication at the store. It runs on
+    /// its own client (empty jar) beside the current session; `adoptSignIn` takes its cookies on success (D.6.3).
     func formLogon() -> FormLogonFlow? {
         guard let gateway else { return nil }
-        return accountKind == .storeFront ? StoreFrontLogon(http: http, base: gateway) : GatewayLogon(http: http, base: gateway)
+        let client = http.signInClient()
+        return accountKind == .storeFront ? StoreFrontLogon(http: client, base: gateway) : GatewayLogon(http: client, base: gateway)
+    }
+
+    /// A sign-in on `client` (`formLogon`, the silent renewal) succeeded: the account's jar takes its cookies.
+    func adoptSignIn(from client: HTTPClient) {
+        guard let host = gateway?.host else { return }
+        http.adoptSignIn(from: client, host: host)
+        silentRefused = false
+        try? http.saveCookies(to: Paths.cookieFile)
     }
 
     /// ICAVIEWER_LOGIN_AUTOFILL=1: always use the login window (test mode, see LoginWindowController).
@@ -391,35 +416,144 @@ final class StoreService: @unchecked Sendable {
         setGateway(found.url, kind: found.kind)
     }
 
-    /// Logs on at the gateway (`.env` or the login window).
+    /// Logs on at the gateway (`.env` or the login window), then into the store behind it.
     func logon() async throws {
         if usesEnvCredentials {
             try await envLogon()
         } else {
             guard let interactiveLogon else { throw Failure.config("no login window") }
-            try await interactiveLogon()
+            try await interactiveLogon(true, nil)
         }
+        try await storeSignInAfterGateway()
+        renewal.noteSignedIn()
         try? http.saveCookies(to: Paths.cookieFile)
     }
 
+    /// Through a gateway: the store's challenge and its sign-in (CitrixAGBasic) right after the gateway logon, so the
+    /// first store request is not taken for an expired store session (docs/10 D.2 steps 9–11).
+    private func storeSignInAfterGateway() async throws {
+        guard accountKind != .storeFront, let store else { return }
+        try await store.signInAfterGatewayLogon()
+    }
+
+    /// Renews an expired sign-in (docs/10 D.6.3); `SignInRenewal` runs one at a time.
+    private func renew(_ expiry: SignInExpiry) async throws {
+        guard let store else { throw Failure.config("no account") }
+        if expiry == .store, accountKind != .storeFront {
+            // Through a gateway the store sign-in needs no credentials; the gateway logon only if its session is gone too.
+            do {
+                try await store.signIn()
+                return
+            } catch StoreClient.Failure.signedOut {
+                vlog("sign-in: the gateway session has expired too")
+            }
+        }
+        try await signInAgain()
+        try await storeSignInAfterGateway()
+        try? http.saveCookies(to: Paths.cookieFile)
+    }
+
+    /// The account's logon once more: silently with the saved login, else the sign-in window (docs/10 D.6.3).
+    private func signInAgain() async throws {
+        if usesEnvCredentials { return try await envLogon() }
+        let autoSubmit: Bool
+        switch await silentLogon() {
+        case .done:
+            vlog("sign-in: signed in again with the saved login")
+            return
+        case .cancelled:
+            throw LoginCancelled()
+        case .notPossible(let why):
+            vlog("sign-in: no silent sign-in (\(why)); sign-in window")
+            autoSubmit = true
+        case .refused(let why):
+            vlog("sign-in: the saved login was not accepted (\(why)); sign-in window, not submitted by itself")
+            silentRefused = true
+            autoSubmit = false
+        }
+        guard let interactiveLogon else { throw Failure.config("no login window") }
+        try await interactiveLogon(autoSubmit, autoSubmit
+            ? loc("Your sign-in has expired. Please sign in again.", "Ihre Anmeldung ist abgelaufen. Bitte erneut anmelden.")
+            : loc("Your sign-in has expired, and the saved login was not accepted. Check your entries.",
+                  "Ihre Anmeldung ist abgelaufen, und die gespeicherte Anmeldung wurde nicht angenommen. Bitte Eingaben prüfen."))
+    }
+
+    enum SilentOutcome {
+        case done
+        /// The user cancelled the Keychain's Touch ID or password prompt.
+        case cancelled
+        /// Nothing saved, or the gateway asks for more than the saved login (a new password, another factor).
+        case notPossible(String)
+        /// The gateway or store refused the saved login (a wrong password, a passcode not accepted).
+        case refused(String)
+    }
+
+    /// The saved login (Keychain password, a TOTP code from the Keychain secret) on a client of its own, adopted on
+    /// success. Network errors are thrown: the window could not do better.
+    private func silentLogon() async -> SilentOutcome {
+        guard let gateway, let host = gateway.host else { return .notPossible("no account") }
+        if silentRefused { return .notPossible("the saved login was refused before") }
+        let saved = credentials.saved(host: host)
+        guard !saved.username.isEmpty, saved.hasPassword else { return .notPossible("no saved login") }
+        let secrets: LoginSecrets
+        do {
+            secrets = try await credentials.loadForLogin(host: host, reason: loc("sign in to \(host) again", "sich erneut bei \(host) anzumelden"))
+        } catch let error as LAError where [.userCancel, .appCancel, .systemCancel].contains(error.code) {
+            return .cancelled
+        } catch {
+            return .notPossible("the Keychain did not give the saved login: \(error)")
+        }
+        guard let password = secrets.password else { return .notPossible("no saved password") }
+        let client = http.signInClient()
+        let totp = secrets.totp
+        do {
+            if accountKind == .storeFront {
+                try await StoreFrontLogon(http: client, base: gateway).logon(.init(username: secrets.username, password: password))
+            } else {
+                // A code is accepted once: wait for the next 30 s step here rather than block a thread (D.6.3).
+                if let totp {
+                    let wait = totp.secondsUntilFresh(statePath: Paths.totpState)
+                    if wait > 0 {
+                        vlog(String(format: "sign-in: waiting %.0f s for a fresh TOTP code", wait))
+                        try await Task.sleep(for: .seconds(wait))
+                    }
+                }
+                try await GatewayLogon(http: client, base: gateway).logon(.init(username: secrets.username, password: password,
+                    passcode: { totp?.freshCode(statePath: Paths.totpState) }))
+            }
+        } catch GatewayLogon.Failure.rejected {
+            return .refused("rejected")
+        } catch GatewayLogon.Failure.needsInput(let what) {
+            return .notPossible("the \(accountKind == .storeFront ? "store" : "gateway") asks for \(what)")
+        } catch {
+            return .notPossible("\(error)")
+        }
+        adoptSignIn(from: client)
+        return .done
+    }
+
     /// nFactor logon with username, password and TOTP passcode from `.env`; at a direct store the explicit logon
-    /// with username, password and CITRIX_DOMAIN (docs/16 §2.3).
+    /// with username, password and CITRIX_DOMAIN (docs/16 §2.3). On a client of its own, adopted on success.
     private func envLogon() async throws {
         try await resolveAccount()
         guard let env, let gateway, let user = env["CITRIX_USERNAME"], let password = env["CITRIX_PASSWORD"] else {
             throw Failure.config("CITRIX_USERNAME and CITRIX_PASSWORD must be set in .env")
         }
+        let client = http.signInClient()
         if accountKind == .storeFront {
             let qualified = user.contains("\\") || user.contains("@") ? user : Self.envUsername(env, user)
-            try await StoreFrontLogon(http: http, base: gateway)
+            try await StoreFrontLogon(http: client, base: gateway)
                 .logon(.init(username: qualified, password: password, domain: env["CITRIX_DOMAIN"]))
-            return
+            return adoptSignIn(from: client)
         }
         let totp = Self.envTOTP(env)
         guard let totp else { throw Failure.config("CITRIX_TOTP_SECRET must be set in .env") }
-        try await GatewayLogon(http: http, base: gateway).logon(.init(username: Self.envUsername(env, user), password: password, passcode: {
+        let wait = totp.secondsUntilFresh(statePath: Paths.totpState)
+        if wait > 0 { try await Task.sleep(for: .seconds(wait)) }
+        try await GatewayLogon(http: client, base: gateway).logon(.init(username: Self.envUsername(env, user), password: password, passcode: {
             return totp.freshCode(statePath: Paths.totpState)
         }))
+        adoptSignIn(from: client)
     }
 
     static func envUsername(_ env: Env, _ user: String) -> String {
@@ -443,8 +577,9 @@ final class StoreService: @unchecked Sendable {
             list = try await store.resources()
         } else {
             do {
+                // An expired session renews itself here (docs/10 D.6); what is left is another failure.
                 list = try await store!.resources()
-            } catch {
+            } catch let error where !(error is LoginCancelled) {
                 vlog("resource list failed (\(error)); logging on")
                 try await logon()
                 list = try await store!.resources()

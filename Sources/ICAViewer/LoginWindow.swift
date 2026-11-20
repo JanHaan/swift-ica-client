@@ -99,12 +99,21 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
     }
 
     /// Shows the window and returns once the gateway logon succeeded. Throws `LoginCancelled` on cancel.
-    func run() async throws {
+    /// `autoSubmit` false: a complete prefill from the Keychain waits for the user (the saved login was just refused).
+    /// `note`: shown above the first form (why the window opened during a renewal, docs/10 D.6.3).
+    func run(autoSubmit: Bool = true, note: String? = nil) async throws {
         try await withCheckedThrowingContinuation { continuation in
             waiting.append(continuation)
-            if waiting.count == 1 { start() }
+            if waiting.count == 1 {
+                autoSubmitAllowed = autoSubmit
+                firstNote = note
+                start()
+            }
         }
     }
+
+    private var autoSubmitAllowed = true
+    private var firstNote: String?
 
     private func start() {
         task?.cancel()
@@ -162,9 +171,12 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
         self.form = form
         formsShown += 1
         busy = false
+        // The renewal's note goes with the first form of this run only.
+        let note = firstNote
+        firstNote = nil
         message = form.isRePrompt && form.errors.isEmpty
             ? loc("The gateway did not accept the sign-in. Check your entries.",
-                  "Das Gateway hat die Anmeldung nicht angenommen. Bitte Eingaben prüfen.") : nil
+                  "Das Gateway hat die Anmeldung nicht angenommen. Bitte Eingaben prüfen.") : note
         renderedKinds.append(form.fields.map(\.kind.rawValue))
         vlog("login: form \(formsShown): \(form.summary)\(form.isRePrompt ? " (re-prompt)" : "")")
         draft = [:]
@@ -227,7 +239,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
 
     /// With everything stored (username, password, TOTP secret) a login needs no typing.
     private func autoSubmitIfComplete(_ form: LogonForm) {
-        guard !form.isRePrompt, !form.fields.contains(where: { $0.kind == .error }) else { return }
+        guard autoSubmitAllowed, !form.isRePrompt, !form.fields.contains(where: { $0.kind == .error }) else { return }
         let inputs = form.fields.filter { $0.isInput && $0.kind != .checkbox && !$0.readOnly }
         guard !inputs.isEmpty, inputs.allSatisfy({ prefilledFromStore.contains($0.id) }), isValid() else { return }
         vlog("login: all fields prefilled from the Keychain; submitting")
@@ -304,8 +316,12 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
                 credentials.forgetAll(host: host)
             }
         }
+        // The account's session takes the new cookies only now (the logon ran on its own client, docs/10 D.6.3).
+        if let logon { service.adoptSignIn(from: logon.http) }
         clearSecrets()
         busy = false
+        firstNote = nil
+        autoSubmitAllowed = true
         window?.orderOut(nil)
         let list = waiting
         waiting = []
@@ -322,10 +338,13 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate, NSTextF
 
     @objc private func cancel(_ sender: Any?) {
         task?.cancel()
-        if let form, let logon { Task { await logon.cancel(form) } }
+        // No CancelPostBack (doLogoff.do): it ended gateway sessions by accident (docs/10 D.6.6). The abandoned logon
+        // ran on its own client, so the account's session, if still valid, is untouched.
         form = nil
         clearSecrets()
         busy = false
+        firstNote = nil
+        autoSubmitAllowed = true
         window?.orderOut(nil)
         let list = waiting
         waiting = []

@@ -54,6 +54,22 @@ public struct TOTP {
         return code(at: now)
     }
 
+    /// How long `freshCode` would wait now (0: it returns at once), so an async caller can wait beforehand instead
+    /// of blocking a thread. `minimumGap`: also at least this many seconds since the state file was last written
+    /// (the live test rule of 35 s between TOTP uses).
+    public func secondsUntilFresh(statePath: String, minimumGap: TimeInterval = 0, at now: Date = Date()) -> TimeInterval {
+        let lastUsed = (try? String(contentsOfFile: statePath, encoding: .utf8)).flatMap { Int($0) } ?? -1
+        let window = Int(now.timeIntervalSince1970) / period
+        var wait: TimeInterval = 0
+        if window <= lastUsed || secondsRemaining(at: now) < 3 {
+            wait = Double(period) - now.timeIntervalSince1970.truncatingRemainder(dividingBy: Double(period)) + 0.5
+        }
+        if minimumGap > 0, let written = (try? FileManager.default.attributesOfItem(atPath: statePath))?[.modificationDate] as? Date {
+            wait = max(wait, minimumGap - now.timeIntervalSince(written))
+        }
+        return max(0, wait)
+    }
+
     /// Seconds until the current code expires.
     public func secondsRemaining(at date: Date = Date()) -> Int {
         period - Int(date.timeIntervalSince1970) % period

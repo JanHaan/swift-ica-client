@@ -86,6 +86,41 @@ public final class HTTPClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         for cookie in jar.cookies ?? [] { jar.deleteCookie(cookie) }
     }
 
+    /// A client for one sign-in, with its own empty jar (docs/10 D.6.3): the logon runs beside this client's
+    /// session, which stays as it is until `adoptSignIn` (a cancelled or failed sign-in leaves it untouched).
+    /// Same User-Agent, trace and HTTPS hosts.
+    public func signInClient() -> HTTPClient {
+        let other = HTTPClient()
+        other.userAgent = userAgent
+        other.trace = trace
+        secureLock.lock()
+        let hosts = secureHosts
+        secureLock.unlock()
+        other.secureLock.lock()
+        other.secureHosts = hosts
+        other.secureLock.unlock()
+        return other
+    }
+
+    /// Takes over a finished sign-in from `other` (`signInClient`): every cookie for `host` in this jar is replaced
+    /// by `other`'s cookies, except the store's device id when `other` has none (docs/90 §8.6). Cookies of other
+    /// hosts stay.
+    public func adoptSignIn(from other: HTTPClient, host: String) {
+        let incoming = other.jar.cookies ?? []
+        let keepDeviceId = !incoming.contains { $0.name == DeviceIdentity.cookieName }
+        for cookie in jar.cookies ?? [] where DeviceIdentity.domain(cookie.domain, matches: host) {
+            if keepDeviceId, cookie.name == DeviceIdentity.cookieName { continue }
+            jar.deleteCookie(cookie)
+        }
+        for cookie in incoming { jar.setCookie(cookie) }
+        other.secureLock.lock()
+        let hosts = other.secureHosts
+        other.secureLock.unlock()
+        secureLock.lock()
+        secureHosts.formUnion(hosts)
+        secureLock.unlock()
+    }
+
     /// Empties the jar and deletes its saved copy (`saveCookies`): after "forget my login" the gateway and store
     /// session cookies must not sign the next start in (security review L-03).
     public func clearCookies(deletingFile path: String) {

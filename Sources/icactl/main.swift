@@ -686,6 +686,11 @@ case "sharetest":
         fail("\(error)")
     }
 
+case "launch-after-idle":
+    // icactl launch-after-idle <minutes> [resource] [--first list|launch] [--polls N] [--hold S] — an expired sign-in
+    // renewed silently, once, for concurrent requests (docs/10 D.6.8; IdleLaunchTest.swift).
+    await runLaunchAfterIdle(args)
+
 case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)
@@ -2258,12 +2263,20 @@ func testApp(_ name: String, builtIn: TestApp, command: String) -> TestApp {
 
 /// The web store: behind the gateway under /welcome/, or the direct store (docs/16), which logs on again with the
 /// `.env` credentials when its session has expired.
+/// A direct store renews an expired session through `signInRenewal`; through the gateway only with `renewGatewaySignIn`
+/// (IdleLaunchTest.swift, docs/10 D.6).
 func storeClient() -> StoreClient {
-    guard let storeFront else { return StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL) }
-    return StoreClient(http: http, directBase: storeFront) {
+    guard let storeFront else {
+        var store = StoreClient(http: http, base: URL(string: "welcome/", relativeTo: gateway)!.absoluteURL)
+        if renewGatewaySignIn { store.renewal = signInRenewal }
+        return store
+    }
+    var store = StoreClient(http: http, directBase: storeFront) {
         try await StoreFrontLogon(http: http, base: storeFront).logon(envCredentials())
         try? http.saveCookies(to: cookiePath)
     }
+    store.renewal = signInRenewal
+    return store
 }
 
 /// CITRIX_USERNAME, CITRIX_PASSWORD and CITRIX_DOMAIN for an explicit store logon (docs/16 §2.3): the user name as

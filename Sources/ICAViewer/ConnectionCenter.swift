@@ -202,7 +202,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
         }
         refresh()
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refresh(keepAlive: true) }
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refresh(keepAlive: true, background: true) }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -222,8 +222,11 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
 
     @objc private func refusedChanged() { localChanged() }
 
-    func refresh(keepAlive: Bool = false) {
-        guard demoRows == nil, let store = service?.store, !busy else { return }
+    /// `background`: a poll nobody asked for; it never starts a sign-in renewal (docs/10 D.6.4). Opening the window
+    /// and Refresh may.
+    func refresh(keepAlive: Bool = false, background: Bool = false) {
+        guard demoRows == nil, var store = service?.store, !busy else { return }
+        store.background = background
         busy = true
         let requested = Date()
         setStatus(loc("Refreshing…", "Aktualisiere…"))
@@ -233,6 +236,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             let api = store.sessions
             api.log = { vlog($0) }
             var list: StoreSessionList?
+            var failure: Error?
             listFailed = nil
             do {
                 list = try await api.list()
@@ -240,8 +244,10 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             } catch SessionsError.unsupported {
                 byIdAvailable = false   // §8.2: no per-session disconnect / log off
             } catch {
-                vlog("connection center: Sessions/List failed: \(error)")
+                // An expired sign-in is logged once by the renewal, not by every poll.
+                if !Self.quiet(error) { vlog("connection center: Sessions/List failed: \(error)") }
                 listFailed = "\(error)"
+                failure = error
             }
             var available: [AvailableSession] = []
             var safe: [AvailableSession]?
@@ -249,8 +255,9 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
                 available = try await api.available(excludeActive: false)
                 safe = try? await api.available(excludeActive: true)
             } catch {
-                vlog("connection center: ListAvailable failed: \(error)")
+                if !Self.quiet(error) { vlog("connection center: ListAvailable failed: \(error)") }
                 listFailed = listFailed ?? "\(error)"
+                failure = failure ?? error
             }
             let names = Set(localConnections().map(\.clientName) + [SessionDirectory.defaultClientName])
             storeRows = SessionDirectory.merge(list: list, available: available, excludingActive: safe, clientNames: names)
@@ -262,10 +269,14 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
             render(rows())
             setStatus(listFailed == nil ? String(format: loc("Updated %@", "Aktualisiert %@"),
                                                  DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short))
+                      : failure.map(Self.quiet) == true ? UserMessage.text(for: SignInRenewal.Failure.expired(.gateway))
                       : loc("Could not get your sessions. Try again later.",
                             "Die Sitzungen konnten nicht abgerufen werden. Später erneut versuchen."))
         }
     }
+
+    /// An expired sign-in a poll did not renew, or a renewal the user cancelled: no log line per poll.
+    private static func quiet(_ error: Error) -> Bool { error is SignInRenewal.Failure || error is LoginCancelled }
 
     private func setStatus(_ text: String) { status.stringValue = text }
 
@@ -535,7 +546,7 @@ final class ConnectionCenterController: NSWindowController, NSWindowDelegate {
     }
 
     private func refreshSoon() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.refresh() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.refresh(background: true) }
     }
 
     // MARK: Store actions by id (§5.2, §5.3)

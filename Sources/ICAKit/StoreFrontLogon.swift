@@ -123,11 +123,6 @@ public struct StoreFrontLogon: FormLogonFlow {
         return try step(response, postedIDs: posted)
     }
 
-    public func cancel(_ form: LogonForm) async {
-        guard let path = form.cancelPostBack else { return }
-        _ = try? await send(path, conversation: true, form: [("StateContext", form.stateContext ?? "")])
-    }
-
     /// Non-interactive logon; like `GatewayLogon.logon`, never re-posts a rejected password.
     public func logon(_ credentials: GatewayLogon.Credentials) async throws {
         var form = try await begin()

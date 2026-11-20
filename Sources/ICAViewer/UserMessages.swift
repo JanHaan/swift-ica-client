@@ -15,6 +15,7 @@ enum UserMessage {
         if let e = error as? StoreClient.Failure { return store(e) }
         if let e = error as? NativeStoreClient.Failure { return nativeStore(e) }
         if let e = error as? GatewayLogon.Failure { return gateway(e) }
+        if let e = error as? SignInRenewal.Failure { return renewal(e) }
         if let e = error as? SessionsError { return sessions(e) }
         if let e = error as? CredentialError { return credential(e) }
         if case CGPTransport.Failure.udpRequired(_, let port, _)? = error as? CGPTransport.Failure {
@@ -73,6 +74,25 @@ enum UserMessage {
         case .http(_, let status): http(status)
         case .launch: launchFailed
         case .needsLogon: loc("The store asks you to sign in. Choose File > Sign In….", "Der Store verlangt eine Anmeldung. Ablage > Anmelden … wählen.")
+        case .signedOut: signInExpired
+        case .sessionGone:
+            loc("This session is no longer available: it has ended or moved to another device. The session list has been refreshed.",
+                "Diese Sitzung ist nicht mehr verfügbar: Sie wurde beendet oder auf ein anderes Gerät verschoben. Die Sitzungsliste wurde aktualisiert.")
+        case .unexpected:
+            loc("The store did not answer as expected. Try again.", "Der Store hat unerwartet geantwortet. Erneut versuchen.") + " " + reportHint
+        }
+    }
+
+    private static var signInExpired: String {
+        loc("Your sign-in has expired. Choose File > Sign In… to sign in again.",
+            "Ihre Anmeldung ist abgelaufen. Zum erneuten Anmelden Ablage > Anmelden … wählen.")
+    }
+
+    private static func renewal(_ e: SignInRenewal.Failure) -> String {
+        switch e {
+        case .expired: loc("Your sign-in has expired. Choose Refresh to sign in again.",
+                           "Ihre Anmeldung ist abgelaufen. Zum erneuten Anmelden „Aktualisieren“ wählen.")
+        case .stillExpired: signInExpired
         }
     }
 

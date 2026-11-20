@@ -140,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.store = store
         let login = LoginWindowController(service: store)
         self.login = login
-        store.interactiveLogon = { [weak login] in try await login?.run() }
+        store.interactiveLogon = { [weak login] autoSubmit, note in try await login?.run(autoSubmit: autoSubmit, note: note) }
         // ICAVIEWER_FORGET_LOGIN=1: delete the saved login for the gateway and quit.
         if ProcessInfo.processInfo.environment["ICAVIEWER_FORGET_LOGIN"] == "1" {
             if let host = store.gateway?.host { store.credentials.forgetAll(host: host) }
@@ -250,16 +250,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     noPriorSession = await store.listsNoSession() ?? false
                     vlog("store check: " + (noPriorSession ? "no session listed before the launch" : "a session is listed (or the list failed): the timing rule decides"))
                 }
-                let ica: ICAFile
-                do {
-                    ica = try await store.launch(resource)
-                } catch let error where !(error is LoginCancelled) && !Self.isLaunchStatusError(error) {
-                    // An expired gateway session fails before any ICA file exists, so signing in
-                    // again and repeating the launch once cannot start a second session.
-                    vlog("launch failed (\(error)); signing in again")
-                    try await store.logon()
-                    ica = try await store.launch(resource)
-                }
+                // An expired sign-in renews itself inside the store requests, one renewal for all of them, before any
+                // ICA file exists (docs/10 D.6). Nothing else signs in again here: a 404 for a session is no expiry.
+                let ica = try await store.launch(resource)
                 // Session sharing (docs/55 §10 steps 4–5): never a second connection into a session we hold already.
                 // Keys are compared, never logged.
                 let shareKey = SessionShareKey(ica: ica)
@@ -408,6 +401,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if autoLaunch == nil { launcher?.window?.orderOut(nil) }
             } catch {
                 vlog("launch failed: \(error)")
+                // The session is gone or moved (docs/90 §3.3): the Connection Center shows the store's list again.
+                if case StoreClient.Failure.sessionGone = error { connectionCenter?.refresh() }
                 let shown = String(format: loc("%@ could not be opened. ", "%@ konnte nicht geöffnet werden. "), displayName(resource.name))
                     + UserMessage.text(for: error)
                 vlog("launch failed, shown: \(shown)")
@@ -568,11 +563,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = info
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window)
-    }
-
-    private static func isLaunchStatusError(_ error: Error) -> Bool {
-        if case StoreClient.Failure.launch = error { return true }
-        return false
     }
 
     /// Our sessions changed: the Connection Center and the menu-bar extra show them (the launcher lists apps only).
