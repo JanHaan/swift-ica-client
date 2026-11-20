@@ -13,12 +13,12 @@ protocol SurfaceShowing: NSWindow {
 /// One remote window, owned by this helper process, whose content is a crop of the host's IOSurface,
 /// like `SessionView` in ICAViewer. Two looks:
 /// - spike (`spec.seamless` nil): a standard titled window the helper places itself;
-/// - seamless (ICAViewer, docs/99 §12): as ICAViewer's `SeamlessWindow` (D14): hidden title bar, invisible
-///   but enabled traffic lights (still AXStandardWindow with close and minimize), placed where the host
-///   says, every mouse event to the remote window, except a caption drag or an edge resize, which run here
+/// - seamless (ICAViewer, docs/99 §12): as ICAViewer's `SeamlessWindow`: a borderless `RemoteAppWindow` (D189;
+///   square corners, still AXStandardWindow with close and minimize buttons), placed where the host says,
+///   every mouse event to the remote window, except a caption drag or an edge resize, which run here
 ///   (phase 2, D20): nothing goes to the host during the gesture, one `gestureEnded` at its end.
 /// Input goes to the host as view and screen points; the host maps them to session pixels.
-final class SurfaceWindow: NSWindow, SurfaceShowing {
+final class SurfaceWindow: RemoteAppWindow, SurfaceShowing {
     private(set) var spec: HelperWindowSpec
     let surfaceView: SurfaceView
     private let send: (HelperMessage) -> Void
@@ -55,10 +55,9 @@ final class SurfaceWindow: NSWindow, SurfaceShowing {
         let content = spec.frame?.cgRect
             ?? NSRect(x: 0, y: 0, width: CGFloat(spec.rect.width) / scale, height: CGFloat(spec.rect.height) / scale)
         surfaceView = SurfaceView(frame: NSRect(origin: .zero, size: content.size), scale: scale, send: send)
-        var style: NSWindow.StyleMask = spec.seamless == true
-            ? [.titled, .closable, .miniaturizable, .fullSizeContentView]
+        let style: NSWindow.StyleMask = spec.seamless == true
+            ? RemoteAppWindow.styleMask(resizable: spec.resizable == true)
             : [.titled, .closable, .miniaturizable]
-        if spec.seamless == true, spec.resizable == true { style.insert(.resizable) }
         super.init(contentRect: content, styleMask: style, backing: .buffered, defer: false)
         isReleasedWhenClosed = false
         tabbingMode = .disallowed
@@ -69,16 +68,9 @@ final class SurfaceWindow: NSWindow, SurfaceShowing {
         makeFirstResponder(surfaceView)     // keys reach the remote window after Cmd-Tab too, not only after a click
         surfaceView.windowId = spec.id
         if isSeamless {
-            titleVisibility = .hidden
-            titlebarAppearsTransparent = true
-            titlebarSeparatorStyle = .none
             collectionBehavior = [.managed, .participatesInCycle, .fullScreenNone]
-            // Invisible but enabled (alpha 0 would disable them, D14): switchers need a working minimize.
-            for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                standardWindowButton(type)?.alphaValue = 0.01
-            }
-            // Zoom is the Window menu's (TWI maximise), never AppKit's local zoom.
-            standardWindowButton(.zoomButton)?.isEnabled = false
+            // Zoom is the Window menu's (TWI maximise), never AppKit's local zoom: the AX zoom button stays disabled.
+            zoomEnabled = false
             if spec.topmost == true { level = .floating }
             placeFromHost(content)
         } else if let visible = NSScreen.main?.visibleFrame {
@@ -93,9 +85,6 @@ final class SurfaceWindow: NSWindow, SurfaceShowing {
         isSeamless ? frameRect : super.constrainFrameRect(frameRect, to: screen)
     }
 
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-
     /// A new spec from the host: geometry, crop, title, level, controls, minimised and dim state.
     func apply(_ new: HelperWindowSpec, surface: IOSurfaceRef?) {
         let old = spec
@@ -106,7 +95,6 @@ final class SurfaceWindow: NSWindow, SurfaceShowing {
             if new.topmost != old.topmost { level = new.topmost == true ? .floating : .normal }
             if new.resizable != old.resizable {
                 if new.resizable == true { styleMask.insert(.resizable) } else { styleMask.remove(.resizable) }
-                standardWindowButton(.zoomButton)?.isEnabled = false
             }
             // A gesture runs or awaits the host's answer: the local frame wins until `gestureDone`, which
             // applies the host's (confirmed or adjusted) frame; no snap back to the pre-drag frame meanwhile.

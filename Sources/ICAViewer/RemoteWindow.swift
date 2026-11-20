@@ -1,3 +1,4 @@
+import AppHostKit
 import AppKit
 import ICAKit
 import QuartzCore
@@ -225,13 +226,12 @@ extension SessionView: NSTextInputClient {
     func characterIndex(for point: NSPoint) -> Int { NSNotFound }
 }
 
-/// Titled window for an `.appWindow`: a real NSWindow so switchers see an AXStandardWindow with
-/// working close and minimize buttons. The title bar is transparent, full-size content and the
-/// traffic lights are invisible (alpha 0, still in AX), so the remote window's own caption is all
-/// the user sees. Every mouse event goes to the remote window (never to the invisible buttons or
-/// the title-bar view); a press on the remote caption that turns into a drag moves the window
-/// locally (docs/50 §3.1), and a press on the edge band of a resizable window resizes locally.
-final class SeamlessWindow: NSWindow {
+/// Window of an `.appWindow`: a borderless `RemoteAppWindow`, so the remote window's own square frame is
+/// all the user sees (D189), while switchers still see an AXStandardWindow with working close and minimize
+/// buttons. Also the titled window of a full desktop session (D139). Every mouse event goes to the remote
+/// window; a press on the remote caption that turns into a drag moves the window locally (docs/50 §3.1),
+/// and a press on the edge band of a resizable window resizes locally.
+final class SeamlessWindow: RemoteAppWindow {
     weak var remote: RemoteWindow?
     /// Caption press waiting to become a drag (moved ≥ 3 pt) or a click (released in place).
     private var pendingCaption: NSEvent?
@@ -242,8 +242,6 @@ final class SeamlessWindow: NSWindow {
 
     /// Keep the 1:1 position even where AppKit would push the window below the menu bar.
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
 
     override func sendEvent(_ event: NSEvent) {
         guard let remote, let view = contentView as? SessionView else { return super.sendEvent(event) }
@@ -349,16 +347,6 @@ final class SeamlessWindow: NSWindow {
             return sv.convert(b.frame, to: nil).insetBy(dx: -4, dy: -4).contains(event.locationInWindow)
         }
     }
-
-    /// Hide the traffic lights visually but keep them in the AX tree and enabled, so switchers see a
-    /// working minimize button. `isHidden` removes them from AX, and alpha 0 makes AppKit disable them
-    /// (isEnabled and AXEnabled false; performMiniaturize/performClose then do nothing). Alpha 0.01
-    /// is invisible and keeps them enabled.
-    func hideStandardButtons() {
-        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            standardWindowButton(type)?.alphaValue = 0.01
-        }
-    }
 }
 
 /// Borderless, non-activating panel for menus, tooltips and tool windows.
@@ -447,14 +435,10 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
             w.collectionBehavior = [.managed, .participatesInCycle, fullScreen ? .fullScreenPrimary : .fullScreenNone]
             window = w
         } else if info.kind == .appWindow {
-            var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
-            if TWIWindowControls(style: info.style).resizable { style.insert(.resizable) }
+            // Borderless: square corners for the remote app's own frame, AX facts from RemoteAppWindow (D189).
+            let style = RemoteAppWindow.styleMask(resizable: TWIWindowControls(style: info.style).resizable)
             let w = SeamlessWindow(contentRect: frame, styleMask: style, backing: .buffered, defer: false)
-            w.title = displayName(info.title)             // not shown, but AX and switchers read it
-            w.titleVisibility = .hidden
-            w.titlebarAppearsTransparent = true
-            w.titlebarSeparatorStyle = .none
-            w.hideStandardButtons()
+            w.title = displayName(info.title)             // not shown, but AX, switchers and the Window menu read it
             w.tabbingMode = .disallowed
             w.collectionBehavior = [.managed, .participatesInCycle, .fullScreenNone]
             window = w
@@ -546,7 +530,7 @@ final class RemoteWindow: NSObject, NSWindowDelegate {
         guard isApp, !info.isDesktop else { return }
         let c = TWIWindowControls(style: info.style)
         if c.resizable { window.styleMask.insert(.resizable) } else { window.styleMask.remove(.resizable) }
-        window.standardWindowButton(.zoomButton)?.isEnabled = c.zoomable
+        (window as? RemoteAppWindow)?.zoomEnabled = c.zoomable
     }
 
     func beginLocalGeometry() {
