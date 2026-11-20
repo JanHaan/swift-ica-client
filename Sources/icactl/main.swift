@@ -691,6 +691,10 @@ case "launch-after-idle":
     // renewed silently, once, for concurrent requests (docs/10 D.6.8; IdleLaunchTest.swift).
     await runLaunchAfterIdle(args)
 
+case "gateway-keepalive-probe":
+    // icactl gateway-keepalive-probe <interval-min> <max-min> — absolute or idle gateway timeout (docs/10 D.6.9).
+    await runGatewayKeepAliveProbe(args)
+
 case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)
