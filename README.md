@@ -44,14 +44,14 @@ product and not a replacement for the official client. Expect gaps; see [Status]
 
 The screenshots come from a test lab (macOS VM, example user and apps).
 
-## What it does (0.11.2)
+## What it does (0.11.3)
 
 - **Sign in** through a gateway (user name, password, one-time code) or to a StoreFront store
   directly; optional Keychain storage with Touch ID; Sign Out.
-- **Seamless apps** as native windows, several apps in one session, a published desktop in one window,
-  the launcher on ⌃⌥⌘L.
-- **Sessions survive trouble:** short network drops, automatic reconnect after longer ones, a
-  Connection Center to reconnect, disconnect or log off, and a notice for features the server blocks.
+- **Seamless apps** as native windows with square corners, as on Windows, several apps in one session, a
+  published desktop in one window, the launcher on ⌃⌥⌘L.
+- **Sessions survive trouble:** short network drops, automatic reconnect after longer ones, a sign-in
+  kept alive while a session is connected, a Connection Center to reconnect, disconnect or log off, and a notice for features the server blocks.
 - **Clipboard:** text, images, rich text, and files and folders both ways (large copies with progress).
 - **Client drive, PDF printing, audio playback, the microphone and the webcam** (both on by default; used
   only while a remote app records or uses the camera, after macOS asks once), Retina-sharp display, keyboard

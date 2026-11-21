@@ -52,7 +52,7 @@ Tick **Remember in Keychain** before you sign in. ICA Viewer then keeps your pas
 
 If the app starts without a saved login, or the server asks you to sign in again, choose **File > Sign In…**.
 
-Your sign-in at the server ends after a while (at a gateway often after about 90 minutes). When you next open an app, open the Connection Center or click its Refresh, ICA Viewer signs you in again by itself with the saved login (Touch ID or the Mac password may be asked) and carries on. Without a saved login, or if the server does not accept it, the sign-in window opens.
+Your sign-in at the server ends after a while without use (at a gateway often after about 90 minutes). While a session is connected, ICA Viewer keeps it alive (see [Privacy and security](16-privacy-security.md)), so this happens only when no session was open. When you next open an app, open the Connection Center or click its Refresh, ICA Viewer signs you in again by itself with the saved login (Touch ID or the Mac password may be asked) and carries on. Without a saved login, or if the server does not accept it, the sign-in window opens.
 
 ## Sign out
 

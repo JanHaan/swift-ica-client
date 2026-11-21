@@ -1,8 +1,8 @@
 # Feature matrix: stock Citrix Workspace app vs ICAViewer
 
 ICAViewer is an independent project and is not affiliated with Citrix. The stock columns summarise
-Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.11.2 as
-of 2026-11-19; how each feature behaves is described in the README and under `docs/`.
+Citrix's public documentation (links under Sources). The Ours column describes ICAViewer v0.11.3 as
+of 2026-11-21; how each feature behaves is described in the README and under `docs/`.
 
 ## At a glance
 
@@ -256,7 +256,8 @@ windows are borderless windows that Accessibility reports as `AXDialog` without 
 Some third-party window switchers require a standard window with a minimize button and therefore
 skip them. The Dock icons come from placeholder "Husk" processes (`com.citrix.ctxapphusk`) that own
 no windows, controlled by `enableAppDockEnhancement` / `EnableAppPreview`. In ICAViewer each remote
-window is an `AXStandardWindow` with an enabled minimize button that round-trips to a TWI minimise,
+window is an `AXStandardWindow` with an enabled minimize button that round-trips to a TWI minimise
+(since 0.11.3 borderless with square corners, as the app draws itself; the window is still reported this way),
 a single caption (the remote one). Verified across two screens. Since 0.5 each remote app also has
 its own Dock and Cmd-Tab entry, with its name, icon and menu bar.
 

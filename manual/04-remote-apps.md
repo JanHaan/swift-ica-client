@@ -6,7 +6,7 @@ Every window of a remote app is a real Mac window. You can move it, resize it, m
 
 ![Notepad running on the server, shown as a Mac window](images/notepad.png)
 
-The title bar belongs to the remote app, so the buttons and the title are the ones Windows draws. Moving and resizing happens on your Mac at once and is passed on to the server afterwards.
+The title bar belongs to the remote app, so the buttons and the title are the ones Windows draws. The windows have square corners and no Mac frame, so an app looks as it does on Windows. Moving and resizing happens on your Mac at once and is passed on to the server afterwards.
 
 ## One Dock entry per app
 

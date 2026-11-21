@@ -34,4 +34,5 @@ Short drops are always bridged automatically.
 ## Notes
 
 - The two screenshots in this chapter are illustrations from the app's demo mode. The test lab cannot cut the network on demand while the pictures are taken.
+- While a session is connected, ICA Viewer keeps your sign-in at the server alive, so the automatic reconnect does not have to sign in again first. After a long time without any session the sign-in may have ended; ICA Viewer then signs you in again with the saved login ([Signing in](02-signing-in.md#sign-in-again)).
 - When the Mac sleeps for a long time, the session may have been ended by the server. Use **Reconnect**; if your apps are gone, start them again from the launcher.
