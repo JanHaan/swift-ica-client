@@ -70,6 +70,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var probe: ActivationProbe?
     private var demo: DemoController?
     private var connectionCenter: ConnectionCenterController?
+    @MainActor private func keepAliveClient() -> StoreClient? { store?.store }
+    /// One background Sessions/List every 30 min while a session is open; never renews (docs/10 D.6.9, D191).
+    private lazy var sessionKeepAlive: SessionKeepAlive = {
+        let env = ProcessInfo.processInfo.environment["ICAVIEWER_KEEPALIVE_SECONDS"]
+        let keepAlive = SessionKeepAlive(interval: SessionKeepAlive.interval(override: env, development: AppVersion.current.isDevelopment)) {
+            [weak self] in
+            guard let client = await self?.keepAliveClient() else { return .failed("no store") }
+            return await SessionKeepAlive.ping(client)
+        }
+        keepAlive.log = { vlog($0) }
+        return keepAlive
+    }()
     /// Last resource list (Connection Center: app names, reconnect by resource, docs/90 §7.3).
     private var resourceList: [StoreClient.Resource] = []
     /// ICA ClientName per connection (docs/90 §8.1 "connected here").
@@ -162,6 +174,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer { loading = false }
             do {
                 let list = try await store.resources(forceLogon: forceLogon)
+                sessionKeepAlive.signedIn()
+                refreshSessionRows()
                 resourceList = list
                 launcher.setResources(list)
                 launcher.setStatus("")
@@ -197,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Ends the gateway/store session at the servers and forgets the cookies (security review L-04); open sessions stay.
     @MainActor @objc private func signOut() {
         guard let store else { return }
+        sessionKeepAlive.signedOut()
         Task { @MainActor in
             await store.signOut()
             launcher?.setResources([])
@@ -567,6 +582,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Our sessions changed: the Connection Center and the menu-bar extra show them (the launcher lists apps only).
     private func refreshSessionRows() {
+        // The sign-in stays alive only while a session is open (docs/10 D.6.9); sessions not ended are connected.
+        sessionKeepAlive.update(connected: sessions.filter { !$0.ended }.count)
         connectionCenter?.localChanged()
         MainActor.assumeIsolated { menuBarHost?.update() }
     }
@@ -744,6 +761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Helper apps go with the main process (docs/99 §5); they would also exit on its death.
     func applicationWillTerminate(_ notification: Notification) {
+        sessionKeepAlive.stop()
         if HelperManager.enabled { HelperManager.shared.quitAll() }
         // Promised session files leave the pasteboard, staging folders are removed (D90).
         if !Demo.enabled { ClipboardFilesBridge.quitCleanup() }

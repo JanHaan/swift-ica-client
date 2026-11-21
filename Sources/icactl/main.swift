@@ -695,6 +695,10 @@ case "gateway-keepalive-probe":
     // icactl gateway-keepalive-probe <interval-min> <max-min> — absolute or idle gateway timeout (docs/10 D.6.9).
     await runGatewayKeepAliveProbe(args)
 
+case "keepalive-check":
+    // icactl keepalive-check <interval-s> <wait-s> session|none [resource] — lab check of the session keep-alive (D.6.9).
+    await runKeepAliveCheck(args)
+
 case "sessions":
     // icactl sessions list|probe|disconnect|logoff|reconnect|disconnect-device|logoff-device (docs/90)
     await sessionsCommand(args)

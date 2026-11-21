@@ -78,3 +78,52 @@ func runGatewayKeepAliveProbe(_ args: [String]) async {
         for step in steps { say("sign-out: \(step)") }
     }
 }
+
+/// `icactl keepalive-check <interval-s> <wait-s> session|none [resource]` (docs/10 D.6.9, lab only: a direct
+/// StoreFront whose web timeout is shortened with `icalab.sh sf-timeout`). Signs in once. `session`: connects a
+/// headless session and tells `SessionKeepAlive` (the app's own class, with its rules and `ping`) it is connected;
+/// `none`: nothing is connected, so it sends nothing. After <wait-s> one background Sessions/List shows whether the
+/// sign-in survived (`ping` never renews). Prints the number of keep-alive requests and the verdict.
+func runKeepAliveCheck(_ args: [String]) async {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    guard args.count >= 3, let interval = Double(args[0]), let wait = Double(args[1]), args[2] == "session" || args[2] == "none",
+          storeFront != nil else {
+        fail("usage: icactl keepalive-check <interval-s> <wait-s> session|none [resource] (direct StoreFront, lab)")
+    }
+    let withSession = args[2] == "session"
+    let name = args.count > 3 ? args[3] : "Notepad"
+    guard ProcessInfo.processInfo.environment["ICA_ALLOW_ANY_RESOURCE"] == "1" else { fail("lab only: ICA_ALLOW_ANY_RESOURCE=1") }
+    let store = storeClient()
+    do { try await StoreFrontLogon(http: http, base: storeFront!).logon(envCredentials()) } catch { fail("sign-in failed: \(error)") }
+    signInRenewal.noteSignedIn()
+    let signedIn = Date()
+    say("signed in; keep-alive interval \(interval) s, check after \(wait) s, \(withSession ? "with a connected session" : "no session")")
+    let keepAlive = SessionKeepAlive(interval: interval) { await SessionKeepAlive.ping(store) }
+    keepAlive.log = { say($0) }
+    var sessionTask: Task<Void, Never>?
+    if withSession {
+        do {
+            let resources = try await store.resources()
+            guard let r = resources.first(where: { $0.name == name }) else { fail("no resource named \(name)") }
+            guard let ica = ICAFile(text: try await testLaunchICA(store, r)) else { fail("not an ICA file") }
+            let dir = sessionDir.appendingPathComponent("keepalive-check")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            keepAlive.update(connected: 1)
+            sessionTask = Task {
+                do { try await runSession(ica: ica, seconds: wait + 20, captureDir: dir) } catch { say("session: \(error)") }
+                keepAlive.update(connected: 0)
+            }
+        } catch { fail("launch: \(error)") }
+    } else {
+        keepAlive.update(connected: 0)
+    }
+    let end = Date().addingTimeInterval(wait)
+    while case let left = end.timeIntervalSinceNow, left > 0 { try? await Task.sleep(for: .seconds(min(left, 5))) }
+    let outcome = await SessionKeepAlive.ping(store)
+    let renewalsBefore = signInRenewal.renewals
+    say(String(format: "check %.0f s after the sign-in: %@; keep-alive requests so far: %d; renewals: %d",
+               Date().timeIntervalSince(signedIn), "\(outcome)", keepAlive.pings, renewalsBefore))
+    say(outcome == .alive ? "RESULT: sign-in alive" : "RESULT: sign-in expired (not renewed)")
+    await sessionTask?.value
+    keepAlive.stop()
+}
