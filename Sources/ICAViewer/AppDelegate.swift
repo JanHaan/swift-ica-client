@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One background Sessions/List every 30 min while a session is open; never renews (docs/10 D.6.9, D191).
     private lazy var sessionKeepAlive: SessionKeepAlive = {
         let env = ProcessInfo.processInfo.environment["ICAVIEWER_KEEPALIVE_SECONDS"]
-        let keepAlive = SessionKeepAlive(interval: SessionKeepAlive.interval(override: env, development: AppVersion.current.isDevelopment)) {
+        let keepAlive = SessionKeepAlive(interval: SessionKeepAlive.interval(override: env, development: BuildKind.isDevelopment)) {
             [weak self] in
             guard let client = await self?.keepAliveClient() else { return .failed("no store") }
             return await SessionKeepAlive.ping(client)

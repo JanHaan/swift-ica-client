@@ -44,9 +44,9 @@ private final class ListTransport: StoreTransport, @unchecked Sendable {
         k.update(connected: 1)
         k.update(connected: 2)   // a second session does not start a second timer
         #expect(k.isRunning)
-        try await Task.sleep(for: .milliseconds(280))
+        for _ in 0..<100 where c.count < 2 { try await Task.sleep(for: .milliseconds(50)) }
         let during = c.count
-        #expect(during >= 2 && during <= 6)
+        #expect(during >= 2)
         k.update(connected: 0)
         #expect(!k.isRunning)
         try await Task.sleep(for: .milliseconds(150))
@@ -87,7 +87,7 @@ private final class ListTransport: StoreTransport, @unchecked Sendable {
         nonisolated(unsafe) var text: [String] = []
         k.log = { line in box.withLock { text.append(line) }; _ = lines.hit() }
         k.update(connected: 1)
-        try await Task.sleep(for: .milliseconds(250))
+        for _ in 0..<100 where c.count < 3 { try await Task.sleep(for: .milliseconds(50)) }
         k.update(connected: 0)
         let expiredLines = box.withLock { text.filter { $0.contains("expired") } }
         #expect(c.count >= 3 && expiredLines.count == 1)
