@@ -227,7 +227,7 @@ final class SessionController: NSObject {
     /// (test: create a session with another layout).
     static func currentScreens() -> [ScalingScreen] {
         let screens = ProcessInfo.processInfo.environment["ICAVIEWER_SINGLE_SCREEN"] == "1" ? Array(NSScreen.screens.prefix(1)) : NSScreen.screens
-        return screens.map { ScalingScreen(frame: $0.frame, visible: $0.visibleFrame, backingScale: $0.backingScaleFactor) }
+        return screens.map { ScalingScreen(frame: $0.frame, visible: $0.visibleFrame, backingScale: $0.backingScaleFactor, safeTop: $0.safeAreaInsets.top) }
     }
 
     // MARK: Running sessions (Settings offers a reconnect when scaling changed)

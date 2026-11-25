@@ -95,14 +95,28 @@ public struct ScalingScreen: Equatable, Sendable {
     public var frame: CGRect
     public var visible: CGRect
     public var backingScale: CGFloat
-    public init(frame: CGRect, visible: CGRect, backingScale: CGFloat) {
-        self.frame = frame; self.visible = visible; self.backingScale = backingScale
+    /// `NSScreen.safeAreaInsets.top`: the band beside a camera housing, points (0 without a notch).
+    public var safeTop: CGFloat
+    public init(frame: CGRect, visible: CGRect, backingScale: CGFloat, safeTop: CGFloat = 0) {
+        self.frame = frame; self.visible = visible; self.backingScale = backingScale; self.safeTop = safeTop
+    }
+
+    /// The part of the screen a session monitor covers: the frame below the menu bar (and the notch), with its
+    /// top at min(visible top, frame top − safe-area top) (docs/80 §7.1). The whole frame when the menu bar is
+    /// hidden or absent on this screen, as macOS reports it.
+    public var sessionFrame: CGRect {
+        let top = min(frame.maxY, visible.isNull ? frame.maxY : visible.maxY, frame.maxY - max(0, safeTop))
+        guard top > frame.minY else { return frame }
+        return CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: top - frame.minY)
     }
 }
 
 /// One monitor of the session: its Mac screen and its session-pixel rects.
 public struct ScalingMonitor: Equatable, Sendable {
-    /// Screen frame and visible frame, macOS global points.
+    /// The Mac screen it was laid out from.
+    public var screen: ScalingScreen
+    /// The area the monitor covers (the screen's session frame: below the menu bar, docs/80 §7.1, or the whole
+    /// screen in the fallback) and the visible frame, macOS global points. Every point ↔ pixel map uses `frame`.
     public var frame: CGRect
     public var visible: CGRect
     public var backingScale: CGFloat
@@ -152,6 +166,8 @@ public struct ScalingLayout: Equatable, Sendable {
     /// The rule actually used (Auto per screen, or one scale after a fallback).
     public let rule: ScaleRule
     public let note: Note?
+    /// True if the monitors start below the menu bars (docs/80 §7.1); false in the whole-screen fallback.
+    public let belowMenuBar: Bool
 
     /// The one k when all monitors share it.
     public var uniformScale: Int? {
@@ -192,13 +208,14 @@ public struct ScalingLayout: Equatable, Sendable {
     /// k for a backing scale: 2 for Retina (≥ 1.5), else 1.
     public static func autoScale(_ backing: CGFloat) -> Int { backing >= 1.5 ? 2 : 1 }
 
-    private init(monitors: [ScalingMonitor], width: Int, height: Int, settings: ScalingSettings, rule: ScaleRule, note: Note?) {
+    private init(monitors: [ScalingMonitor], width: Int, height: Int, settings: ScalingSettings, rule: ScaleRule, note: Note?,
+                 belowMenuBar: Bool) {
         self.monitors = monitors; self.width = width; self.height = height
-        self.settings = settings; self.rule = rule; self.note = note
+        self.settings = settings; self.rule = rule; self.note = note; self.belowMenuBar = belowMenuBar
     }
 
     private func with(note: Note?) -> ScalingLayout {
-        ScalingLayout(monitors: monitors, width: width, height: height, settings: settings, rule: rule, note: note)
+        ScalingLayout(monitors: monitors, width: width, height: height, settings: settings, rule: rule, note: note, belowMenuBar: belowMenuBar)
     }
 
     private static func windowsPercent(_ w: ScalingSettings.Windows, scale: Int) -> UInt16 {
@@ -210,19 +227,30 @@ public struct ScalingLayout: Equatable, Sendable {
     static func evenDown(_ v: Int) -> Int { v - (v & 1) }
     static func evenUp(_ v: Int) -> Int { v + (v & 1) }
 
-    /// Lays out the screens. Nil if monitors would overlap.
+    /// Lays out the screens: below their menu bars (docs/80 §7.1), or on the whole screens if joining the menu-bar
+    /// strips of stacked screens makes monitors overlap. Nil if monitors would overlap even then (per-screen k).
     static func build(screens: [ScalingScreen], rule: ScaleRule, windows: ScalingSettings.Windows,
                       settings: ScalingSettings) -> ScalingLayout? {
+        build(screens: screens, rule: rule, windows: windows, settings: settings, belowMenuBar: true)
+            ?? build(screens: screens, rule: rule, windows: windows, settings: settings, belowMenuBar: false)
+    }
+
+    /// Top-down point coordinates (y grows downwards from the union's top).
+    struct Edges { var left, top, right, bottom: CGFloat }
+
+    static func build(screens: [ScalingScreen], rule: ScaleRule, windows: ScalingSettings.Windows,
+                      settings: ScalingSettings, belowMenuBar: Bool) -> ScalingLayout? {
         let ks: [Int] = screens.map {
             switch rule {
             case .perScreen: return autoScale($0.backingScale)
             case .uniform(let k): return max(1, k)
             }
         }
-        // Top-down point coordinates (y grows downwards from the union's top).
-        let refY = screens.map(\.frame.maxY).max()!
-        struct R { var left, top, right, bottom: CGFloat }
-        let rects = screens.map { R(left: $0.frame.minX, top: refY - $0.frame.maxY, right: $0.frame.maxX, bottom: refY - $0.frame.minY) }
+        let frames = screens.map { belowMenuBar ? $0.sessionFrame : $0.frame }
+        // Menu-bar strip of each screen: between its frame's top and its session frame's top.
+        let strips = screens.indices.map { screens[$0].frame.maxY - frames[$0].maxY }
+        let refY = frames.map(\.maxY).max()!
+        let rects = frames.map { Edges(left: $0.minX, top: refY - $0.maxY, right: $0.maxX, bottom: refY - $0.minY) }
         // Transform per screen: px = offset + p · k.
         var offsets = [CGPoint?](repeating: nil, count: screens.count)
         func apply(_ i: Int, _ p: CGPoint) -> CGPoint {
@@ -235,13 +263,11 @@ public struct ScalingLayout: Equatable, Sendable {
         var queue = [0]
         while !queue.isEmpty {
             let i = queue.removeFirst()
-            let a = rects[i]
             for j in screens.indices where offsets[j] == nil {
-                let b = rects[j]
-                guard let anchor = sharedEdgeAnchor(a.left, a.top, a.right, a.bottom, b.left, b.top, b.right, b.bottom) else { continue }
-                // Neighbour: its anchor lands where the parent maps it, then it scales about the anchor.
-                let mapped = apply(i, anchor), kj = CGFloat(ks[j])
-                offsets[j] = CGPoint(x: mapped.x - anchor.x * kj, y: mapped.y - anchor.y * kj)
+                guard let anchor = sharedEdgeAnchor(rects[i], strip: strips[i], rects[j], strip: strips[j]) else { continue }
+                // Neighbour: its anchor lands where the parent maps its side of the edge, then it scales about the anchor.
+                let mapped = apply(i, anchor.parent), kj = CGFloat(ks[j])
+                offsets[j] = CGPoint(x: mapped.x - anchor.child.x * kj, y: mapped.y - anchor.child.y * kj)
                 queue.append(j)
             }
         }
@@ -256,14 +282,22 @@ public struct ScalingLayout: Equatable, Sendable {
             let br = apply(i, CGPoint(x: rects[i].right, y: rects[i].bottom))
             return (Int(tl.x.rounded(.down)), Int(tl.y.rounded(.down)), Int(br.x.rounded(.down)), Int(br.y.rounded(.down)))
         }
-        // Shift so the bounding box starts at 0,0, then move every edge to an even value (§1.5).
+        // Shift so the bounding box starts at 0,0, then move every edge to an even value (§1.5): down, except a top
+        // under a menu bar with no monitor above it, which moves down into the screen (up to even), so the bounds
+        // never reach into the menu bar (docs/80 §7.1).
         let minX = raw.map(\.l).min()!, minY = raw.map(\.t).min()!
+        func hasAbove(_ i: Int) -> Bool {
+            raw.indices.contains { j in
+                j != i && abs(raw[j].b - raw[i].t) <= 1 && min(raw[j].r, raw[i].r) > max(raw[j].l, raw[i].l)
+            }
+        }
         var monitors: [ScalingMonitor] = []
         for (i, s) in screens.enumerated() {
             let r = raw[i]
-            let bounds = TWIRect(left: Int32(evenDown(r.l - minX)), top: Int32(evenDown(r.t - minY)),
+            let top = strips[i] > 0 && !hasAbove(i) ? evenUp(r.t - minY) : evenDown(r.t - minY)
+            let bounds = TWIRect(left: Int32(evenDown(r.l - minX)), top: Int32(top),
                                  right: Int32(evenDown(r.r - minX)), bottom: Int32(evenDown(r.b - minY)))
-            var m = ScalingMonitor(frame: s.frame, visible: s.visible, backingScale: s.backingScale, scale: ks[i],
+            var m = ScalingMonitor(screen: s, frame: frames[i], visible: s.visible, backingScale: s.backingScale, scale: ks[i],
                                    windowsPercent: windowsPercent(windows, scale: ks[i]), bounds: bounds, workArea: bounds,
                                    origin: CGPoint(x: r.l - minX, y: r.t - minY))
             m.workArea = workArea(of: m)
@@ -273,14 +307,17 @@ public struct ScalingLayout: Equatable, Sendable {
             for j in monitors.indices where j > i && overlaps(monitors[i].bounds, monitors[j].bounds) { return nil }
         }
         let width = monitors.map { Int($0.bounds.right) }.max()!, height = monitors.map { Int($0.bounds.bottom) }.max()!
-        return ScalingLayout(monitors: monitors, width: evenDown(width), height: evenDown(height), settings: settings, rule: rule, note: nil)
+        return ScalingLayout(monitors: monitors, width: evenDown(width), height: evenDown(height), settings: settings, rule: rule,
+                             note: nil, belowMenuBar: belowMenuBar)
     }
 
-    /// Anchor on the edge two screens share (within 1 pt, overlapping along it), top-down coordinates.
-    /// Along the edge it is the aligned end if the screens are aligned there (top/left first, then
-    /// bottom/right), else the start of the overlap (docs/80 §1.6 step 1; the choice is ours, [I]).
-    static func sharedEdgeAnchor(_ al: CGFloat, _ at: CGFloat, _ ar: CGFloat, _ ab: CGFloat,
-                                 _ bl: CGFloat, _ bt: CGFloat, _ br: CGFloat, _ bb: CGFloat) -> CGPoint? {
+    /// Anchor on the edge two screens share (within 1 pt, overlapping along it), top-down coordinates; `a` is the
+    /// parent, already placed. Along the edge it is the aligned end if the screens are aligned there (top/left
+    /// first, then bottom/right), else the start of the overlap (docs/80 §1.6 step 1; the choice is ours, [I]).
+    /// `strip`: the menu-bar strip above each rect (its whole screen starts that much higher). A screen above or
+    /// below is a neighbour by its whole frame and is joined at the first row below the lower screen's menu bar,
+    /// so the strip leaves no gap (docs/80 §7.1): then the parent's and the child's anchor points differ.
+    static func sharedEdgeAnchor(_ a: Edges, strip sa: CGFloat, _ b: Edges, strip sb: CGFloat) -> (parent: CGPoint, child: CGPoint)? {
         func along(_ a0: CGFloat, _ a1: CGFloat, _ b0: CGFloat, _ b1: CGFloat) -> CGFloat? {
             let lo = max(a0, b0), hi = min(a1, b1)
             guard hi - lo > 0 else { return nil }
@@ -288,10 +325,15 @@ public struct ScalingLayout: Equatable, Sendable {
             if abs(a1 - b1) <= 1 { return hi }
             return lo
         }
-        if abs(ar - bl) <= 1, let y = along(at, ab, bt, bb) { return CGPoint(x: bl, y: y) }   // b right of a
-        if abs(br - al) <= 1, let y = along(at, ab, bt, bb) { return CGPoint(x: br, y: y) }   // b left of a
-        if abs(ab - bt) <= 1, let x = along(al, ar, bl, br) { return CGPoint(x: x, y: bt) }   // b below a
-        if abs(bb - at) <= 1, let x = along(al, ar, bl, br) { return CGPoint(x: x, y: bb) }   // b above a
+        func same(_ p: CGPoint) -> (parent: CGPoint, child: CGPoint) { (p, p) }
+        if abs(a.right - b.left) <= 1, let y = along(a.top, a.bottom, b.top, b.bottom) { return same(CGPoint(x: b.left, y: y)) }   // b right of a
+        if abs(b.right - a.left) <= 1, let y = along(a.top, a.bottom, b.top, b.bottom) { return same(CGPoint(x: b.right, y: y)) } // b left of a
+        if abs(a.bottom - (b.top - sb)) <= 1, let x = along(a.left, a.right, b.left, b.right) {                                    // b below a
+            return (CGPoint(x: x, y: a.bottom), CGPoint(x: x, y: b.top))
+        }
+        if abs(b.bottom - (a.top - sa)) <= 1, let x = along(a.left, a.right, b.left, b.right) {                                    // b above a
+            return (CGPoint(x: x, y: a.top), CGPoint(x: x, y: b.bottom))
+        }
         return nil
     }
 
@@ -481,7 +523,7 @@ public struct ScalingLayout: Equatable, Sendable {
     /// others map through the primary monitor's scale and are clipped to the session (dropped if they
     /// end up empty or overlapping).
     public func keepingSession(screens input: [ScalingScreen]) -> ScalingLayout {
-        let screens = input.isEmpty ? monitors.map { ScalingScreen(frame: $0.frame, visible: $0.visible, backingScale: $0.backingScale) } : input
+        let screens = input.isEmpty ? monitors.map(\.screen) : input
         if let same = Self.build(screens: screens, rule: rule, windows: settings.windows, settings: settings),
            same.width == width, same.height == height {
             return same.with(note: note)
@@ -491,26 +533,28 @@ public struct ScalingLayout: Equatable, Sendable {
         var list: [ScalingMonitor] = []
         for s in screens {
             var m: ScalingMonitor
-            if let old = monitors.first(where: { $0.frame == s.frame }) {
+            let area = belowMenuBar ? s.sessionFrame : s.frame
+            if let old = monitors.first(where: { $0.frame == area }) {
                 m = old
+                m.screen = s
                 m.visible = s.visible
                 m.backingScale = s.backingScale
             } else {
                 let k = CGFloat(primary.scale)
-                let l = Int((primary.origin.x + (s.frame.minX - primary.frame.minX) * k).rounded(.down))
-                let t = Int((primary.origin.y + (primary.frame.maxY - s.frame.maxY) * k).rounded(.down))
+                let l = Int((primary.origin.x + (area.minX - primary.frame.minX) * k).rounded(.down))
+                let t = Int((primary.origin.y + (primary.frame.maxY - area.maxY) * k).rounded(.down))
                 let full = TWIRect(left: Int32(Self.evenDown(l)), top: Int32(Self.evenDown(t)),
-                                   right: Int32(Self.evenDown(l + Int((s.frame.width * k).rounded(.down)))),
-                                   bottom: Int32(Self.evenDown(t + Int((s.frame.height * k).rounded(.down)))))
+                                   right: Int32(Self.evenDown(l + Int((area.width * k).rounded(.down)))),
+                                   bottom: Int32(Self.evenDown(t + Int((area.height * k).rounded(.down)))))
                 // The map stays anchored at the unclipped top-left: shift the frame by what clipping removed.
                 let clipped = TWIRect(left: max(full.left, 0), top: max(full.top, 0),
                                       right: min(full.right, session.right), bottom: min(full.bottom, session.bottom))
                 guard clipped.width > 0, clipped.height > 0 else { continue }
                 let dx = CGFloat(clipped.left - full.left) / k, dy = CGFloat(clipped.top - full.top) / k
-                let frame = CGRect(x: s.frame.minX + dx, y: s.frame.maxY - dy - CGFloat(clipped.height) / k,
+                let frame = CGRect(x: area.minX + dx, y: area.maxY - dy - CGFloat(clipped.height) / k,
                                    width: CGFloat(clipped.width) / k, height: CGFloat(clipped.height) / k)
                 let visible = s.visible.intersection(frame)
-                m = ScalingMonitor(frame: frame, visible: visible.isNull ? frame : visible, backingScale: s.backingScale,
+                m = ScalingMonitor(screen: s, frame: frame, visible: visible.isNull ? frame : visible, backingScale: s.backingScale,
                                    scale: primary.scale, windowsPercent: primary.windowsPercent, bounds: clipped, workArea: clipped,
                                    origin: CGPoint(x: l + Int(clipped.left - full.left), y: t + Int(clipped.top - full.top)))
             }
@@ -519,16 +563,19 @@ public struct ScalingLayout: Equatable, Sendable {
             list.append(m)
         }
         if list.isEmpty { list = [primary] }
-        return ScalingLayout(monitors: list, width: width, height: height, settings: settings, rule: rule, note: note)
+        return ScalingLayout(monitors: list, width: width, height: height, settings: settings, rule: rule, note: note, belowMenuBar: belowMenuBar)
     }
 
     // MARK: Logging
 
     /// One line per monitor plus the session size and limits.
     public var logLines: [String] {
-        var lines = ["scaling: settings \(settings); session \(width)x\(height) px; limits: \(ScalingLimits.summary)"]
+        var lines = ["scaling: settings \(settings); session \(width)x\(height) px; limits: \(ScalingLimits.summary); monitors: "
+                     + (belowMenuBar ? "below the menu bar" : "whole screens (joining the menu bar strips would overlap)")]
         for (i, m) in monitors.enumerated() {
-            lines.append("scaling: monitor \(i): \(Int(m.frame.minX)),\(Int(m.frame.minY)) \(Int(m.frame.width))x\(Int(m.frame.height)) pt, backing \(m.backingScale)"
+            let s = m.screen.frame, strip = Int((s.maxY - m.frame.maxY).rounded())
+            lines.append("scaling: monitor \(i): \(Int(s.minX)),\(Int(s.minY)) \(Int(s.width))x\(Int(s.height)) pt"
+                         + (strip != 0 ? " minus \(strip) pt menu bar" : "") + ", backing \(m.backingScale)"
                          + " → \(m.scale)x, Windows \(m.windowsPercent) %, px \(m.bounds.left),\(m.bounds.top) \(m.bounds.width)x\(m.bounds.height),"
                          + " work \(m.workArea.left),\(m.workArea.top) \(m.workArea.width)x\(m.workArea.height)")
         }
