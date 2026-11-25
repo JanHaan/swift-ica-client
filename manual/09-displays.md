@@ -21,6 +21,10 @@ Scaling applies when a session connects. If you change it while a session is ope
 
 Remote windows can be on any of your screens. ICA Viewer reports all your screens to the server when a session connects, so a window can be moved from one screen to another. If you plug in or remove a screen later, reconnect the session so the server learns about the new layout.
 
+## The menu bar
+
+To the server, each of your screens starts below the Mac menu bar. A Windows app in full screen (for example Remote Desktop Connection, a slide show, or a browser in full-screen mode) therefore fills the space below the menu bar, and bars at its top edge stay clickable. If the menu bar is set to hide automatically, the whole screen height is used. A change to that setting applies from the next time you connect.
+
 ## Slow connections
 
 **Compress screen data** (in **Settings > Display**) asks the server to compress what it sends. It is on by default and typically reduces the data to about a quarter. The change applies from the next time you connect.
